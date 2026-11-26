@@ -2792,6 +2792,13 @@ impl Creblox {
 
             if self.app_update_downloading {
                 ui.add_space(10.0);
+                ui.label(
+                    RichText::new("Downloading update...")
+                        .size(12.5)
+                        .strong()
+                        .color(p.text),
+                );
+                ui.add_space(4.0);
                 let (done, total) = self
                     .app_update_progress
                     .as_ref()
@@ -2818,6 +2825,45 @@ impl Creblox {
                         .animate(true)
                         .corner_radius(6),
                 );
+            } else if let Some(progress) = self.app_update_install.clone() {
+                ui.add_space(10.0);
+                let stage = progress.stage();
+                ui.label(
+                    RichText::new(stage.label())
+                        .size(12.5)
+                        .strong()
+                        .color(p.text),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::ProgressBar::new(0.0)
+                        .animate(true)
+                        .corner_radius(6)
+                        .text("Updating CREBLOX"),
+                );
+                ui.add_space(4.0);
+                let log = progress.log();
+                let count = log.lock().map(|lines| lines.len()).unwrap_or(0);
+                egui::CollapsingHeader::new(format!("Details ({count} lines)"))
+                    .id_salt("creblox_update_details")
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("creblox_update_log")
+                            .max_height(170.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                if let Ok(lines) = log.lock() {
+                                    for line in lines.iter() {
+                                        ui.label(
+                                            RichText::new(line)
+                                                .monospace()
+                                                .size(11.0)
+                                                .color(p.muted),
+                                        );
+                                    }
+                                }
+                            });
+                    });
             } else if let Some(rel) = self.app_update_available.clone() {
                 ui.add_space(10.0);
                 let is_patch = rel.kind == UpdateKind::Patch && rel.zip_url.is_none();
@@ -2867,7 +2913,7 @@ impl Creblox {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if downloaded {
+                                    if downloaded && !self.app_update_installing {
                                         if ui
                                             .add(
                                                 egui::Button::new(
@@ -2883,7 +2929,7 @@ impl Creblox {
                                                 .corner_radius(7),
                                             )
                                             .on_hover_text(
-                                                "Builds the downloaded update in Terminal, then reopens the launcher",
+                                                "Builds the update inside CREBLOX, then reopens the launcher",
                                             )
                                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                                             .clicked()

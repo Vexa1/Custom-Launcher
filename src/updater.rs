@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -613,30 +613,105 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
-fn launch_installer(script: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let path = script.to_string_lossy().into_owned();
-        let opened = Command::new("/usr/bin/open")
-            .args(["-a", "Terminal", &path])
-            .status();
-        if opened.is_ok_and(|status| status.success()) {
-            return Ok(());
-        }
-    }
-    Command::new("/bin/bash")
-        .arg(script)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Could not start the update installer: {e}"))
+/// Stages the silent in-app update reports to the window. The UI draws the bar and the
+/// streamed log from this, so updating never opens a Terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateStage {
+    Extracting,
+    Installing,
+    Restarting,
 }
 
-/// Extracts an update zip, copies it over the source folder and launches the normal
-/// macOS update script (which rebuilds, quits the old app and reopens the new one).
-pub fn install_update_zip(zip: &Path, version: &str) -> Result<(), String> {
+impl UpdateStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            UpdateStage::Extracting => "Extracting...",
+            UpdateStage::Installing => "Installing...",
+            UpdateStage::Restarting => "Restarting CREBLOX...",
+        }
+    }
+}
+
+/// Shared between the update thread and the UI; every field is an `Arc`, so cloning is cheap.
+#[derive(Clone)]
+pub struct UpdateProgress {
+    stage: Arc<Mutex<UpdateStage>>,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl Default for UpdateProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UpdateProgress {
+    pub fn new() -> Self {
+        Self {
+            stage: Arc::new(Mutex::new(UpdateStage::Extracting)),
+            log: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn stage(&self) -> UpdateStage {
+        self.stage
+            .lock()
+            .map(|stage| *stage)
+            .unwrap_or(UpdateStage::Extracting)
+    }
+
+    pub fn set_stage(&self, stage: UpdateStage, ctx: &egui::Context) {
+        if let Ok(mut slot) = self.stage.lock() {
+            *slot = stage;
+        }
+        ctx.request_repaint();
+    }
+
+    /// The lines shown in the collapsible Details box.
+    pub fn log(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.log)
+    }
+
+    fn push(&self, line: impl AsRef<str>, ctx: &egui::Context) {
+        let line = line.as_ref().trim_end().to_string();
+        if line.is_empty() {
+            return;
+        }
+        if let Ok(mut lines) = self.log.lock() {
+            if lines.len() >= 400 {
+                lines.remove(0);
+            }
+            lines.push(line.clone());
+        }
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(crate::auth::data_dir().join("update.log"))
+        {
+            let _ = writeln!(file, "{line}");
+        }
+        ctx.request_repaint();
+    }
+}
+
+/// Replaces the old "open Terminal and run a generated script" installer: extract, copy,
+/// build and a detached swap-and-reopen all happen with piped stdio, on the caller's thread.
+pub fn install_update_in_app(
+    zip: &Path,
+    version: &str,
+    progress: &UpdateProgress,
+    ctx: &egui::Context,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("The silent self-update is macOS-only.".to_string());
+    }
     let source = source_folder().ok_or_else(|| {
-        "Could not find the app source folder. Use Download in Browser / Releases once.".to_string()
+        "Could not find the app source folder. Use Download in Browser / Releases once."
+            .to_string()
     })?;
+    preflight(&source)?;
+
+    progress.set_stage(UpdateStage::Extracting, ctx);
     let staging = updates_dir().join(format!("extract-{version}"));
     if staging.exists() {
         fs::remove_dir_all(&staging)
@@ -644,77 +719,271 @@ pub fn install_update_zip(zip: &Path, version: &str) -> Result<(), String> {
     }
     fs::create_dir_all(&staging)
         .map_err(|e| format!("Could not create the update staging folder: {e}"))?;
+    progress.push(format!("Extracting CREBLOX {version}."), ctx);
     extract_update_zip(zip, &staging)?;
     let root = find_update_root(&staging, 2)
         .ok_or_else(|| "The update zip does not contain an app source folder.".to_string())?;
 
-    let script = updates_dir().join(format!("install-{version}.sh"));
-    let log_path = crate::auth::data_dir().join("update.log");
-    // Output goes to the terminal *and* the log. Redirecting everything into the log made
-    // the installer look frozen for the whole build, and a failure closed the window with
-    // nothing on screen - the user could not tell waiting from broken.
-    let body = format!(
-        "#!/bin/bash\n\
-         set -euo pipefail\n\
-         export PATH=\"$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
-         LOG={log}\n\
-         SRC={source}\n\
-         FROM={root}\n\
-         {{\n\
-         echo \"==> Installing CREBLOX {version}\"\n\
-         echo \"    Building now; a copy of this output goes to: $LOG\"\n\
-         if ! command -v cargo >/dev/null 2>&1; then\n\
-         echo \"error: cargo was not found, so CREBLOX cannot be rebuilt.\" >&2\n\
-         echo \"       Install Rust from https://rustup.rs and run the update again.\" >&2\n\
-         exit 1\n\
-         fi\n\
-         if ! cargo --version >/dev/null 2>&1; then\n\
-         echo \"error: cargo is installed but will not run (no default toolchain).\" >&2\n\
-         echo \"       Run: rustup default stable\" >&2\n\
-         exit 1\n\
-         fi\n\
-         if [ ! -d \"$FROM\" ]; then\n\
-         echo \"error: the downloaded update files are missing: $FROM\" >&2\n\
-         echo \"       Download the update again from the release page.\" >&2\n\
-         exit 1\n\
-         fi\n\
-         if [ ! -d \"$SRC\" ]; then\n\
-         echo \"error: the CREBLOX source folder is missing: $SRC\" >&2\n\
-         echo \"       Install CREBLOX from the full archive once, then update again.\" >&2\n\
-         exit 1\n\
-         fi\n\
-         if [ ! -f \"$SRC/Cargo.toml\" ] || [ ! -f \"$SRC/scripts/update-macos.sh\" ]; then\n\
-         echo \"error: $SRC is missing Cargo.toml or scripts/update-macos.sh,\" >&2\n\
-         echo \"       so it is not a CREBLOX source folder.\" >&2\n\
-         exit 1\n\
-         fi\n\
-         if [ ! -w \"$SRC\" ] || [ ! -w \"$SRC/scripts\" ] || [ ! -w \"$SRC/Cargo.toml\" ]; then\n\
-         echo \"error: the CREBLOX source folder is not writable: $SRC\" >&2\n\
-         echo \"       The update replaces src/, scripts/ and Cargo.toml there.\" >&2\n\
-         echo \"       Move the folder into your home folder, or fix its permissions.\" >&2\n\
-         exit 1\n\
-         fi\n\
-         cp -R \"$FROM\"/. \"$SRC\"/\n\
-         cd \"$SRC\"\n\
-         bash scripts/update-macos.sh\n\
-         }} 2>&1 | tee -a \"$LOG\" || status=$?\n\
-         if [ \"${{status:-0}}\" -ne 0 ]; then\n\
-         echo\n\
-         echo \"Update failed (exit $status). Full log: $LOG\"\n\
-         read -n 1 -s -r -p \"Press any key to close this window...\" || true\n\
-         fi\n",
-        log = shell_quote(&log_path),
-        root = shell_quote(&root),
-        source = shell_quote(&source),
-        version = version,
-    );
-    fs::write(&script, body).map_err(|e| format!("Could not write the update installer: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&script, fs::Permissions::from_mode(0o755));
+    progress.set_stage(UpdateStage::Installing, ctx);
+    progress.push(format!("Copying the update into {}.", source.display()), ctx);
+    copy_tree(&root, &source)?;
+    apply_removals(&source, progress, ctx);
+
+    progress.push("Building CREBLOX. This is the slow part...", ctx);
+    let cargo = cargo_binary().ok_or_else(|| {
+        "cargo was not found, so CREBLOX cannot be rebuilt. Install Rust from https://rustup.rs and update again.".to_string()
+    })?;
+    let status = run_streamed(
+        Path::new("/bin/bash"),
+        &["scripts/build-macos-app.sh"],
+        &source,
+        progress,
+        ctx,
+        &[("NO_INSTALL", "1")],
+        Some(&cargo),
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "The build failed (exit {}). Open Details for the output.",
+            status.code().unwrap_or(-1)
+        ));
     }
-    launch_installer(&script)
+
+    let built = source.join("dist/CREBLOX.app");
+    if !built.is_dir() {
+        return Err("The build finished but dist/CREBLOX.app is missing.".to_string());
+    }
+
+    progress.set_stage(UpdateStage::Restarting, ctx);
+    progress.push(
+        "The new build is ready; replacing CREBLOX and reopening it.",
+        ctx,
+    );
+    spawn_relaunch_waiter(std::process::id(), &built)
+}
+
+/// Fails before touching anything, with a sentence the window can show.
+fn preflight(source: &Path) -> Result<(), String> {
+    for needed in ["Cargo.toml", "scripts/build-macos-app.sh"] {
+        if !source.join(needed).is_file() {
+            return Err(format!(
+                "The CREBLOX source folder is missing {needed}. Install from the full archive once, then update again."
+            ));
+        }
+    }
+    let probe = source.join(".creblox-write-test");
+    if let Err(e) = fs::write(&probe, b"ok") {
+        return Err(format!(
+            "The CREBLOX source folder is not writable ({}): {e}",
+            source.display()
+        ));
+    }
+    let _ = fs::remove_file(&probe);
+    let cargo = cargo_binary().ok_or_else(|| {
+        "cargo was not found, so CREBLOX cannot be rebuilt. Install Rust from https://rustup.rs and update again.".to_string()
+    })?;
+    let probe = Command::new(&cargo)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cargo will not run: {e}"))?;
+    if !probe.status.success() {
+        return Err(
+            "cargo is installed but will not run (no default toolchain). Run: rustup default stable"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// A GUI-launched app has a minimal PATH, so cargo is looked up where it is installed.
+fn cargo_binary() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".cargo/bin/cargo"));
+    }
+    candidates.push(PathBuf::from("/opt/homebrew/bin/cargo"));
+    candidates.push(PathBuf::from("/usr/local/bin/cargo"));
+    if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+        return Some(path);
+    }
+    let out = Command::new("/bin/sh")
+        .args(["-c", "command -v cargo"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Copies a staged tree over the source folder; deletions are the removal list's job.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|e| format!("Could not create {}: {e}", to.display()))?;
+    let entries = fs::read_dir(from).map_err(|e| format!("Could not read {}: {e}", from.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        if name == ".DS_Store" {
+            continue;
+        }
+        let src = entry.path();
+        let dst = to.join(&name);
+        if src.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst).map_err(|e| format!("Could not copy {}: {e}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `creblox-update-remove.txt` lists paths this version no longer ships.
+fn apply_removals(source: &Path, progress: &UpdateProgress, ctx: &egui::Context) {
+    let Ok(list) = fs::read_to_string(source.join("creblox-update-remove.txt")) else {
+        return;
+    };
+    for line in list.lines() {
+        let rel = line.trim();
+        if rel.is_empty() || rel.starts_with('#') {
+            continue;
+        }
+        let target = source.join(rel);
+        if !target.exists() {
+            continue;
+        }
+        let removed = if target.is_dir() {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+        if removed.is_ok() {
+            progress.push(format!("Removed {rel}."), ctx);
+        }
+    }
+}
+
+/// Runs a command with no controlling terminal, streaming both pipes into the Details log.
+fn run_streamed(
+    program: &Path,
+    args: &[&str],
+    dir: &Path,
+    progress: &UpdateProgress,
+    ctx: &egui::Context,
+    env: &[(&str, &str)],
+    cargo: Option<&Path>,
+) -> Result<std::process::ExitStatus, String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut path = format!(
+        "{home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    );
+    if let Some(bin) = cargo.and_then(|cargo| cargo.parent()) {
+        path = format!("{}:{path}", bin.display());
+    }
+    cmd.env("PATH", path);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not start {}: {e}", program.display()))?;
+    let mut readers = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        readers.push(stream_reader(pipe, progress, ctx));
+    }
+    if let Some(pipe) = child.stderr.take() {
+        readers.push(stream_reader(pipe, progress, ctx));
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("The installer stopped unexpectedly: {e}"))?;
+    for reader in readers {
+        let _ = reader.join();
+    }
+    Ok(status)
+}
+
+/// One pipe, one thread: stdout and stderr are read in parallel so neither buffer can fill
+/// and stall the build while the other is being drained.
+fn stream_reader(
+    pipe: impl std::io::Read + Send + 'static,
+    progress: &UpdateProgress,
+    ctx: &egui::Context,
+) -> thread::JoinHandle<()> {
+    let progress = progress.clone();
+    let ctx = ctx.clone();
+    thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(pipe).lines() {
+            match line {
+                Ok(line) => progress.push(line, &ctx),
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+/// Install target, matching `scripts/build-macos-app.sh`.
+fn install_destination() -> PathBuf {
+    let system = PathBuf::from("/Applications");
+    if system.is_dir() && is_writable(&system) {
+        system.join("CREBLOX.app")
+    } else {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        home.join("Applications/CREBLOX.app")
+    }
+}
+
+fn is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".creblox-write-test");
+    match fs::write(&probe, b"ok") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Waits for this process to exit, swaps the bundle and reopens it. Detached, every standard
+/// stream on /dev/null: nothing pops up, and nothing keeps the closing window alive.
+fn spawn_relaunch_waiter(old_pid: u32, built: &Path) -> Result<(), String> {
+    let dest_path = install_destination();
+    let staged_path = dest_path.with_extension("app.new");
+    let built = shell_quote(built);
+    let dest = shell_quote(&dest_path);
+    let staged = shell_quote(&staged_path);
+    // Staged swap: the new bundle is copied in full before the old one is removed, and any
+    // failure stops the script, so a bad copy can never leave the user without an app.
+    let script = format!(
+        "set -e\n\
+         while /bin/kill -0 {old_pid} 2>/dev/null; do sleep 0.4; done\n\
+         /bin/mkdir -p \"$(/usr/bin/dirname {dest})\"\n\
+         /bin/rm -rf {staged}\n\
+         /usr/bin/ditto {built} {staged}\n\
+         /bin/rm -rf {dest}\n\
+         /bin/mv {staged} {dest}\n\
+         /usr/bin/open -n {dest}\n"
+    );
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Could not schedule the restart: {e}"))
 }
 
 fn companion_path(exe: &Path, suffix: &str) -> Result<PathBuf, String> {

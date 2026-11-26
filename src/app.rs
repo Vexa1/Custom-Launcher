@@ -159,6 +159,8 @@ pub struct Creblox {
     pub app_update_progress: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
     pub app_update_zip: Option<PathBuf>,
     pub app_update_installing: bool,
+    /// Live stage and streamed output of the in-app installer (no Terminal window).
+    pub app_update_install: Option<crate::updater::UpdateProgress>,
     pub app_update_error: Option<String>,
     pub update_token_input: String,
     pub update_token_saved: bool,
@@ -472,6 +474,7 @@ impl Creblox {
             app_update_progress: None,
             app_update_zip: None,
             app_update_installing: false,
+            app_update_install: None,
             app_update_error: None,
             update_token_input: String::new(),
             update_token_saved: crate::updater::has_github_update_token(),
@@ -739,21 +742,20 @@ impl Creblox {
             return;
         };
         self.app_update_error = None;
-        self.app_update_status = Some(format!("Starting the v{version} installer..."));
-        match crate::updater::install_update_zip(&zip, &version) {
-            Ok(()) => {
-                self.app_update_installing = true;
-                self.status = format!("Installing v{version} in Terminal...");
-                self.allow_close_exit = true;
-                self.tray.shutdown();
-                self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            Err(e) => {
-                self.app_update_error = Some(e.clone());
-                self.app_update_status = None;
-                self.status = format!("Update install failed: {e}");
-            }
-        }
+        self.app_update_installing = true;
+        self.app_update_status = Some(format!("Installing v{version}..."));
+        self.status = format!("Installing CREBLOX v{version}...");
+        // The installer runs here, with piped stdio. The window draws the stage, a progress
+        // bar and the streamed output, and closes itself only once the build is done.
+        let progress = crate::updater::UpdateProgress::new();
+        self.app_update_install = Some(progress.clone());
+        let ctx = self.ctx.clone();
+        self.spawn(move || {
+            Msg::AppInstallDone(
+                version.clone(),
+                crate::updater::install_update_in_app(&zip, &version, &progress, &ctx),
+            )
+        });
     }
 
     pub fn save_update_token(&mut self) {
@@ -3143,6 +3145,22 @@ impl Creblox {
                         }
                     }
                 }
+                Msg::AppInstallDone(ver, res) => match res {
+                    Ok(()) => {
+                        self.app_update_status =
+                            Some(format!("Restarting CREBLOX v{ver}..."));
+                        self.status = "Update installed - restarting CREBLOX...".to_string();
+                        self.allow_close_exit = true;
+                        self.tray.shutdown();
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Err(e) => {
+                        self.app_update_installing = false;
+                        self.app_update_error = Some(e.clone());
+                        self.app_update_status = None;
+                        self.status = format!("Update failed: {e}");
+                    }
+                },
                 Msg::AppPatchDone(ver, res) => {
                     self.app_update_downloading = false;
                     match res {

@@ -1022,6 +1022,7 @@ pub enum Msg {
     UpdateCheckResult(bool, Result<Option<(String, String)>, String>),
     AppUpdateCheckResult(bool, Result<Option<crate::updater::CrebloxRelease>, String>),
     AppUpdateDownloaded(String, Result<std::path::PathBuf, String>),
+    AppInstallDone(String, Result<(), String>),
     AppPatchDone(
         String,
         Result<
