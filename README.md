@@ -125,8 +125,8 @@ Everything listed here exists in the code today. File references point at the im
 | **Launch at login** (`set_startup`) | Writes a login item/LaunchAgent for the resolved bundle path. |
 | **Discord Rich Presence** (`discord_rpc.rs`) | A hand-written Discord IPC client (Unix socket / named pipe, 8-byte frame header, `SET_ACTIVITY`), so no `discord-rich-presence` dependency. Shows the game being played; default app id `1005469189907173486`, overridable in Settings. |
 | **Notifications** (`ui/notifications.rs`, `auth.rs:730-745`) | Roblox notifications, friend requests and system alerts, with unread badges on the nav rail, top-centre toast popups, a "silent" mode and a `seen_notifications.json` ledger. The page also shows two status cards (Roblox API health, background Roblox processes). |
-| **Auto-update** (`updater.rs`) | Checks `api.github.com/repos/Vexa1/Custom-Launcher/releases/latest` at startup and every 6 h; verifies the asset's GitHub SHA-256 digest; installs macOS by swapping the whole `.app` (keeping the previous bundle as `*.app.old`) and Windows with patch/full modes; the release notes' first line becomes the in-app notice. **The release contract lives in `RELEASING.md` — read it before publishing.** |
-| **Live `hotfix.json`** (`updater.rs`) | An optional release asset that pushes FastFlag overrides to every client without shipping a build. |
+| **Updates** | Manual, from GitHub Releases: download `CREBLOX-<version>-update.zip` and double-click **`Update CREBLOX.command`**, which rebuilds your source folder in place and keeps settings, logins, playtime and FastFlags. See *Updating an existing install* under building. Nothing in the app contacts the network to look for updates. |
+| **Live `hotfix.json`** (`updater.rs`) | Dormant with the rest of the update subsystem: no client fetches it. |
 | **Theme packs** (`ui/page_settings.rs:37-110`) | Light, Dark, Mint, Rose, Ocean, Sand, plus fully custom: background (theme default / solid colour / wallpaper with drag-and-drop image and dim overlay), text colour mode, per-surface border colours, corner roundness, and the "Liquid Glass" edition (opacity + highlight), all persisted. |
 | **Animations toggle** | Global: `animation_time = 0` in egui plus the page cross-fade is skipped. |
 | **Logging** (`auth.rs:55-80`) | `log.txt` in the data folder; the UI can open the folder from Settings. |
@@ -239,6 +239,29 @@ hard-codes a colour for a themed surface.
 
 ---
 
+### Updating an existing install (manual)
+
+Updates are pulled from GitHub by hand — that is the supported path today.
+
+1. Open **Releases** and download the *quick update* archive for the version you want
+   (`CREBLOX-<version>-update.zip`). The notes list it first with its size and SHA-256;
+   check it with `shasum -a 256 CREBLOX-<version>-update.zip`.
+2. Double-click **`Update CREBLOX.command`** inside the unzipped folder. It locates your
+   source folder (the one holding `build.rs` and `name = "creblox"` in `Cargo.toml`),
+   copies the changed files into it, rebuilds, and replaces the installed `.app`.
+   `settings.json`, saved accounts, playtime and FastFlags are kept.
+3. It remembers the folder in `~/Library/Application Support/CREBLOX/source-folder`. If
+   that pointer is missing it searches Desktop, Documents, Downloads and Developer, and
+   otherwise asks you to pick the folder.
+
+On a machine that has never run CREBLOX, use the *full build* archive and double-click
+**`Build CREBLOX.command`** instead.
+
+The in-app updater is **not** part of this flow. `src/updater.rs`, the update window and
+their call sites are dormant: leave them untouched while working on the app, and they will
+be deleted in a future release. Old `settings.json` files may still carry the update-token
+and `auto_check_updates` keys; they are accepted and ignored.
+
 ## 4. Data and configuration paths (macOS)
 
 Everything CREBLOX owns lives in **`~/Library/Application Support/CREBLOX/`** (`auth::data_dir`;
@@ -277,7 +300,7 @@ Source of truth: `types.rs::Settings`. All fields are optional on read.
 |---|---|
 | Appearance | `dark`, `bg_mode` (`theme_default`/`solid_color`/`wallpaper`), `bg_color: [r,g,b]`, `bg_wallpaper`, `bg_overlay`, `text_mode`, `borders_color`, `profile_color`, `friends_color`, `games_border_color`, `text_border_color`, `glass_edition`, `glass_opacity`, `glass_highlight`, `corner_roundness`, `animations_enabled` |
 | Performance | `target_fps`, `ram_limit_mb`, `cpu_limit_pct` |
-| Behaviour | `tray_enabled`, `tray_minimize_on_close`, `start_with_windows` (launch at login), `start_minimized_to_tray`, `auto_close_roblox`, `notifications_silent`, `auto_check_updates`, `minimize_on_game_launch`, `close_launcher_during_game`, `return_to_launcher_on_leave`, `show_server_badge` |
+| Behaviour | `tray_enabled`, `tray_minimize_on_close`, `start_with_windows` (launch at login), `start_minimized_to_tray`, `auto_close_roblox`, `notifications_silent`, `auto_check_updates` (legacy, ignored), `minimize_on_game_launch`, `close_launcher_during_game`, `return_to_launcher_on_leave`, `show_server_badge` |
 | Overlay | `overlay_enabled`, `overlay_corner`, `overlay_duration_secs`, `overlay_opacity`, `overlay_show_ip`, `overlay_show_job_id`, `overlay_stats_enabled`, `overlay_stats_corner`, `overlay_stats_cpu/ram/ping/session/clock/fps_cap`, `overlay_flags_enabled`, `overlay_flags_corner` |
 | Integrations | `discord_rpc_enabled`, `discord_rpc_show_idle`, `discord_rpc_app_id` |
 
@@ -321,7 +344,7 @@ cargo build --release            # -> target/release/creblox
 # build + assemble + ad-hoc sign + install dist/CREBLOX.app
 scripts/build-macos-app.sh       # NO_INSTALL=1 to skip the install step
 
-# package the source archives the updater consumes
+# package the release archives (quick update + full build)
 scripts/package-release.sh
 ```
 
@@ -367,7 +390,7 @@ it cannot link AppKit or sign a bundle, so it never replaces a real macOS build.
 | FastFlags don't apply | They are written on launch (`sync_saved_fastflags_before_launch`) and on save. Check both `~/Library/Preferences/com.roblox.Roblox/ClientAppSettings.json` and the bundle copy; Roblox updates wipe the bundle copy. |
 | TLS/certificate errors | Networking is `rustls` + bundled `webpki-roots` — it does not use Catalina's system root store, so expired system certificates cannot break it. A corporate MITM proxy will. |
 | Menu bar icon missing | `tray_enabled` is off, or another instance owns `.instance.lock`. |
-| Won't update | The release must be a normal (not draft, not prerelease) release whose tag parses newer than the installed version (e.g. `v0.4.18-update`), with the quick-update `.zip` link **first** in the body and a `SHA-256: <64 hex>` line for it — the updater takes the first of each, and a mismatch aborts the install. GitHub release assets are preferred when present, but this repo is private and the downloader sends no auth header, so a body link is the path that actually works. |
+| Won't update | Updates are manual: download the archive from **Releases** and run `Update CREBLOX.command` (or `Build CREBLOX.command` on a new machine). There is no in-app update check to debug. If the script cannot find your source folder, check `~/Library/Application Support/CREBLOX/source-folder` and the `Cargo.toml` inside it. |
 
 ---
 
@@ -397,7 +420,8 @@ Read this before editing. These are not preferences; breaking them breaks Catali
    data folder (`CREBLOX`) were renamed in 0.4.15 behind a one-way migration; do not move
    them back. User-facing strings say CREBLOX.
 7. **Preserve launcher features.** FastFlags presets, custom flags, multi-account, overlay,
-   tray, updates and deep links all ship. Fix them; don't delete them.
+   tray and deep links all ship. Fix them; don't delete them. The dormant update
+   subsystem is the one exception: it is scheduled for deletion, not preservation.
 8. **The release contract is `RELEASING.md`.** `Cargo.toml` version == tag, normal release,
    exact asset names, binaries built from the tagged commit, never re-upload an asset.
 9. **The macOS binary must contain an x86_64 slice.** Catalina is Intel-only; keep the
