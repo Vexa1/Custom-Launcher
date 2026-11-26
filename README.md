@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.23
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.24
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -188,6 +188,39 @@ ordered out while nothing could restore it. Three links, all in the macOS path:
 As a last resort, if a process owns **no** window at all (`key_window_count() == 0` after
 five seconds of uptime) and the app is activated, the watcher relaunches from the enclosing
 `.app` bundle with `open -n` and exits, so a Dock dot always leads somewhere.
+
+#### Why the HUD could be invisible for a whole session (fixed in 0.4.24)
+
+The overlay window is its own process: `main.rs:37` sees `--overlay-window` and calls
+`overlay_window::run` **before** the single-instance guard, so the launcher being hidden,
+minimised or closed cannot freeze it. There are no egui secondary viewports, no
+`show_viewport_deferred`, no `NSPanel`/`CALayer` renderer anywhere in `src/` - the HUD is one
+transparent, click-through `NSWindow` (level 1000, all Spaces, `orderFrontRegardless`) drawn
+with egui, fed by a JSON spec the launcher rewrites about once a second.
+
+That architecture was sound; the visibility *condition* was not:
+
+| Link | What went wrong | Fix |
+|---|---|---|
+| Visibility gate | The overlay only drew when the launcher said `game_active` (`app.rs:4065`), and that flag required `active_roblox_place_id` to be set. The place id only exists when `! Joining game … place N` parses, so **any log the parser could not classify meant `game_active = false` for the entire session** - the window stayed at alpha 0 and nothing was ever drawn, however good the rest of the pipeline was | The overlay now decides for itself: `roblox_process::session_banner_active()` (`roblox_process.rs`) reads each player log and returns true when a join banner exists and the state is not one that means *left the game*. Visibility is `(game_active \|\| session_active) && roblox_running && (in front \|\| grace)`, so either independent signal is enough |
+| Window bring-up | `with_active(false)` told winit not to activate the app - and an inactive accessory process is the one winit is least willing to order front, so the window could exist yet never be placed on screen | Removed; `tweak_overlay_window` already sets the level, all-Spaces behaviour and `orderFrontRegardless`, and the accessory policy keeps Roblox's focus |
+| Startup failure | `main.rs` ran the overlay with `let _ = run(...)`, throwing away a window-creation error, so a failed overlay looked identical to a running one | The error is logged to `overlay.log` |
+| Silent hide | The overlay hid with no trace of why | Every change of visibility logs one line to `overlay.log`: `show=… (edit=…, game_active=…, session=…, roblox=…, in_front=…, grace=…)` |
+
+`overlay.log` (in `~/Library/Application Support/CREBLOX/`) is therefore the first place to
+look: `spec loaded (N panels)` proves the data arrived, and the `show=` line names the exact
+condition that kept the window hidden.
+
+#### Preview and drag-to-position without a game
+
+*Tray → Edit Overlay Position* starts the overlay process even when Roblox is not running
+(`app.rs:4056` only skips the start when editing is off), makes the window accept clicks
+(`setIgnoresMouseEvents:NO`, `makeKeyAndOrderFront:`), and draws the real HUD with a
+`CREBLOX overlay · preview` panel of **sample** values - clearly labelled, never presented as
+live - so there is something to drag. Drag anywhere on the HUD, `⏎`/Confirm saves the offset
+to `settings.json` and hands input back to the game (`setIgnoresMouseEvents:YES`), `Esc`
+reverts. The dashed 1 px frame, edge guides, live `x, y` readout and Reset/Confirm pills are
+drawn in `overlay_window.rs::paint_edit`.
 
 #### Edit Overlay Position (tray → drag → confirm)
 

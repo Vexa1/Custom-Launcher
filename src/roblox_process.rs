@@ -664,6 +664,38 @@ fn ip_after_marker(text: &str, markers: &[&str]) -> Option<String> {
 
 /// Last address the client says it connected to on a server network line. Used only
 /// when the join banner is missing, so the overlay can still ping a real game server.
+/// True when a running Roblox player has a *join banner* in its log.
+///
+/// The client only writes one when a game is really joined, so the banner is proof of a
+/// session on its own. The overlay process uses this instead of trusting the launcher's
+/// `game_active` flag: that flag needs the place id to parse, and a log whose lifecycle
+/// markers are not recognised left it false for the whole session - which is why the HUD
+/// could never appear at all, however healthy the rest of the pipeline was.
+pub fn session_banner_active() -> bool {
+    let (procs, crash_logs) = enumerate_roblox_processes();
+    if procs.is_empty() {
+        return false;
+    }
+    let logs_dir = roblox_logs_dir();
+    for p in &procs {
+        let Some(path) = find_player_log_for_proc(p, &crash_logs, logs_dir.as_deref()) else {
+            continue;
+        };
+        let (state, _, _, server) = inspect_player_log_full(&path);
+        // No banner, no session: sitting in the Roblox menu must not show the HUD.
+        if server.is_none() {
+            continue;
+        }
+        if !matches!(
+            state,
+            LogSessionState::AppAfterPlay | LogSessionState::AppOnly | LogSessionState::TrayOnly
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 fn ip_from_network_lines(text: &str) -> Option<String> {
     // The spellings the desktop client actually writes, macOS included:
     //   [FLog::Network] Connection accepted from 128.116.1.2|53640

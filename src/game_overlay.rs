@@ -924,6 +924,25 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             }
         }
 
+        // Position editor with no game running: draw the real HUD with clearly marked
+        // sample numbers, so there is something to drag and the editor is useful before a
+        // session starts. The title says "preview", the values are never presented as live.
+        if cfg.edit && server.is_none() {
+            let corner = cfg.server.as_ref().map(|s| s.corner).unwrap_or(3);
+            panels.push(json!({
+                "id": "preview",
+                "corner": corner,
+                "title": "CREBLOX overlay · preview",
+                "lines": [
+                    "Region: Preview",
+                    "Ping: 42 ms",
+                    "CPU: 12%",
+                    "RAM: 640 MB",
+                    "Flags: Competitive (6)"
+                ]
+            }));
+        }
+
         if let (Some(gp), Some(s)) = (&cfg.game, &server) {
             let title = match &game_info {
                 Some((name, _)) => shorten(name, 36),

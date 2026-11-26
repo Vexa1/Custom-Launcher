@@ -44,7 +44,11 @@ fn main() -> eframe::Result<()> {
         .is_some_and(|a| a == game_overlay::OVERLAY_WINDOW_FLAG)
     {
         if let Some(spec) = args.get(2) {
-            let _ = overlay_window::run(std::path::PathBuf::from(spec));
+            // Never swallow this: if the window cannot be created the whole overlay is gone,
+            // and the launcher would only see "the child exited" with no reason.
+            if let Err(e) = overlay_window::run(std::path::PathBuf::from(spec)) {
+                log(&format!("overlay: window failed to start: {e}"));
+            }
         }
         return Ok(());
     }

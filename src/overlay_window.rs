@@ -511,6 +511,9 @@ struct OverlayWindowApp {
     /// Cached "is a game running at all" check, refreshed every 1.5 s.
     last_proc_check: Instant,
     roblox_running: bool,
+    /// A Roblox player log contains a join banner right now. Checked here, in this process,
+    /// so the HUD never depends on the launcher having parsed a place id.
+    session_active: bool,
     /// The launcher says a game session is being played (not just the Roblox menu).
     /// Kept true when the spec does not say, so older specs still show.
     game_active: bool,
@@ -561,6 +564,7 @@ impl OverlayWindowApp {
             using_fallback: false,
             last_proc_check: Instant::now() - Duration::from_secs(10),
             roblox_running: false,
+            session_active: false,
             game_active: true,
             saved_offset: egui::Vec2::ZERO,
             offset: egui::Vec2::ZERO,
@@ -728,6 +732,8 @@ impl OverlayWindowApp {
             self.last_proc_check = Instant::now();
             let (procs, _) = crate::roblox_process::enumerate_roblox_processes();
             self.roblox_running = !procs.is_empty();
+            // Independent of the launcher: a join banner in the player log is a session.
+            self.session_active = crate::roblox_process::session_banner_active();
         }
         // A Roblox window that exists proves the game runs even when the process scan
         // misses it (helper names, sandboxing, permissions).
@@ -760,11 +766,22 @@ impl OverlayWindowApp {
         let grace = self.roblox_running && self.started.elapsed() < Duration::from_secs(10);
         // Editing wins over every "should it show" rule: the user asked for it from the tray,
         // possibly with no game running at all.
-        self.update_visibility(if self.edit {
+        // Two independent signals, either of which is enough. `game_active` comes from the
+        // launcher and needs the place id to parse; `session_active` is read from the player
+        // log here. Requiring only the first was the reason the overlay could stay invisible
+        // for a whole session even though the game was running and the address was known.
+        let want = if self.edit {
             true
         } else {
-            self.game_active && self.roblox_running && (roblox_in_front || grace)
-        });
+            (self.game_active || self.session_active) && self.roblox_running && (roblox_in_front || grace)
+        };
+        if want != self.visible {
+            eprintln!(
+                "overlay-window: show={want} (edit={}, game_active={}, session={}, roblox={}, in_front={roblox_in_front}, grace={grace}, front={front:?})",
+                self.edit, self.game_active, self.session_active, self.roblox_running
+            );
+        }
+        self.update_visibility(want);
         // Mouse input is enabled only for the editor, and taken back the moment it ends.
         if self.interactive != self.edit {
             self.interactive = self.edit;
@@ -1562,8 +1579,11 @@ pub fn run(spec_path: PathBuf) -> eframe::Result<()> {
         .with_transparent(true)
         .with_always_on_top()
         .with_mouse_passthrough(true)
-        .with_resizable(false)
-        .with_active(false);
+        .with_resizable(false);
+    // `with_active(false)` used to be set here. It tells winit not to activate the app, but
+    // an inactive, accessory-policy process is also the one winit is least willing to order
+    // front - and a window that is never ordered front is exactly what "the overlay does not
+    // work" looks like. The accessory policy already keeps Roblox's focus intact.
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
