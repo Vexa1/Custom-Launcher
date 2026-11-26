@@ -2734,24 +2734,44 @@ impl Creblox {
                 }
                 Msg::ServerHopAvailability => self.sync_tray_state(),
                 Msg::ServerHopDone(mode, result) => match result {
-                    Ok(line) => {
+                    Ok(outcome) => {
                         // A hop launches a fresh client, so the watcher keeps its brisk
                         // polling cadence for the next few seconds.
                         self.last_roblox_launch_ms
                             .store(now_unix_ms(), Ordering::Relaxed);
-                        self.status = line.clone();
+                        self.status = outcome.line.clone();
                         crate::auth::log(&format!("hop: {} finished", mode.label()));
                         self.push_toast(
                             NotificationSource::Creblox,
                             ToastKind::Success,
                             "Server Hop",
-                            line,
+                            outcome.line.clone(),
                             None,
                             None,
                             None,
                             6.0,
                             true,
                         );
+                        // Host and guests hop together: the server just joined is broadcast
+                        // to everyone else, who follow with their own client.
+                        if self.party_coordinates_launch() {
+                            let by = self.me.as_ref().map(|p| p.user.id).unwrap_or(0);
+                            let universe_id = crate::server_hop::context()
+                                .map(|c| c.universe_id)
+                                .unwrap_or(0);
+                            self.party.broadcast_launch(crate::party::PartyLaunch {
+                                place_id: outcome.place_id,
+                                job_id: outcome.job_id.clone(),
+                                universe_id,
+                                game_name: String::new(),
+                                by,
+                            });
+                            self.party.set_status(
+                                crate::party::PartyStatus::InGame,
+                                Some(outcome.place_id),
+                                Some(outcome.job_id.clone()),
+                            );
+                        }
                     }
                     Err(e) => {
                         // The old game was left alone (or the launcher came back), so this
@@ -3662,7 +3682,13 @@ impl Creblox {
             Some(launch.job_id.clone()),
         );
         self.launch_server(launch.place_id, launch.job_id.clone());
-        self.status = format!("Joining the party's server for {}", launch.game_name);
+        // A group hop broadcasts the server only, without a game name.
+        let game = if launch.game_name.trim().is_empty() {
+            "the host's server"
+        } else {
+            launch.game_name.as_str()
+        };
+        self.status = format!("Joining the party's server for {game}");
     }
 
     /// Keep the party's view of this member in step with the Roblox session. Deduplicated:
@@ -3709,12 +3735,29 @@ impl Creblox {
             self.sync_tray_state();
             return;
         }
-        self.status = format!("Server Hop: {} - looking for a server...", mode.label());
+        // A host hops the whole party: only servers with a free slot per member are
+        // candidates, and the chosen server is broadcast once the hop succeeds.
+        let needed = if self.party_coordinates_launch() {
+            self.party_state
+                .as_ref()
+                .map(|p| p.members.len())
+                .unwrap_or(1)
+        } else {
+            0
+        };
+        self.status = if needed > 1 {
+            format!(
+                "Server Hop: {} - finding room for {needed}...",
+                mode.label()
+            )
+        } else {
+            format!("Server Hop: {} - looking for a server...", mode.label())
+        };
         self.sync_tray_state();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let result = crate::server_hop::run_hop(mode, &cookie);
+            let result = crate::server_hop::run_hop(mode, &cookie, needed);
             let _ = tx.send(Msg::ServerHopDone(mode, result));
             ctx.request_repaint();
         });

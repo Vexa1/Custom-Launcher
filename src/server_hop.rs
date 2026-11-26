@@ -191,13 +191,20 @@ fn random_pick(pool: &[ServerItem]) -> Option<ServerItem> {
 }
 
 /// Filter and rank the API's server list. Pure, so the rules can be exercised without a
-/// session: never the current server, never a full or empty one, never one recently left.
+/// session: never the current server, never a full or empty one, never one recently left,
+/// and never one without room for the whole party.
+///
+/// `needed_slots` is the party's size when the host hops the group, and `0` (or `1`) for a solo
+/// hop. A server is only a candidate when it has that many free player slots, so a party of
+/// five never gets sent to a server with two places left and a mid-hop rejection.
 pub fn rank(
     mode: ServerHopMode,
     candidates: &[ServerItem],
     current_job: &str,
     cooling: &[String],
+    needed_slots: usize,
 ) -> Option<ServerItem> {
+    let needed = needed_slots.max(1) as u64;
     let pool: Vec<ServerItem> = candidates
         .iter()
         .filter(|s| {
@@ -206,7 +213,7 @@ pub fn rank(
                 && !cooling.iter().any(|c| c == &s.id)
                 && s.playing > 0
                 && s.max_players > 0
-                && s.playing < s.max_players
+                && s.max_players.saturating_sub(s.playing) >= needed
         })
         .cloned()
         .collect();
@@ -236,11 +243,26 @@ pub fn rank(
     }
 }
 
+/// What a hop did, so the host can tell the party where everyone is going.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HopOutcome {
+    pub place_id: u64,
+    pub job_id: String,
+    pub playing: u64,
+    pub max_players: u64,
+    /// The line shown to the user (also used for the party launch status).
+    pub line: String,
+}
+
 /// Find a target, then (and only then) close the running client and join it.
 ///
 /// Runs on a worker thread: it makes two network round trips, kills a process and waits for
-/// it to go away. Returns the line to show the user.
-pub fn run_hop(mode: ServerHopMode, cookie: &str) -> Result<String, String> {
+/// it to go away. `needed_slots` is the party size for a group hop, `0` for a solo one.
+pub fn run_hop(
+    mode: ServerHopMode,
+    cookie: &str,
+    needed_slots: usize,
+) -> Result<HopOutcome, String> {
     let ctx = context().ok_or_else(|| "Server Hop needs an active game session".to_string())?;
     if ctx.place_id == 0 || ctx.job_id.is_empty() {
         return Err("The current server is not known yet - try again in a moment".to_string());
@@ -255,11 +277,18 @@ pub fn run_hop(mode: ServerHopMode, cookie: &str) -> Result<String, String> {
     )
     .map_err(|e| format!("Could not list public servers: {e}"))?;
     let cooling = cooling_snapshot();
-    let target = rank(mode, &candidates, &ctx.job_id, &cooling).ok_or_else(|| {
-        format!(
-            "No other joinable public server right now ({} listed)",
-            candidates.len()
-        )
+    let target = rank(mode, &candidates, &ctx.job_id, &cooling, needed_slots).ok_or_else(|| {
+        if needed_slots > 1 {
+            format!(
+                "No public server has room for {needed_slots} party members right now ({} listed)",
+                candidates.len()
+            )
+        } else {
+            format!(
+                "No other joinable public server right now ({} listed)",
+                candidates.len()
+            )
+        }
     })?;
 
     crate::auth::log(&format!(
@@ -282,13 +311,19 @@ pub fn run_hop(mode: ServerHopMode, cookie: &str) -> Result<String, String> {
 
     match crate::roblox_process::launch_authenticated_server(ctx.place_id, Some(&target.id), cookie)
     {
-        Ok(message) => Ok(format!(
-            "{}: {} ({} of {} players)",
-            mode.label(),
-            message,
-            target.playing,
-            target.max_players
-        )),
+        Ok(message) => Ok(HopOutcome {
+            place_id: ctx.place_id,
+            job_id: target.id.clone(),
+            playing: target.playing,
+            max_players: target.max_players,
+            line: format!(
+                "{}: {} ({} of {} players)",
+                mode.label(),
+                message,
+                target.playing,
+                target.max_players
+            ),
+        }),
         Err(e) => {
             // Nothing is running any more, so let the launcher come back.
             end_hop_window();
@@ -316,7 +351,7 @@ mod tests {
     #[test]
     fn current_server_is_never_chosen() {
         let servers = vec![server("current", 5, 20, Some(10))];
-        assert!(rank(ServerHopMode::Random, &servers, "current", &[]).is_none());
+        assert!(rank(ServerHopMode::Random, &servers, "current", &[], 0).is_none());
     }
 
     #[test]
@@ -326,7 +361,7 @@ mod tests {
             server("empty", 0, 20, Some(5)),
             server("ok", 3, 20, Some(50)),
         ];
-        let picked = rank(ServerHopMode::LeastPlayers, &servers, "current", &[]).unwrap();
+        let picked = rank(ServerHopMode::LeastPlayers, &servers, "current", &[], 0).unwrap();
         assert_eq!(picked.id, "ok");
     }
 
@@ -338,6 +373,7 @@ mod tests {
             &servers,
             "current",
             &["a".to_string()],
+            0,
         )
         .unwrap();
         assert_eq!(picked.id, "b");
@@ -350,7 +386,7 @@ mod tests {
             server("quiet-high-ping", 2, 20, Some(90)),
             server("quiet-low-ping", 2, 20, Some(30)),
         ];
-        let picked = rank(ServerHopMode::LeastPlayers, &servers, "current", &[]).unwrap();
+        let picked = rank(ServerHopMode::LeastPlayers, &servers, "current", &[], 0).unwrap();
         assert_eq!(picked.id, "quiet-low-ping");
     }
 
@@ -361,14 +397,14 @@ mod tests {
             server("fast", 9, 20, Some(12)),
             server("slow", 2, 20, Some(80)),
         ];
-        let picked = rank(ServerHopMode::LowestPing, &servers, "current", &[]).unwrap();
+        let picked = rank(ServerHopMode::LowestPing, &servers, "current", &[], 0).unwrap();
         assert_eq!(picked.id, "fast");
     }
 
     #[test]
     fn lowest_ping_falls_back_to_random_when_no_ping_is_published() {
         let servers = vec![server("a", 1, 20, None), server("b", 2, 20, None)];
-        let picked = rank(ServerHopMode::LowestPing, &servers, "current", &[]).unwrap();
+        let picked = rank(ServerHopMode::LowestPing, &servers, "current", &[], 0).unwrap();
         assert!(picked.id == "a" || picked.id == "b");
     }
 
@@ -378,7 +414,34 @@ mod tests {
             server("current", 5, 20, Some(1)),
             server("full", 20, 20, Some(1)),
         ];
-        assert!(rank(ServerHopMode::LowestPing, &servers, "current", &[]).is_none());
+        assert!(rank(ServerHopMode::LowestPing, &servers, "current", &[], 0).is_none());
+    }
+
+    #[test]
+    fn a_party_hop_needs_room_for_every_member() {
+        let servers = vec![
+            // The emptiest server overall, but only two places left.
+            server("two-free", 2, 4, Some(5)),
+            server("five-free", 15, 20, Some(60)),
+        ];
+        // A solo hop prefers the quiet server ...
+        let solo = rank(ServerHopMode::LeastPlayers, &servers, "current", &[], 0).unwrap();
+        assert_eq!(solo.id, "two-free");
+        // ... but a party of five would half-fill it and leave members behind, so the party
+        // hop takes the one with room for everybody.
+        let picked = rank(ServerHopMode::LeastPlayers, &servers, "current", &[], 5).unwrap();
+        assert_eq!(picked.id, "five-free");
+    }
+
+    #[test]
+    fn a_party_hop_finds_nothing_when_every_server_is_too_small() {
+        let servers = vec![
+            server("one-free", 19, 20, Some(5)),
+            server("two-free", 18, 20, Some(5)),
+        ];
+        assert!(rank(ServerHopMode::Random, &servers, "current", &[], 3).is_none());
+        // ... while the same list is fine for a solo hop.
+        assert!(rank(ServerHopMode::Random, &servers, "current", &[], 1).is_some());
     }
 
     #[test]

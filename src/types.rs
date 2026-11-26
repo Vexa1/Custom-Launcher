@@ -1004,8 +1004,12 @@ pub enum Msg {
     },
     /// Result of an off-thread "Close Roblox": how many processes were killed.
     RobloxKilled(usize),
-    /// A tray Server Hop finished: the success line, or why nothing was done.
-    ServerHopDone(crate::server_hop::ServerHopMode, Result<String, String>),
+    /// A tray Server Hop finished: the server it joined and the line to show, or why nothing
+    /// was done. The target is returned so a party host can broadcast it to its members.
+    ServerHopDone(
+        crate::server_hop::ServerHopMode,
+        Result<crate::server_hop::HopOutcome, String>,
+    ),
     /// The active session context changed, so the tray submenu enablement did too.
     ServerHopAvailability,
     RobloxBackgroundDetected {
