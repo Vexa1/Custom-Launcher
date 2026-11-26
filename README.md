@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.22
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.23
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -172,6 +172,22 @@ renderer winning; it was data never arriving. The broken links:
 
 Ping still needs a real server address: with no IP it prints `—` rather than a number for a
 website, and the next 2 s tick picks it up as soon as the address is known.
+
+#### Why the launcher did not come back (fixed in 0.4.23)
+
+The Dock dot without a window was never a broken window: it was a process whose window was
+ordered out while nothing could restore it. Three links, all in the macOS path:
+
+| Link | What went wrong | Fix |
+|---|---|---|
+| Hidden window → `App::update()` | With `Visible(false)` (or a minimized window) eframe stops drawing frames, so the `Msg::TrayAction(ShowAndFocus)` the watcher sent was **never polled** - and `ctx.request_repaint()` cannot wake a viewport that is ordered out. The restore code was correct and simply never ran | Restoration is dispatched straight onto the AppKit main thread with `dispatch_async_f` (`tray_macos.rs::dispatch_main`), which works with egui completely idle. `activate_app` there does `[NSApp unhide:nil]`, `setActivationPolicy:Regular`, `deminiaturize:` + `makeKeyAndOrderFront:` per window and `activateIgnoringOtherApps:` |
+| Dock click | A Dock click is `applicationShouldHandleReopen:hasVisibleWindows:`. winit does not implement it, so AppKit activated the app, found no window and stopped - the icon kept its dot and every click looked dead | The method is added to winit's **own** delegate class with `class_addMethod` (`tray_macos.rs::install_dock_reopen_handler`), so every other winit callback stays intact. It restores the window immediately, and the watcher is the fallback if the class already had the method |
+| Leaving a game | The "game ended" message travelled the same dead channel, and `return_to_launcher` only runs inside `update()`. Nothing at all was watching the game once the window was hidden | The watcher polls every 400 ms while the window is hidden: `set_hidden_for_game(true)` marks a hide *for a game* (a tray hide or `Cmd+H` is never undone), and `game_still_running` re-reads the Roblox process list plus each player log. An empty process list or an explicit `AppAfterPlay`/`AppOnly` state for **every** log restores the launcher in under a second; `Unknown` counts as playing, so the window can never pop up mid-game |
+| `--companion` | The headless copy ran under a **Regular** activation policy, so it sat in the Dock with a dot and zero windows - a click activated a process with nothing to show and no reopen delegate | `set_accessory_policy()` keeps it out of the Dock entirely; it still relaunches the GUI from the enclosing bundle when the game ends (`companion.rs::relaunch_launcher`), and its game detection now also accepts `Unknown` + a join banner |
+
+As a last resort, if a process owns **no** window at all (`key_window_count() == 0` after
+five seconds of uptime) and the app is activated, the watcher relaunches from the enclosing
+`.app` bundle with `open -n` and exits, so a Dock dot always leads somewhere.
 
 #### Edit Overlay Position (tray → drag → confirm)
 
@@ -347,7 +363,7 @@ to reach CREBLOX without leaving the session.
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
 | Edit Overlay Position… | — | Opens the on-screen HUD editor: drag it, then Confirm (⏎) or Esc. Disabled while the editor is open, and when every overlay is off. |
-| Dock icon (click) | — | Reopens the launcher. A Dock click is an app activation, not an egui event, so a small watcher thread (`tray_macos.rs::start_reopen_watcher`) notices "app active, no window on screen" and restores the window even while eframe is idle. |
+| Dock icon (click) | — | Reopens the launcher, even with the window hidden or minimized. See [Why the launcher did not come back](#why-the-launcher-did-not-come-back-fixed-in-0423). |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
 
 **Live sync in both directions.** A menu click becomes `Msg::TrayAction` on the existing

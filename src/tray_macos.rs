@@ -661,6 +661,231 @@ pub fn activate_app() {
     }
 }
 
+/// How many real windows this process owns (`canBecomeKeyWindow` filters out the status
+/// item and menu helper windows). Zero means there is nothing to restore - a headless copy,
+/// or a viewport that never got created - so the only way back in is a new launcher.
+fn key_window_count() -> usize {
+    use std::os::raw::c_void;
+    type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    type Msg1 = unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> *mut c_void;
+    type MsgCount = unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize;
+    type MsgBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i8;
+
+    unsafe {
+        let class = objc_getClass(c"NSApplication".as_ptr());
+        if class.is_null() {
+            return 0;
+        }
+        let shared: Msg0 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let app = shared(class, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return 0;
+        }
+        let windows: Msg0 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let list = windows(app, sel_registerName(c"windows".as_ptr()));
+        if list.is_null() {
+            return 0;
+        }
+        let count: MsgCount = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let n = count(list, sel_registerName(c"count".as_ptr()));
+        let object_at: Msg1 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let bool_msg: MsgBool = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let can_key = sel_registerName(c"canBecomeKeyWindow".as_ptr());
+        let mut real = 0usize;
+        for i in 0..n {
+            let window = object_at(list, sel_registerName(c"objectAtIndex:".as_ptr()), i as isize);
+            if !window.is_null() && bool_msg(window, can_key) != 0 {
+                real += 1;
+            }
+        }
+        real
+    }
+}
+
+/// Starts a fresh launcher from the enclosing `.app` bundle (`open -n` also works when the
+/// bundle is already running, so a duplicate is never a problem).
+fn relaunch_app_bundle() {
+    let bundle = std::env::current_exe().ok().and_then(|exe| {
+        let app = exe.parent()?.parent()?.parent()?.to_path_buf();
+        app.extension().is_some_and(|e| e == "app").then_some(app)
+    });
+    match bundle {
+        Some(bundle) => {
+            let _ = Command::new("/usr/bin/open").arg("-n").arg(bundle).status();
+        }
+        None => {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = Command::new(exe).spawn();
+            }
+        }
+    }
+}
+
+/// Runs `f` on the macOS main thread, even when the egui event loop is not drawing frames.
+///
+/// This is the only way to restore a window while eframe is idle: `ctx.request_repaint()`
+/// cannot wake a viewport that is ordered out, so a channel message sits unread until the
+/// user happens to trigger something else. `dispatch_async_f` has existed since 10.6, so it
+/// is safe on 10.15, and it is the same thing `performSelectorOnMainThread:` does.
+pub fn dispatch_main<F: FnOnce() + Send + 'static>(f: F) {
+    use std::os::raw::c_void;
+    unsafe extern "C" {
+        fn dispatch_get_main_queue() -> *mut c_void;
+        fn dispatch_async_f(
+            queue: *mut c_void,
+            context: *mut c_void,
+            work: unsafe extern "C" fn(*mut c_void),
+        );
+    }
+    unsafe extern "C" fn trampoline<F: FnOnce()>(ctx: *mut c_void) {
+        let f = unsafe { Box::from_raw(ctx as *mut F) };
+        f();
+    }
+    let boxed = Box::into_raw(Box::new(f));
+    unsafe { dispatch_async_f(dispatch_get_main_queue(), boxed.cast(), trampoline::<F>) };
+}
+
+/// Sets the AppKit activation policy (`0` = Regular/Dock icon, `1` = Accessory/none).
+fn set_activation_policy(policy: isize) {
+    use std::os::raw::c_void;
+    type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    type Msg1 = unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> *mut c_void;
+    unsafe {
+        let class = objc_getClass(c"NSApplication".as_ptr());
+        if class.is_null() {
+            return;
+        }
+        let shared: Msg0 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let app = shared(class, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return;
+        }
+        let set_policy: Msg1 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        set_policy(app, sel_registerName(c"setActivationPolicy:".as_ptr()), policy);
+    }
+}
+
+/// Keeps the headless `--companion` copy out of the Dock.
+///
+/// It has no window and no delegate, so a Regular policy there is a running icon whose dot
+/// can never be satisfied: clicking it activates an app with nothing to show. Accessory
+/// removes the icon entirely, which is what a background helper should look like.
+pub fn set_accessory_policy() {
+    set_activation_policy(1);
+}
+
+static REPAINT_CTX: OnceLock<egui::Context> = OnceLock::new();
+static HIDDEN_FOR_GAME: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Records whether the window is currently hidden *because a game is running*.
+///
+/// A user hide (tray icon, `Cmd+H`) must never be undone automatically; a hide for a game
+/// must always be undone when that game ends, including when the launcher cannot be woken
+/// through egui and only the watcher thread is left running.
+pub fn set_hidden_for_game(hidden: bool) {
+    HIDDEN_FOR_GAME.store(hidden, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Adds `applicationShouldHandleReopen:hasVisibleWindows:` to the delegate winit installed.
+///
+/// winit never implements it, so a Dock click on an ordered-out window is silently dropped:
+/// AppKit activates the app, finds nothing to show and stops - the icon keeps its dot and
+/// every click looks dead. Adding the method to the *existing* delegate class (rather than
+/// replacing the delegate) leaves all of winit's own callbacks untouched, and returning
+/// `YES` keeps AppKit's default behaviour as a second chance.
+pub fn install_dock_reopen_handler() {
+    use std::os::raw::c_void;
+    type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+
+    unsafe extern "C" fn reopen(
+        _this: *mut c_void,
+        _sel: *mut c_void,
+        _app: *mut c_void,
+        _visible: i8,
+    ) -> i8 {
+        crate::auth::log("dock: applicationShouldHandleReopen - restoring the launcher");
+        activate_app();
+        if let Some(ctx) = REPAINT_CTX.get() {
+            ctx.request_repaint();
+        }
+        1
+    }
+
+    unsafe extern "C" {
+        fn class_addMethod(
+            cls: *mut c_void,
+            name: *mut c_void,
+            imp: *mut c_void,
+            types: *const std::ffi::c_char,
+        ) -> i8;
+        fn object_getClass(obj: *mut c_void) -> *mut c_void;
+    }
+
+    unsafe {
+        let class = objc_getClass(c"NSApplication".as_ptr());
+        if class.is_null() {
+            return;
+        }
+        let shared: Msg0 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let app = shared(class, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return;
+        }
+        let delegate = shared(app, sel_registerName(c"delegate".as_ptr()));
+        if delegate.is_null() {
+            crate::auth::log("dock: no NSApplication delegate yet - relying on the watcher");
+            return;
+        }
+        let delegate_class = object_getClass(delegate);
+        if delegate_class.is_null() {
+            return;
+        }
+        let added = class_addMethod(
+            delegate_class,
+            sel_registerName(c"applicationShouldHandleReopen:hasVisibleWindows:".as_ptr()),
+            reopen as *const () as *mut c_void,
+            c"c@:@c".as_ptr(),
+        );
+        // `class_addMethod` returns NO when the class already implements it (an older or
+        // patched winit): the watcher thread below still covers that case.
+        crate::auth::log(if added != 0 {
+            "dock: reopen handler installed"
+        } else {
+            "dock: reopen handler already present - relying on the watcher"
+        });
+    }
+}
+
+/// Whether a Roblox session is still on. Deliberately conservative: `Unknown` counts as
+/// playing, so a log whose markers are not recognised can never pop the launcher up in the
+/// middle of a game. Only an empty process list or an explicit "left the game" state ends it.
+fn game_still_running() -> bool {
+    use crate::roblox_process::{
+        LogSessionState, enumerate_roblox_processes, find_player_log_for_proc,
+        inspect_player_log_full, roblox_logs_dir,
+    };
+    let (procs, crash_logs) = enumerate_roblox_processes();
+    if procs.is_empty() {
+        return false;
+    }
+    let logs_dir = roblox_logs_dir();
+    for p in &procs {
+        let Some(path) = find_player_log_for_proc(p, &crash_logs, logs_dir.as_deref()) else {
+            continue;
+        };
+        let (state, ..) = inspect_player_log_full(&path);
+        if !matches!(
+            state,
+            LogSessionState::AppAfterPlay | LogSessionState::AppOnly | LogSessionState::TrayOnly
+        ) {
+            return true;
+        }
+    }
+    // Every log we could read says the player left.
+    false
+}
+
 static REOPEN_WATCHER: OnceLock<()> = OnceLock::new();
 
 /// Reopens the launcher when the Dock icon is clicked while no window is on screen.
@@ -675,23 +900,41 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
     if REOPEN_WATCHER.set(()).is_err() {
         return;
     }
+    let _ = REPAINT_CTX.set(ctx.clone());
     let spawned = thread::Builder::new()
         .name("creblox-reopen".to_string())
         .spawn(move || {
             let mut idle_checks = 0u8;
             let mut last_restore: Option<std::time::Instant> = None;
+            // Never act on the first seconds: the window is created during startup, and a
+            // watcher that fires before it exists would restart a healthy process.
+            let started = std::time::Instant::now();
             loop {
-                thread::sleep(Duration::from_millis(700));
-                // "No visible window" alone is not enough: hiding to the menu bar also
-                // leaves no window, and the app is inactive then. Requiring an active app
-                // means the user really did click the Dock icon / the app in Finder.
-                let needs_reopen = app_is_active() && !any_window_visible();
-                if !needs_reopen {
+                // 400 ms keeps "left the game -> launcher back" under a second while the
+                // hidden window is doing nothing; the checks are two objc calls.
+                thread::sleep(Duration::from_millis(400));
+                let no_window = !any_window_visible();
+                if !no_window {
+                    idle_checks = 0;
+                    continue;
+                }
+                // (a) A Dock click. "No visible window" alone is not enough: hiding to the
+                // menu bar also leaves no window, and the app is inactive then, so requiring
+                // an active app means the user really did click the Dock icon or the app in
+                // Finder.
+                let dock_click = app_is_active();
+                // (b) The game ended while the launcher was hidden for it. Nothing else can
+                // notice this: `App::update()` is not running, so the message the watcher
+                // sends would never be read.
+                let game_over = !dock_click
+                    && HIDDEN_FOR_GAME.load(std::sync::atomic::Ordering::Relaxed)
+                    && !game_still_running();
+                if !dock_click && !game_over {
                     idle_checks = 0;
                     continue;
                 }
                 idle_checks = idle_checks.saturating_add(1);
-                // Two consecutive checks (~1.4 s): activation lags behind a hide, and a
+                // Two consecutive checks (~0.8 s): activation lags behind a hide, and a
                 // single sample could snatch the window back the instant it was hidden.
                 if idle_checks < 2 {
                     continue;
@@ -700,7 +943,27 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
                     continue;
                 }
                 last_restore = Some(std::time::Instant::now());
-                crate::auth::log("dock: reopen requested while the app had no visible window");
+                // Nothing to restore anywhere: this process owns no window at all. Hand over
+                // to a fresh launcher from the bundle (the same thing `--companion` does
+                // when it finishes) instead of leaving a Dock dot that can never open.
+                if key_window_count() == 0 && started.elapsed() > Duration::from_secs(5) {
+                    crate::auth::log("dock: no window in this process - relaunching the launcher");
+                    dispatch_main(relaunch_app_bundle);
+                    thread::sleep(Duration::from_millis(800));
+                    std::process::exit(0);
+                }
+                crate::auth::log(if game_over {
+                    "dock: game ended while hidden - restoring the launcher"
+                } else {
+                    "dock: reopen requested while the app had no visible window"
+                });
+                // AppKit does the real work, on the main thread, right now. Sending the
+                // message alone was the bug: with no visible window eframe never ticks, so
+                // `request_repaint()` wakes nothing and the message waits forever.
+                dispatch_main(|| {
+                    set_hidden_for_game(false);
+                    activate_app();
+                });
                 let _ = tx.send(Msg::TrayAction(TrayEvent::ShowAndFocus));
                 ctx.request_repaint();
             }

@@ -74,6 +74,10 @@ fn relaunch_launcher() {
 /// Entry point for `creblox --companion`.
 pub fn run() {
     log("companion: started");
+    // No window means no Dock icon: a Regular policy here is a running dot that no click can
+    // satisfy, because the process has nothing to show and no reopen delegate.
+    #[cfg(target_os = "macos")]
+    crate::tray::set_accessory_policy();
     let mut settings = load_settings();
     let flags = load_fastflags();
     let mut cfg = OverlayConfig::from_settings(&settings, &flags);
@@ -114,7 +118,12 @@ pub fn run() {
                 continue;
             };
             let (state, _, _, srv) = inspect_player_log_full(&log_path);
-            if state == LogSessionState::Playing {
+            // `Playing` is the explicit case; `Unknown` with a join banner is the same game
+            // on clients whose lifecycle markers are not recognised, and treating that as
+            // "no game" left the companion blind to the session it was watching.
+            if state == LogSessionState::Playing
+                || (state == LogSessionState::Unknown && srv.is_some())
+            {
                 playing = true;
                 if let Some(s) = srv {
                     server = Some((s.ip, s.job_id, s.place_id));

@@ -564,6 +564,10 @@ impl Creblox {
         // ticking once the window is ordered out - so this cannot live in `update()`.
         #[cfg(target_os = "macos")]
         crate::tray::start_reopen_watcher(app.tx.clone(), app.ctx.clone());
+        // A Dock click arrives as `applicationShouldHandleReopen:hasVisibleWindows:`, which
+        // winit does not implement, so it is added to winit's own delegate class here.
+        #[cfg(target_os = "macos")]
+        crate::tray::install_dock_reopen_handler();
         // Starting hidden only works with a menu-bar icon; without one the process would
         // run with no window and no way to bring it back.
         if start_in_tray && !app.tray.available() {
@@ -4010,6 +4014,8 @@ impl Creblox {
             crate::auth::log("tray: no visible icon - minimizing instead of hiding");
             self.window_visible = true;
             self.hidden_at = None;
+            #[cfg(target_os = "macos")]
+            crate::tray::set_hidden_for_game(false);
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.sync_tray_state();
             return;
@@ -4017,6 +4023,10 @@ impl Creblox {
         self.window_visible = false;
         self.hidden_at = Some(Instant::now());
         self.hidden_seen_inactive = false;
+        // The watcher thread restores a window hidden *for a game* by itself, because
+        // nothing inside `update()` runs while the window is ordered out.
+        #[cfg(target_os = "macos")]
+        crate::tray::set_hidden_for_game(self.hidden_for_game);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         self.sync_tray_state();
         if show_balloon && self.settings.tray_enabled {
@@ -4155,6 +4165,8 @@ impl Creblox {
         crate::auth::log("window: restoring the launcher");
         self.window_visible = true;
         self.hidden_seen_inactive = false;
+        #[cfg(target_os = "macos")]
+        crate::tray::set_hidden_for_game(false);
         self.pending_start_in_tray_frames = 0;
         self.ctx
             .send_viewport_cmd(egui::ViewportCommand::Visible(true));
