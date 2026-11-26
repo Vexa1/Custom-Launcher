@@ -635,13 +635,29 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                     }
                 }
             }
-            Ok(Message::Close(_)) => {
+            Ok(Message::Close(frame)) => {
+                // 4001 is the relay saying "you were removed". Reconnecting would walk
+                // straight back in: without accounts, a kicked member's next connection
+                // looks exactly like a legitimate rejoin, so the party would silently
+                // un-kick them a second after the host removed them.
+                let removed = frame
+                    .as_ref()
+                    .map(|f| u16::from(f.code) == 4001)
+                    .unwrap_or(false);
                 socket = None;
                 connected = false;
-                attempts = attempts.saturating_add(1);
-                retry_at = Some(Instant::now() + backoff(attempts));
-                if session.is_none() {
+                if removed {
+                    session = None;
+                    known_code = None;
+                    retry_at = None;
                     IN_PARTY.store(false, Ordering::Relaxed);
+                    emit(PartyEvent::Left("Removed from the party".to_string()));
+                } else {
+                    attempts = attempts.saturating_add(1);
+                    retry_at = Some(Instant::now() + backoff(attempts));
+                    if session.is_none() {
+                        IN_PARTY.store(false, Ordering::Relaxed);
+                    }
                 }
             }
             Ok(_) => {}
