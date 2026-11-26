@@ -68,14 +68,17 @@ pub fn lookup_server_location(ip: &str) -> Option<String> {
     if let Ok(v) = get_json(&format!(
         "http://ip-api.com/json/{ip}?fields=status,country,regionName,city"
     )) {
-        if v["status"].as_str() == Some("success") {
-            if let Some(s) = join([
-                v["city"].as_str(),
-                v["regionName"].as_str(),
-                v["country"].as_str(),
-            ]) {
-                return Some(s);
-            }
+        let hit = (v["status"].as_str() == Some("success"))
+            .then(|| {
+                join([
+                    v["city"].as_str(),
+                    v["regionName"].as_str(),
+                    v["country"].as_str(),
+                ])
+            })
+            .flatten();
+        if let Some(s) = hit {
+            return Some(s);
         }
     }
     // Last resort: ipinfo.io throttles unauthenticated traffic and ip-api.com answers 429
