@@ -654,14 +654,48 @@ pub fn install_update_zip(zip: &Path, version: &str) -> Result<(), String> {
     // the installer look frozen for the whole build, and a failure closed the window with
     // nothing on screen - the user could not tell waiting from broken.
     let body = format!(
-        "#!/bin/bash\nset -euo pipefail\n\
+        "#!/bin/bash\n\
+         set -euo pipefail\n\
          export PATH=\"$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
          LOG={log}\n\
+         SRC={source}\n\
+         FROM={root}\n\
          {{\n\
          echo \"==> Installing CREBLOX {version}\"\n\
          echo \"    Building now; a copy of this output goes to: $LOG\"\n\
-         cp -R {root}/. {source}/\n\
-         cd {source}\n\
+         if ! command -v cargo >/dev/null 2>&1; then\n\
+         echo \"error: cargo was not found, so CREBLOX cannot be rebuilt.\" >&2\n\
+         echo \"       Install Rust from https://rustup.rs and run the update again.\" >&2\n\
+         exit 1\n\
+         fi\n\
+         if ! cargo --version >/dev/null 2>&1; then\n\
+         echo \"error: cargo is installed but will not run (no default toolchain).\" >&2\n\
+         echo \"       Run: rustup default stable\" >&2\n\
+         exit 1\n\
+         fi\n\
+         if [ ! -d \"$FROM\" ]; then\n\
+         echo \"error: the downloaded update files are missing: $FROM\" >&2\n\
+         echo \"       Download the update again from the release page.\" >&2\n\
+         exit 1\n\
+         fi\n\
+         if [ ! -d \"$SRC\" ]; then\n\
+         echo \"error: the CREBLOX source folder is missing: $SRC\" >&2\n\
+         echo \"       Install CREBLOX from the full archive once, then update again.\" >&2\n\
+         exit 1\n\
+         fi\n\
+         if [ ! -f \"$SRC/Cargo.toml\" ] || [ ! -f \"$SRC/scripts/update-macos.sh\" ]; then\n\
+         echo \"error: $SRC is missing Cargo.toml or scripts/update-macos.sh,\" >&2\n\
+         echo \"       so it is not a CREBLOX source folder.\" >&2\n\
+         exit 1\n\
+         fi\n\
+         if [ ! -w \"$SRC\" ] || [ ! -w \"$SRC/scripts\" ] || [ ! -w \"$SRC/Cargo.toml\" ]; then\n\
+         echo \"error: the CREBLOX source folder is not writable: $SRC\" >&2\n\
+         echo \"       The update replaces src/, scripts/ and Cargo.toml there.\" >&2\n\
+         echo \"       Move the folder into your home folder, or fix its permissions.\" >&2\n\
+         exit 1\n\
+         fi\n\
+         cp -R \"$FROM\"/. \"$SRC\"/\n\
+         cd \"$SRC\"\n\
          bash scripts/update-macos.sh\n\
          }} 2>&1 | tee -a \"$LOG\" || status=$?\n\
          if [ \"${{status:-0}}\" -ne 0 ]; then\n\
