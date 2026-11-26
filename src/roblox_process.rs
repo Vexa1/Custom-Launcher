@@ -665,11 +665,20 @@ fn ip_after_marker(text: &str, markers: &[&str]) -> Option<String> {
 /// Last address the client says it connected to on a server network line. Used only
 /// when the join banner is missing, so the overlay can still ping a real game server.
 fn ip_from_network_lines(text: &str) -> Option<String> {
+    // The spellings the desktop client actually writes, macOS included:
+    //   [FLog::Network] Connection accepted from 128.116.1.2|53640
+    //   [FLog::Network] UDMUX Address = 128.116.1.2, Port = 53640
+    //   [FLog::Network] Connected to 128.116.1.2|53640
+    // The old check also demanded the word "server" on the line, which none of these have.
+    const MARKERS: [&str; 4] = [
+        "udmux address",
+        "connection accepted from",
+        "connected to",
+        "connecting to",
+    ];
     text.lines().rev().take(600).find_map(|line| {
         let lower = line.to_ascii_lowercase();
-        let is_server_line = (lower.contains("connected to") || lower.contains("connecting to"))
-            && lower.contains("server");
-        if !is_server_line {
+        if !MARKERS.iter().any(|m| lower.contains(m)) {
             return None;
         }
         line.split(|c: char| !(c.is_ascii_digit() || c == '.'))
@@ -783,19 +792,28 @@ fn inspect_player_log_full_uncached(path: &Path) -> FullLogInspection {
             state = LogSessionState::Playing;
         }
     }
-    let (mut place_id, mut server) = if state == LogSessionState::Playing {
+    // Parse the join banner / connection line regardless of the lifecycle state. The banner
+    // is only written when a game is actually joined, so it is trustworthy on its own; gating
+    // it on `Playing` meant a log whose FSM markers were not recognised (the normal case for
+    // some macOS client builds) left the server panel and the ping empty for the whole
+    // session, even though the address was sitting right there in the file.
+    let left_game = matches!(
+        state,
+        LogSessionState::AppAfterPlay | LogSessionState::AppOnly | LogSessionState::TrayOnly
+    );
+    let (mut place_id, mut server) = if left_game {
+        (None, None)
+    } else {
         (
             extract_active_place_id_from_log(&text),
             extract_server_info_from_log(&text),
         )
-    } else {
-        (None, None)
     };
     // The join banner sits at the *start* of the session, while only the tail of the log
     // is read above. In a long session it scrolls out of that window, which left the
     // overlay stuck on "Detecting server..." and the ping empty for the whole game.
     // Fall back to the head of the file, where the join was written.
-    if state == LogSessionState::Playing && (place_id.is_none() || server.is_none()) {
+    if !left_game && (place_id.is_none() || server.is_none()) {
         let head = head_info.take().or_else(|| inspect_player_log_head(path));
         if let Some((head_place, head_server)) = head {
             if place_id.is_none() {
@@ -1077,10 +1095,25 @@ pub fn start_roblox_watcher(
                     && !ever_playing.contains(&p.pid)
                     && !matches!(log_state, Some((LogSessionState::AppAfterPlay, _)));
 
+                // Adopt the parsed address whenever the log does not show the player
+                // having left. `Unknown` used to mean "no server at all", which is exactly
+                // why the panel and the ping stayed empty on logs whose lifecycle markers
+                // are not recognised.
+                let left_game = matches!(
+                    log_state,
+                    Some((
+                        LogSessionState::AppAfterPlay
+                            | LogSessionState::AppOnly
+                            | LogSessionState::TrayOnly,
+                        _
+                    ))
+                );
+                if left_game {
+                    active_server = None;
+                } else if let Some(server) = full_session.as_ref().and_then(|f| f.3.clone()) {
+                    active_server = Some(server);
+                }
                 if is_playing {
-                    if let Some(server) = full_session.as_ref().and_then(|f| f.3.clone()) {
-                        active_server = Some(server);
-                    }
                     let parsed_pid = log_session.and_then(|(_, _, pid)| pid);
                     active_playing_place = Some(match (active_playing_place, parsed_pid) {
                         (_, Some(pid)) if pid > 0 => pid,

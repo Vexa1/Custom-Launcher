@@ -65,18 +65,42 @@ pub fn lookup_server_location(ip: &str) -> Option<String> {
             return Some(s);
         }
     }
-    let v = get_json(&format!(
+    if let Ok(v) = get_json(&format!(
         "http://ip-api.com/json/{ip}?fields=status,country,regionName,city"
-    ))
-    .ok()?;
-    if v["status"].as_str() != Some("success") {
-        return None;
+    )) {
+        if v["status"].as_str() == Some("success") {
+            if let Some(s) = join([
+                v["city"].as_str(),
+                v["regionName"].as_str(),
+                v["country"].as_str(),
+            ]) {
+                return Some(s);
+            }
+        }
     }
-    join([
-        v["city"].as_str(),
-        v["regionName"].as_str(),
-        v["country"].as_str(),
-    ])
+    // Last resort: ipinfo.io throttles unauthenticated traffic and ip-api.com answers 429
+    // under load. Both used to fail with nothing written anywhere, so a whole session could
+    // sit on "Unknown location" with no way to tell why.
+    match get_json(&format!("https://ipapi.co/{ip}/json/")) {
+        Ok(v) => {
+            let joined = join([
+                v["city"].as_str(),
+                v["region"].as_str(),
+                v["country_name"].as_str(),
+            ]);
+            if joined.is_none() {
+                crate::auth::log(&format!(
+                    "geoip: ipapi.co returned no location for {ip} ({})",
+                    v["reason"].as_str().unwrap_or("no reason given")
+                ));
+            }
+            joined
+        }
+        Err(e) => {
+            crate::auth::log(&format!("geoip: every endpoint failed for {ip}: {e}"));
+            None
+        }
+    }
 }
 
 pub fn post_json(url: &str, body: Value) -> Result<Value, String> {

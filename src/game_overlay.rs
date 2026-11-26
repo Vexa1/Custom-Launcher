@@ -508,7 +508,10 @@ fn process_counters(pid: u32) -> Option<(u64, u64)> {
             size,
         )
     };
-    if written != size {
+    // Accept any write big enough to hold the four fields below. Requiring an exact size
+    // match meant a single short read (interpreter, sandbox) left CPU/RAM on `--` for the
+    // whole session even though the process was perfectly healthy.
+    if (written as usize) < std::mem::size_of::<u64>() * 4 {
         return None;
     }
     // `pti_total_*` are nanoseconds, so no mach timebase conversion is involved. This works

@@ -560,6 +560,10 @@ impl Creblox {
         // itself instead of the second process exiting with nothing on screen.
         #[cfg(target_os = "macos")]
         crate::tray::start_instance_listener(app.tx.clone(), app.ctx.clone());
+        // A Dock click while no window is on screen is an app activation, and eframe stops
+        // ticking once the window is ordered out - so this cannot live in `update()`.
+        #[cfg(target_os = "macos")]
+        crate::tray::start_reopen_watcher(app.tx.clone(), app.ctx.clone());
         // Starting hidden only works with a menu-bar icon; without one the process would
         // run with no window and no way to bring it back.
         if start_in_tray && !app.tray.available() {

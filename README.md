@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.21
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.22
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -153,6 +153,25 @@ Nothing on the HUD is a placeholder: if a value cannot be measured it prints `�
 
 Windows measures the same two numbers through `GetProcessTimes` + `GetProcessMemoryInfo`
 (`game_overlay.rs:523`), so the stats panel is real on both platforms.
+
+#### Why the panel could sit empty (fixed in 0.4.22)
+
+There is exactly one overlay renderer: `main.rs` dispatches `--overlay-window` straight to
+`overlay_window::run` (`main.rs:44`), and the launcher's manager thread (`game_overlay.rs`)
+feeds it a JSON spec. No `NSPanel`, `CALayer`, `NSTextField` or multi-viewport path exists
+anywhere in `src/` — `grep` for them returns nothing — so a blank HUD was never a second
+renderer winning; it was data never arriving. The broken links:
+
+| Link | What went wrong | Fix |
+|---|---|---|
+| Log → session state | `inspect_player_log_full` only parsed the join banner **when the FSM state was exactly `Playing`**. macOS logs that do not carry that marker (or that roll it out of the 512 KB tail) came back `Unknown`, so the address in the file was never read | The banner is trusted on its own now: it is only written when a game is really joined (`roblox_process.rs`, `left_game` gate) |
+| Watcher → app | `active_server` was only assigned inside `if is_playing`, so the same unrecognised state also blocked delivery | Adopted for every state except the ones that mean *left the game* (`AppAfterPlay` / `AppOnly` / `TrayOnly`), which clear it |
+| Network line parser | Fallback required the words "connected to" **and** "server" on one line; the client writes `Connection accepted from 1.2.3.4\|53640` and `UDMUX Address = …` | Explicit marker list, `ip\|port` aware |
+| GeoIP | `ipinfo.io` throttles anonymous traffic, `ip-api.com` rate-limits; both failed silently | Third endpoint (`ipapi.co`) plus a `geoip:` line in the log for every failure |
+| CPU / RAM | A single short `proc_pidinfo` read was treated as failure and left `--` for the session | Any write large enough for the four fields is accepted |
+
+Ping still needs a real server address: with no IP it prints `—` rather than a number for a
+website, and the next 2 s tick picks it up as soon as the address is known.
 
 #### Edit Overlay Position (tray → drag → confirm)
 
@@ -328,6 +347,7 @@ to reach CREBLOX without leaving the session.
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
 | Edit Overlay Position… | — | Opens the on-screen HUD editor: drag it, then Confirm (⏎) or Esc. Disabled while the editor is open, and when every overlay is off. |
+| Dock icon (click) | — | Reopens the launcher. A Dock click is an app activation, not an egui event, so a small watcher thread (`tray_macos.rs::start_reopen_watcher`) notices "app active, no window on screen" and restores the window even while eframe is idle. |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
 
 **Live sync in both directions.** A menu click becomes `Msg::TrayAction` on the existing

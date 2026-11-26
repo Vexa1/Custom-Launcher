@@ -605,6 +605,16 @@ pub fn activate_app() {
         };
         let activate: Msg1 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         activate(app, sel_registerName(sel_activate.as_ptr()), 1);
+        // A hidden (`Cmd+H`) or accessory-policy app is not restored by activation alone:
+        // the Dock icon stays visible, the window stays gone and every click looks dead.
+        let Ok(sel_policy) = CString::new("setActivationPolicy:") else {
+            return;
+        };
+        activate(app, sel_registerName(sel_policy.as_ptr()), 0); // Regular: back in the Dock
+        let Ok(sel_unhide) = CString::new("unhide:") else {
+            return;
+        };
+        activate(app, sel_registerName(sel_unhide.as_ptr()), 0);
 
         // Activation alone can leave the launcher window hidden behind Roblox (or still
         // ordered out after "hide to menu bar"), so raise every window explicitly.
@@ -626,14 +636,77 @@ pub fn activate_app() {
         let Ok(sel_front) = CString::new("makeKeyAndOrderFront:") else {
             return;
         };
+        let Ok(sel_deminiaturize) = CString::new("deminiaturize:") else {
+            return;
+        };
+        let Ok(sel_can_key) = CString::new("canBecomeKeyWindow") else {
+            return;
+        };
+        type MsgBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i8;
+        let can_key: MsgBool = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         let object_at: Msg1 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         for i in 0..count {
             let window = object_at(list, sel_registerName(sel_at.as_ptr()), i as isize);
             if window.is_null() {
                 continue;
             }
+            // Skip AppKit's own helper windows (status item, menus): they cannot become
+            // key, and raising them does not bring the launcher back.
+            if can_key(window, sel_registerName(sel_can_key.as_ptr())) == 0 {
+                continue;
+            }
+            activate(window, sel_registerName(sel_deminiaturize.as_ptr()), 0);
             activate(window, sel_registerName(sel_front.as_ptr()), 0);
         }
+    }
+}
+
+static REOPEN_WATCHER: OnceLock<()> = OnceLock::new();
+
+/// Reopens the launcher when the Dock icon is clicked while no window is on screen.
+///
+/// macOS reports a Dock click as an app activation, not as an egui event, and eframe stops
+/// ticking once the window is ordered out - so the in-`update()` checks could never run in
+/// exactly the state they exist for (running Dock dot, no window). That is the "clicking the
+/// Dock icon does nothing after leaving a game" bug: the watchdog was sound but asleep.
+/// This thread is the only thing guaranteed to be alive then, and it costs one `isActive`
+/// call plus one window-list walk every 700 ms.
+pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
+    if REOPEN_WATCHER.set(()).is_err() {
+        return;
+    }
+    let spawned = thread::Builder::new()
+        .name("creblox-reopen".to_string())
+        .spawn(move || {
+            let mut idle_checks = 0u8;
+            let mut last_restore: Option<std::time::Instant> = None;
+            loop {
+                thread::sleep(Duration::from_millis(700));
+                // "No visible window" alone is not enough: hiding to the menu bar also
+                // leaves no window, and the app is inactive then. Requiring an active app
+                // means the user really did click the Dock icon / the app in Finder.
+                let needs_reopen = app_is_active() && !any_window_visible();
+                if !needs_reopen {
+                    idle_checks = 0;
+                    continue;
+                }
+                idle_checks = idle_checks.saturating_add(1);
+                // Two consecutive checks (~1.4 s): activation lags behind a hide, and a
+                // single sample could snatch the window back the instant it was hidden.
+                if idle_checks < 2 {
+                    continue;
+                }
+                if last_restore.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+                    continue;
+                }
+                last_restore = Some(std::time::Instant::now());
+                crate::auth::log("dock: reopen requested while the app had no visible window");
+                let _ = tx.send(Msg::TrayAction(TrayEvent::ShowAndFocus));
+                ctx.request_repaint();
+            }
+        });
+    if let Err(e) = spawned {
+        crate::auth::log(&format!("dock: reopen watcher failed to start: {e}"));
     }
 }
 
