@@ -92,7 +92,9 @@ impl Creblox {
                             12,
                             false,
                         );
-                        if img_resp.hovered() {
+                        // Same rule as the cards: a hero that flies past the pointer during
+                        // a fling must not start a preview.
+                        if img_resp.hovered() && !fast_scrolling(ui) {
                             acts.push(Action::HoverGame(g.universe_id));
                         }
                         if media_len > 1 {

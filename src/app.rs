@@ -105,6 +105,11 @@ pub struct Creblox {
     pub hover_start: Option<Instant>,
     pub hover_play_start: Option<Instant>,
     pub active_video_texture: Option<(u64, u64, egui::TextureHandle)>,
+    /// Decaying estimate of how fast the page is moving, so a scroll frame can skip hover
+    /// work instead of animating and previewing every card that sweeps under the pointer.
+    pub scroll_pace: crate::scroll::ScrollPace,
+    /// `scroll_pace` as a plain flag, published once per frame for the drawing code.
+    pub fast_scroll: bool,
 
     pub sorts_sync_started: Option<Instant>,
     pub saved_sync_started: Option<Instant>,
@@ -424,6 +429,8 @@ impl Creblox {
             hover_start: None,
             hover_play_start: None,
             active_video_texture: None,
+            scroll_pace: crate::scroll::ScrollPace::new(),
+            fast_scroll: false,
             sorts_sync_started: None,
             saved_sync_started: None,
             auth_sync_started: None,
@@ -3246,6 +3253,11 @@ impl Creblox {
 
     pub fn handle_game_hover(&mut self, hovered: Option<u64>, ctx: &egui::Context) {
         let now = Instant::now();
+        // A fling sweeps cards under a resting pointer in a handful of frames, so "hovered"
+        // means nothing until the page settles. Acting on it used to start a video-id lookup
+        // (a background thread) plus a repaint timer per card that flew past; while the page
+        // is moving, nothing counts as hovered and the preview loop stays off.
+        let hovered = if self.fast_scroll { None } else { hovered };
         if hovered != self.hovered_game_id {
             self.hovered_game_id = hovered;
             self.hover_start = hovered.map(|_| now);
@@ -3269,9 +3281,11 @@ impl Creblox {
             .unwrap_or(false);
 
         if !has_cached_video {
+            // Long enough that a card the pointer merely crosses on its way somewhere else
+            // never starts a download; short enough that resting on a card feels immediate.
             let dwell_passed = self
                 .hover_start
-                .map(|t| now.duration_since(t).as_millis() >= 75)
+                .map(|t| now.duration_since(t).as_millis() >= 130)
                 .unwrap_or(false);
             if !dwell_passed {
                 ctx.request_repaint_after(Duration::from_millis(40));
@@ -4647,6 +4661,22 @@ impl eframe::App for Creblox {
         if self.poll() {
             ui.ctx().request_repaint();
         }
+        // How hard is the page being flung? Measured before anything is drawn, then
+        // published for the card code, which has no `&mut Creblox` but must skip hover
+        // animation, tooltips and preview lookups while cards race past the pointer.
+        let (scroll_pts, dt) = ui.ctx().input(|i| {
+            (
+                i.smooth_scroll_delta.x.abs() + i.smooth_scroll_delta.y.abs(),
+                i.stable_dt,
+            )
+        });
+        self.scroll_pace.update(scroll_pts, dt);
+        self.fast_scroll = self.scroll_pace.is_fast();
+        let fast_scroll_id = crate::ui::widgets::fast_scroll_id();
+        if ui.ctx().data(|d| d.get_temp::<bool>(fast_scroll_id)) != Some(self.fast_scroll) {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(fast_scroll_id, self.fast_scroll));
+        }
         // CREBLOX hid itself for a game. If the game is gone but the watcher's last message was
         // missed, the window would never come back - so check for ourselves now and then.
         if self.hidden_for_game {
@@ -6006,6 +6036,9 @@ impl eframe::App for Creblox {
         if std::mem::discriminant(&self.page) != prev_page_disc
             || next_page_game_id != prev_page_game_id
         {
+            // Switching pages is not a scroll: starting the new page calm means its first
+            // cards keep their hover effects instead of inheriting the previous fling.
+            self.scroll_pace.reset();
             self.sync_discord_presence();
         }
     }

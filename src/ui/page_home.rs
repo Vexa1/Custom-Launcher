@@ -65,10 +65,14 @@ impl Creblox {
                             .party_state
                             .as_ref()
                             .is_some_and(|p| p.members.iter().any(|m| m.user.id == f.id));
-                        let sub = if in_party {
-                            format!("In party - {base_sub}")
+                        // Allocated only when the friend really is in the party; the plain
+                        // case borrows, because this runs per bubble, per frame.
+                        let in_party_sub;
+                        let sub: &str = if in_party {
+                            in_party_sub = format!("In party - {base_sub}");
+                            in_party_sub.as_str()
                         } else {
-                            base_sub.to_string()
+                            base_sub
                         };
                         let label = if !f.display.is_empty() {
                             f.display.as_str()
@@ -81,7 +85,7 @@ impl Creblox {
                             ui,
                             Some(&f.headshot),
                             label,
-                            &sub,
+                            sub,
                             f.presence,
                             false,
                             f.verified,
@@ -252,7 +256,7 @@ impl Creblox {
                 }
                 wide_row(
                     ui,
-                    &format!("sort{i}"),
+                    ("sort_row", i),
                     &s.games,
                     &self.wide,
                     self.current_card_preview(),

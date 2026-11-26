@@ -16,5 +16,8 @@ pub mod types;
 #[path = "../../src/party.rs"]
 pub mod party;
 
+#[path = "../../src/scroll.rs"]
+pub mod scroll;
+
 #[path = "../../src/server_hop.rs"]
 pub mod server_hop;

@@ -3,6 +3,22 @@ use crate::types::{Action, CardPreview, Game};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Vec2};
 use std::collections::HashMap;
 
+/// Id of the per-frame "the page is being flung" flag published by `Creblox::ui`.
+pub fn fast_scroll_id() -> egui::Id {
+    egui::Id::NULL.with("creblox_fast_scroll")
+}
+
+/// True while the page is moving fast (see `crate::scroll`).
+///
+/// A fling drags cards under a resting pointer, so during one every card looks hovered for
+/// a frame. Card code asks this before animating a hover, building a tooltip or reporting
+/// `Action::HoverGame`, which is what keeps a fast scroll from doing preview work per card.
+pub fn fast_scrolling(ui: &egui::Ui) -> bool {
+    ui.ctx()
+        .data(|d| d.get_temp::<bool>(fast_scroll_id()))
+        .unwrap_or(false)
+}
+
 pub fn avatar_glass_frame(ui: &egui::Ui, pad: i8) -> egui::Frame {
     card_frame(ui, pad)
 }
@@ -307,6 +323,9 @@ pub fn game_card(
     // Title line + one metadata line, on the 4 px grid: no reserved empty space below.
     let card_h = thumb_size.y + 52.0;
     let hover_id = ui.scope_id().with(("game_card_hover", g.universe_id));
+    // Read the fling flag once for the whole card: both the hover animation and the hover
+    // report below need it, and this runs for every card on screen.
+    let flinging = fast_scrolling(ui);
     let card_resp = ui.allocate_ui_with_layout(
         egui::vec2(w, card_h),
         egui::Layout::top_down(egui::Align::Min),
@@ -328,7 +347,13 @@ pub fn game_card(
                 .ctx()
                 .data(|d| d.get_temp::<bool>(hover_id))
                 .unwrap_or(false);
-            let hover_t = ui.ctx().animate_bool(hover_id.with("anim"), prev_hover);
+            // No hover animation at all while a fling is in progress: each one would keep
+            // requesting repaints for a card the pointer only crossed.
+            let hover_t = if flinging {
+                0.0
+            } else {
+                ui.ctx().animate_bool(hover_id.with("anim"), prev_hover)
+            };
             let border_col = lerp_color(gp.games_border, accent_color(ui), hover_t * 0.75);
             if hover_t > 0.01 {
                 ui.painter().rect_filled(
@@ -384,7 +409,10 @@ pub fn game_card(
 
     let card_rect = card_resp.response.rect;
     let pointer_in_card = ui.rect_contains_pointer(card_rect);
-    let is_hovered = pointer_in_card || card_resp.inner.0 || card_resp.response.hovered();
+    // While the page is flung, a card passing under the pointer is not being hovered: the
+    // user is scrolling past it. Reporting it would start a preview lookup per card.
+    let is_hovered =
+        (pointer_in_card || card_resp.inner.0 || card_resp.response.hovered()) && !flinging;
     let is_clicked =
         card_resp.inner.1 || (pointer_in_card && ui.input(|i| i.pointer.primary_clicked()));
     ui.ctx().data_mut(|d| {
@@ -529,7 +557,7 @@ pub fn wide_grid(
 /// jump at the same time.
 pub fn wide_row(
     ui: &mut egui::Ui,
-    id: &str,
+    id: impl std::hash::Hash + std::fmt::Debug,
     games: &[Game],
     wide: &HashMap<u64, String>,
     preview: Option<CardPreview<'_>>,
@@ -563,7 +591,7 @@ pub fn wide_row(
 
 pub fn icon_row(
     ui: &mut egui::Ui,
-    id: &str,
+    id: impl std::hash::Hash + std::fmt::Debug,
     games: &[Game],
     icons: &HashMap<u64, String>,
     preview: Option<CardPreview<'_>>,
@@ -670,15 +698,17 @@ pub fn bubble(
             // Names are centred under the avatar: a truncated `Label` inside a horizontal
             // row fills the cell and left-aligns the text, which made names drift off to
             // the left of their circles. Painting the line ourselves keeps it centred.
-            let mut name = if label.is_empty() {
-                "Player".to_string()
-            } else {
-                label.to_string()
-            };
+            // No copy of the name unless the verified mark has to be appended: this runs
+            // for every bubble, every frame.
+            let name = if label.is_empty() { "Player" } else { label };
             if verified {
-                name.push_str(" ✓");
+                let mut marked = String::with_capacity(name.len() + 3);
+                marked.push_str(name);
+                marked.push_str(" ✓");
+                bubble_line(ui, &marked, 13.0, p.text);
+            } else {
+                bubble_line(ui, name, 13.0, p.text);
             }
-            bubble_line(ui, &name, 13.0, p.text);
             if !sub.is_empty() {
                 bubble_line(ui, sub, 11.5, p.muted);
             }

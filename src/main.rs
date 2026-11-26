@@ -14,6 +14,7 @@ mod party;
 mod platform;
 mod playtime;
 mod roblox_process;
+mod scroll;
 mod server_hop;
 #[allow(dead_code)]
 mod telemetry;
