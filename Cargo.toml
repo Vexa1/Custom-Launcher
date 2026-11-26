@@ -25,6 +25,15 @@ flate2 = "1.0"
 image = { version = "0.25.10", features = ["png"] }
 open = "5.4.5"
 serde_json = "1.0.154"
+# Party: one blocking WebSocket per active party, on its own thread. rustls / ring /
+# webpki-roots are already in the tree via ureq, so this adds a WebSocket codec and no
+# second TLS implementation. No async runtime is pulled in (tungstenite is blocking).
+serde = { version = "1", features = ["derive"] }
+tungstenite = { version = "0.24", default-features = false, features = [
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # gzip: Roblox JSON responses are highly compressible; this cuts transfer size and
 # therefore latency on every API call (profiles, servers, feeds) with no API change.
 ureq = { version = "2", features = ["json", "gzip"] }

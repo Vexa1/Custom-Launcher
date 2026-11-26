@@ -13,6 +13,10 @@ impl Creblox {
             .map(|p| p.friends)
             .unwrap_or(self.friends.len() as u64);
         ui.add_space(crate::theme::SPACE_4);
+        // Party first: it is the control you reach for before picking a game, and it is a
+        // single row when there is no party.
+        self.party_bar(ui);
+        ui.add_space(crate::theme::SPACE_4);
         // Page header (20 px semibold) with the count in tabular figures, so it does not
         // nudge the title while friends come online.
         ui.horizontal(|ui| {
@@ -46,7 +50,7 @@ impl Creblox {
                             ui.allocate_exact_size(egui::vec2(BUBBLE_W, BUBBLE_H), Sense::hover());
                             continue;
                         }
-                        let sub = if f.presence == 2 && !f.location.is_empty() {
+                        let base_sub = if f.presence == 2 && !f.location.is_empty() {
                             f.location.as_str()
                         } else if f.presence == 1 {
                             "Online"
@@ -54,6 +58,17 @@ impl Creblox {
                             "In Studio"
                         } else {
                             ""
+                        };
+                        // A friend who is already in this party is marked, so the strip says
+                        // where they are before you try to invite them again.
+                        let in_party = self
+                            .party_state
+                            .as_ref()
+                            .is_some_and(|p| p.members.iter().any(|m| m.user.id == f.id));
+                        let sub = if in_party {
+                            format!("In party - {base_sub}")
+                        } else {
+                            base_sub.to_string()
                         };
                         let label = if !f.display.is_empty() {
                             f.display.as_str()
@@ -66,7 +81,7 @@ impl Creblox {
                             ui,
                             Some(&f.headshot),
                             label,
-                            sub,
+                            &sub,
                             f.presence,
                             false,
                             f.verified,
@@ -95,6 +110,13 @@ impl Creblox {
                             if let Some(pid) = f.place_id {
                                 if ui.button("Join game").clicked() {
                                     acts.push(Action::JoinPlace(pid));
+                                    ui.close();
+                                }
+                            }
+                            // Only offered inside a party: the invite is that room's code.
+                            if self.party_state.is_some() {
+                                if ui.button("Invite to Party").clicked() {
+                                    acts.push(Action::InviteToParty(f.clone()));
                                     ui.close();
                                 }
                             }

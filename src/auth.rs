@@ -487,6 +487,12 @@ pub fn load_settings() -> Settings {
         server_show_players: v["server_show_players"]
             .as_bool()
             .unwrap_or(def.server_show_players),
+        // Added after 0.4.29: absent means "use the built-in relay", never an error.
+        party_relay_url: v["party_relay_url"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
     }
 }
 
@@ -586,6 +592,7 @@ pub fn save_settings(s: &Settings) {
         "server_max_players": s.server_max_players,
         "server_max_ping": s.server_max_ping,
         "server_show_players": s.server_show_players,
+        "party_relay_url": s.party_relay_url,
     });
     if let Ok(text) = serde_json::to_string_pretty(&v) {
         let _ = fs::write(data_dir().join("settings.json"), text);

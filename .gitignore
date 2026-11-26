@@ -34,3 +34,7 @@ fastflags.json
 
 # Note: release/*.zip is intentionally NOT ignored - the release archives are
 # committed and linked from the GitHub release notes.
+
+# Cloudflare/Miniflare local state created by `wrangler dev` in relay/
+relay/node_modules/
+relay/.wrangler/

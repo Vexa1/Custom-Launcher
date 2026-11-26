@@ -133,6 +133,9 @@ pub struct Settings {
     pub server_max_ping: Option<u32>,
     /// Show the people in each server (fetched on demand, never for every server at once).
     pub server_show_players: bool,
+    /// Party relay endpoint (`wss://…/party`). Empty means the built-in default in
+    /// `party::DEFAULT_RELAY_URL`, so an older settings.json keeps working unchanged.
+    pub party_relay_url: String,
 }
 
 impl Default for Settings {
@@ -223,6 +226,7 @@ impl Default for Settings {
             server_max_players: None,
             server_max_ping: None,
             server_show_players: true,
+            party_relay_url: String::new(),
         }
     }
 }
@@ -871,6 +875,8 @@ pub enum Action {
     HoverGame(u64),
     Open(Game),
     OpenFriend(User),
+    /// Copy the party invite and point the user at this friend.
+    InviteToParty(User),
     OpenAddFriend,
     SearchUsers(String),
     LoadMoreUsers,
@@ -991,6 +997,15 @@ pub enum Msg {
     ServerLocationResolved(String, Option<String>),
     DiscordGameResolved(u64, Option<(Game, Option<String>)>),
     TrayAction(crate::tray::TrayEvent),
+    /// Party room state, a synchronised launch, or a party notice.
+    Party(crate::party::PartyEvent),
+    /// The host's capacity lookup finished: the chosen server, or why there is none.
+    PartyHostLaunch {
+        place_id: u64,
+        universe_id: u64,
+        game_name: String,
+        result: Result<crate::api::PartyServer, crate::api::PartyServerError>,
+    },
     /// Result of an off-thread "Close Roblox": how many processes were killed.
     RobloxKilled(usize),
     /// A tray Server Hop finished: the success line, or why nothing was done.

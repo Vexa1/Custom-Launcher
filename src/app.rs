@@ -234,6 +234,14 @@ pub struct Creblox {
     /// `(place id, start)` of the session being timed, if any.
     pub playtime_session: Option<(u64, Instant)>,
     pub server_info: Option<crate::roblox_process::ServerInfo>,
+    /// Party socket: one background thread, idle until Create/Join.
+    pub party: crate::party::PartyHandle,
+    pub party_state: Option<crate::party::PartySnapshot>,
+    pub party_join_code: String,
+    pub party_error: Option<String>,
+    pub party_invite_open: bool,
+    /// Last presence sent to the relay, so no repaint can spam the socket with frames.
+    pub party_presence: Option<(crate::party::PartyStatus, u64, String)>,
     pub server_locations: HashMap<String, String>,
     pub server_location_pending: HashSet<String>,
     pub game_overlay: crate::game_overlay::OverlayManager,
@@ -325,6 +333,9 @@ impl Creblox {
             tx.clone(),
             cc.egui_ctx.clone(),
         );
+        // Built before the struct literal because it needs a clone of `tx`, which the
+        // literal itself takes ownership of.
+        let party = crate::party::PartyHandle::new(tx.clone(), cc.egui_ctx.clone());
         let saved_accounts = load_accounts();
         let fastflags = load_fastflags();
         let _ = sync_client_fastflags(&fastflags, settings.target_fps, &[]);
@@ -527,6 +538,12 @@ impl Creblox {
             playtime: crate::playtime::load(),
             playtime_session: None,
             server_info: None,
+            party,
+            party_state: None,
+            party_join_code: String::new(),
+            party_error: None,
+            party_invite_open: false,
+            party_presence: None,
             server_locations: HashMap::new(),
             server_location_pending: HashSet::new(),
             game_overlay: crate::game_overlay::OverlayManager::new(),
@@ -2621,6 +2638,7 @@ impl Creblox {
                     self.active_roblox_started_at = None;
                     self.pending_discord_launch = None;
                     self.sync_discord_presence();
+                    self.party_sync_presence();
                     if self.status.contains("Launching")
                         || self.status.contains("Joining")
                         || self.status.contains("Getting launch ticket")
@@ -2674,6 +2692,9 @@ impl Creblox {
                                 }
                                 self.active_roblox_place_id = Some(pid);
                                 crate::auth::log(&format!("session: joined place {pid}"));
+                                // The party sees "Launching" until the log watcher knows the
+                                // place; this is the moment the dot turns into "In game".
+                                self.party_sync_presence();
                                 // Overlays come up for every session, even when the server
                                 // IP is never resolved (the old code only started them on a
                                 // server update, so they could silently never appear).
@@ -2754,6 +2775,61 @@ impl Creblox {
                             7.5,
                             true,
                         );
+                    }
+                },
+                Msg::Party(ev) => match ev {
+                    crate::party::PartyEvent::Snapshot(snapshot) => {
+                        let joined = self
+                            .party_state
+                            .as_ref()
+                            .map(|p| p.code == snapshot.code)
+                            .unwrap_or(false);
+                        if !joined {
+                            self.status = format!("In party {}", snapshot.code);
+                        }
+                        self.party_error = None;
+                        self.party_state = Some(snapshot);
+                        // A fresh snapshot is the natural moment to say where we are.
+                        self.party_sync_presence();
+                        self.sync_discord_presence();
+                    }
+                    crate::party::PartyEvent::Launch(launch) => self.party_follow_launch(launch),
+                    crate::party::PartyEvent::Notice(message) => {
+                        self.status = message.clone();
+                        self.party_error = Some(message);
+                    }
+                    crate::party::PartyEvent::Left(reason) => {
+                        self.party_state = None;
+                        self.party_presence = None;
+                        self.status = reason;
+                    }
+                },
+                Msg::PartyHostLaunch {
+                    place_id,
+                    universe_id,
+                    game_name,
+                    result,
+                } => match result {
+                    Ok(server) => {
+                        crate::auth::log(&format!(
+                            "party: host launch place {} -> {} ({} free, {} of {})",
+                            place_id, server.job_id, server.free_slots, server.playing, server.max_players
+                        ));
+                        self.party_error = None;
+                        self.party_start_launch(crate::party::PartyLaunch {
+                            place_id,
+                            job_id: server.job_id,
+                            universe_id,
+                            game_name,
+                            by: self.me.as_ref().map(|me| me.user.id).unwrap_or(0),
+                        });
+                    }
+                    Err(error) => {
+                        // Nothing was launched: the host keeps the party and can retry.
+                        let message = error.message();
+                        crate::auth::log(&format!("party: no server for the party: {message}"));
+                        self.status = message.clone();
+                        self.party_error = Some(message);
                     }
                 },
                 Msg::TrayAction(ev) => {
@@ -3394,6 +3470,180 @@ impl Creblox {
         }
     }
 
+    // ----- party -----
+
+    fn party_user(&self) -> Option<crate::party::PartyUser> {
+        let me = self.me.as_ref()?;
+        Some(crate::party::PartyUser {
+            id: me.user.id,
+            name: me.user.name.clone(),
+            display_name: me.user.display.clone(),
+            headshot_url: me.user.headshot.clone(),
+        })
+    }
+
+    fn party_relay(&self) -> String {
+        crate::party::relay_url(&self.settings.party_relay_url)
+    }
+
+    /// Host of a party with somebody else in it: Play coordinates a server for everybody.
+    fn party_coordinates_launch(&self) -> bool {
+        self.party_state.as_ref().is_some_and(|p| {
+            p.members.len() > 1 && self.me.as_ref().is_some_and(|me| p.is_host(me.user.id))
+        })
+    }
+
+    pub fn party_create(&mut self) {
+        let Some(me) = self.party_user() else {
+            self.party_error = Some("Sign in to start a party".to_string());
+            return;
+        };
+        self.party_error = None;
+        self.status = "Creating a party...".to_string();
+        self.party
+            .create(me, crate::party::MAX_PARTY_SIZE, self.party_relay());
+    }
+
+    pub fn party_join(&mut self, raw: String) {
+        let Some(me) = self.party_user() else {
+            self.party_error = Some("Sign in to join a party".to_string());
+            return;
+        };
+        let Some(code) = crate::party::parse_invite(&raw) else {
+            self.party_error = Some("That invite code does not look right".to_string());
+            return;
+        };
+        self.party_error = None;
+        self.status = format!("Joining party {code}...");
+        self.party.join(code, me, self.party_relay());
+        self.party_join_code.clear();
+    }
+
+    pub fn party_leave(&mut self) {
+        self.party.leave();
+    }
+
+    pub fn party_copy_invite(&mut self) {
+        let Some(party) = &self.party_state else {
+            return;
+        };
+        let text = format!(
+            "Join my CREBLOX party: creblox://party/{} (code {})",
+            party.code, party.code
+        );
+        self.ctx.copy_text(text);
+        self.status = format!("Party invite copied - {}", party.code);
+    }
+
+    /// Tell a friend the invite: one click, and the code is ready to paste to them.
+    pub fn party_invite_friend(&mut self, user: &crate::types::User) {
+        if self.party_state.is_none() {
+            self.party_error = Some("Create a party first".to_string());
+            return;
+        }
+        self.party_copy_invite();
+        let name = if user.display.is_empty() {
+            user.name.clone()
+        } else {
+            user.display.clone()
+        };
+        self.status = format!("Invite copied - send it to {name}");
+    }
+
+    /// Host launch: find one server with room for the whole party, then tell everybody and
+    /// launch locally. Without a party, or as a member, this is a normal launch.
+    pub fn party_launch(&mut self, place_id: u64, universe_id: u64, game_name: String) {
+        if !self.party_coordinates_launch() {
+            self.launch_place_id(place_id);
+            return;
+        }
+        let Some(cookie) = self.cookie.clone() else {
+            self.status = "Sign in to launch".to_string();
+            return;
+        };
+        let size = self
+            .party_state
+            .as_ref()
+            .map(|p| p.members.len())
+            .unwrap_or(1)
+            .max(1);
+        self.status = format!("Finding a server for {size}...");
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::api::find_server_for_party(place_id, size, Some(&cookie));
+            let _ = tx.send(Msg::PartyHostLaunch {
+                place_id,
+                universe_id,
+                game_name,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Host path once a server was found: broadcast first, then join it here.
+    fn party_start_launch(&mut self, launch: crate::party::PartyLaunch) {
+        self.party.broadcast_launch(launch.clone());
+        self.party.set_status(
+            crate::party::PartyStatus::Launching,
+            Some(launch.place_id),
+            Some(launch.job_id.clone()),
+        );
+        self.launch_server(launch.place_id, launch.job_id.clone());
+        self.status = format!("Party launch: everyone is joining {}", launch.game_name);
+    }
+
+    /// A launch packet from the host: join exactly that server.
+    fn party_follow_launch(&mut self, launch: crate::party::PartyLaunch) {
+        if self
+            .me
+            .as_ref()
+            .is_some_and(|me| me.user.id == launch.by)
+        {
+            return;
+        }
+        if self.cookie.is_none() {
+            self.status = "Sign in to join the party launch".to_string();
+            return;
+        }
+        self.party.set_status(
+            crate::party::PartyStatus::Launching,
+            Some(launch.place_id),
+            Some(launch.job_id.clone()),
+        );
+        self.launch_server(launch.place_id, launch.job_id.clone());
+        self.status = format!("Joining the party's server for {}", launch.game_name);
+    }
+
+    /// Keep the party's view of this member in step with the Roblox session. Deduplicated:
+    /// an unchanged session sends nothing.
+    pub fn party_sync_presence(&mut self) {
+        if !crate::party::in_party() {
+            self.party_presence = None;
+            return;
+        }
+        let place = self.active_roblox_place_id.unwrap_or(0);
+        let job = self
+            .server_info
+            .as_ref()
+            .map(|s| s.job_id.clone())
+            .filter(|j| !j.is_empty())
+            .unwrap_or_default();
+        let status = if place > 0 && !job.is_empty() {
+            crate::party::PartyStatus::InGame
+        } else if place > 0 {
+            crate::party::PartyStatus::Launching
+        } else {
+            crate::party::PartyStatus::Ready
+        };
+        let next = (status, place, job);
+        if self.party_presence.as_ref() != Some(&next) {
+            self.party.set_status(status, Some(place), Some(next.2.clone()));
+            self.party_presence = Some(next);
+        }
+    }
+
     /// Start a Server Hop from the tray menu.
     ///
     /// The lookup, the kill and the relaunch happen on a worker thread (two network round
@@ -3467,10 +3717,17 @@ impl Creblox {
         if self.cookie.is_none() {
             return;
         }
-        self.status = "Getting launch ticket...".to_string();
         self.note_discord_game_launch(g.place_id, Some(g.clone()));
-        self.launch_place_id(g.place_id);
         self.record_recent_game(g.clone());
+        // Play is the one entry point shared by Home, Charts, Search, Friends, Game Details
+        // and the party bar. A host with members picks one server for the whole party; every
+        // other case launches exactly as before.
+        if self.party_coordinates_launch() {
+            self.party_launch(g.place_id, g.universe_id, g.name.clone());
+            return;
+        }
+        self.status = "Getting launch ticket...".to_string();
+        self.launch_place_id(g.place_id);
     }
 
     // ----- pages -----
@@ -5688,6 +5945,7 @@ impl eframe::App for Creblox {
                     }
                 }
                 Action::Play(g) => self.play(&g),
+                Action::InviteToParty(user) => self.party_invite_friend(&user),
                 Action::JoinPlace(pid) => {
                     self.status = "Joining friend...".to_string();
                     self.record_recent_place_id(pid);
