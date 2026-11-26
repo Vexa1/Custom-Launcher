@@ -19,6 +19,7 @@ use crate::theme::{apply_theme, install_fonts, theme_accent};
 pub const CREBLOX_REPO: &str = "Vexa1/Custom-Launcher";
 pub const CREBLOX_RELEASES_URL: &str = "https://github.com/Vexa1/Custom-Launcher/releases";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(target_os = "macos")]
 const UPDATE_TOKEN_SERVICE: &str = "CREBLOX Update Token";
 
 /// Optional fine-grained GitHub token (Contents: Read) for the private repository.
@@ -197,9 +198,15 @@ fn find_zip_url(text: &str) -> Option<String> {
             continue;
         }
         // The body publishes the update overlay next to the full project zip.
-        // Prefer the overlay so an in-app update downloads ~347 KB, not ~677 KB.
+        // Prefer the overlay so an in-app update downloads ~347 KB, not ~677 KB; on Windows
+        // the matching artifact is the small x64 build instead.
         let file = path.rsplit('/').next().unwrap_or(path);
-        if file.contains("update") && !file.contains("full") {
+        let wanted = if cfg!(target_os = "windows") {
+            file.contains("windows")
+        } else {
+            file.contains("update") && !file.contains("full")
+        };
+        if wanted {
             return Some(candidate.to_string());
         }
         if first.is_none() {
@@ -271,7 +278,11 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
                 continue;
             }
             if lower.ends_with(".zip") {
-                let preferred = lower.contains("creblox") || lower.contains("macos");
+                let preferred = if cfg!(target_os = "windows") {
+                    lower.contains("windows")
+                } else {
+                    lower.contains("creblox") || lower.contains("macos")
+                };
                 let size = a["size"].as_u64().unwrap_or(0);
                 let replace = match &chosen_zip {
                     None => true,
@@ -550,6 +561,7 @@ pub fn download_update_zip(
     Ok(dest)
 }
 
+#[cfg(target_os = "macos")]
 pub fn source_folder() -> Option<PathBuf> {
     let raw = fs::read_to_string(crate::auth::data_dir().join("source-folder")).ok()?;
     let path = PathBuf::from(raw.trim());
@@ -560,10 +572,12 @@ pub fn source_folder() -> Option<PathBuf> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn is_update_root(path: &Path) -> bool {
     path.join("Cargo.toml").is_file() && path.join("scripts/update-macos.sh").is_file()
 }
 
+#[cfg(target_os = "macos")]
 fn find_update_root(dir: &Path, depth: u8) -> Option<PathBuf> {
     if is_update_root(dir) {
         return Some(dir.to_path_buf());
@@ -582,6 +596,7 @@ fn find_update_root(dir: &Path, depth: u8) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn extract_update_zip(zip: &Path, dest: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let out = Command::new("/usr/bin/ditto")
@@ -609,6 +624,7 @@ fn extract_update_zip(zip: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -694,17 +710,157 @@ impl UpdateProgress {
     }
 }
 
-/// Replaces the old "open Terminal and run a generated script" installer: extract, copy,
-/// build and a detached swap-and-reopen all happen with piped stdio, on the caller's thread.
+/// The largest `creblox.exe` an update may carry. Anything bigger is not our launcher, and
+/// must never reach the exe swap.
+#[cfg(windows)]
+const MAX_UPDATE_EXE_BYTES: u64 = 200 * 1024 * 1024;
+/// Below this a "creblox.exe" cannot be the real launcher, so a truncated download can do no
+/// harm to a working install.
+#[cfg(windows)]
+const MIN_UPDATE_EXE_BYTES: u64 = 64 * 1024;
+
+/// Pulls the single `creblox.exe` out of a release zip with the `zip` crate: no PowerShell,
+/// no external unzip, and no directory traversal, because only the file name is ever used.
+#[cfg(windows)]
+fn extract_exe_from_zip(zip: &Path, dest: &Path) -> Result<PathBuf, String> {
+    let file = fs::File::open(zip).map_err(|e| format!("Could not open the update zip: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("The update zip could not be read: {e}"))?;
+
+    let mut found: Option<(usize, u64)> = None;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| format!("The update zip is damaged: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().rsplit(['/', '\\']).next().unwrap_or_default();
+        if name.eq_ignore_ascii_case("creblox.exe") {
+            found = Some((index, entry.size()));
+            break;
+        }
+    }
+    let Some((index, size)) = found else {
+        return Err("The update zip does not contain creblox.exe.".to_string());
+    };
+    if size == 0 || size > MAX_UPDATE_EXE_BYTES {
+        return Err(format!(
+            "The update zip carries an unusable creblox.exe ({size} bytes)."
+        ));
+    }
+
+    let target = dest.join("creblox.exe");
+    let mut entry = archive
+        .by_index(index)
+        .map_err(|e| format!("The update zip is damaged: {e}"))?;
+    let mut out = fs::File::create(&target)
+        .map_err(|e| format!("Could not write the new executable: {e}"))?;
+    let copied = std::io::copy(&mut entry, &mut out)
+        .map_err(|e| format!("Could not extract the new executable: {e}"))?;
+    out.flush()
+        .map_err(|e| format!("Could not finish the new executable: {e}"))?;
+    if copied != size {
+        let _ = fs::remove_file(&target);
+        return Err("The update zip ended in the middle of creblox.exe.".to_string());
+    }
+    Ok(target)
+}
+
+/// Starts the freshly swapped build. `--updated` tells it to skip the "focus the copy that is
+/// already running" check, because that copy is this process, still on its way out.
+#[cfg(windows)]
+fn spawn_updated_exe(exe: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    Command::new(exe)
+        .arg("--updated")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("The update was installed but CREBLOX could not reopen: {e}"))
+}
+
+/// Windows self-update: unzip, sanity-check, swap, reopen. The swap is the same retrying
+/// rename the .exe asset path uses, so a running launcher is replaced in place with no
+/// helper process, no script and no admin prompt.
+#[cfg(windows)]
+fn install_windows_exe_update(
+    zip: &Path,
+    progress: &UpdateProgress,
+    ctx: &egui::Context,
+) -> Result<(), String> {
+    progress.set_stage(UpdateStage::Extracting, ctx);
+    let staging = updates_dir().join("exe-staging");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|e| format!("Could not create the update folder: {e}"))?;
+    progress.push("Extracting the new creblox.exe.".to_string(), ctx);
+    let staged = extract_exe_from_zip(zip, &staging)?;
+
+    let size = fs::metadata(&staged)
+        .map_err(|e| format!("Could not read the new executable: {e}"))?
+        .len();
+    let mut magic = [0u8; 2];
+    let looks_like_exe = size >= MIN_UPDATE_EXE_BYTES
+        && fs::File::open(&staged)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .is_ok()
+        && &magic == b"MZ";
+    if !looks_like_exe {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("The update zip does not contain a Windows executable.".to_string());
+    }
+
+    progress.set_stage(UpdateStage::Installing, ctx);
+    let current = std::env::current_exe()
+        .map_err(|e| format!("Could not locate the running CREBLOX: {e}"))?;
+    progress.push(format!("Replacing {}.", current.display()), ctx);
+    swap_binary_with_retries(&current, &staged)?;
+    let _ = fs::remove_dir_all(&staging);
+
+    progress.set_stage(UpdateStage::Restarting, ctx);
+    progress.push(
+        "The new build is in place; reopening CREBLOX.".to_string(),
+        ctx,
+    );
+    spawn_updated_exe(&current)
+}
+
+/// Applies a downloaded release. macOS rebuilds the bundle from the source overlay; Windows
+/// ships one exe and swaps it in place.
 pub fn install_update_in_app(
     zip: &Path,
     version: &str,
     progress: &UpdateProgress,
     ctx: &egui::Context,
 ) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Err("The silent self-update is macOS-only.".to_string());
+    #[cfg(windows)]
+    {
+        let _ = version;
+        install_windows_exe_update(zip, progress, ctx)
     }
+    #[cfg(target_os = "macos")]
+    {
+        install_macos_update_in_app(zip, version, progress, ctx)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (zip, version, progress, ctx);
+        Err("The silent self-update is supported on macOS and Windows.".to_string())
+    }
+}
+
+/// Replaces the old "open Terminal and run a generated script" installer: extract, copy,
+/// build and a detached swap-and-reopen all happen with piped stdio, on the caller's thread.
+#[cfg(target_os = "macos")]
+fn install_macos_update_in_app(
+    zip: &Path,
+    version: &str,
+    progress: &UpdateProgress,
+    ctx: &egui::Context,
+) -> Result<(), String> {
     let source = source_folder().ok_or_else(|| {
         "Could not find the app source folder. Use Download in Browser / Releases once."
             .to_string()
@@ -763,6 +919,7 @@ pub fn install_update_in_app(
 }
 
 /// Fails before touching anything, with a sentence the window can show.
+#[cfg(target_os = "macos")]
 fn preflight(source: &Path) -> Result<(), String> {
     for needed in ["Cargo.toml", "scripts/build-macos-app.sh"] {
         if !source.join(needed).is_file() {
@@ -797,6 +954,7 @@ fn preflight(source: &Path) -> Result<(), String> {
 }
 
 /// A GUI-launched app has a minimal PATH, so cargo is looked up where it is installed.
+#[cfg(target_os = "macos")]
 fn cargo_binary() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
@@ -819,6 +977,7 @@ fn cargo_binary() -> Option<PathBuf> {
 }
 
 /// Copies a staged tree over the source folder; deletions are the removal list's job.
+#[cfg(target_os = "macos")]
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| format!("Could not create {}: {e}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|e| format!("Could not read {}: {e}", from.display()))?;
@@ -840,6 +999,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// `creblox-update-remove.txt` lists paths this version no longer ships.
+#[cfg(target_os = "macos")]
 fn apply_removals(source: &Path, progress: &UpdateProgress, ctx: &egui::Context) {
     let Ok(list) = fs::read_to_string(source.join("creblox-update-remove.txt")) else {
         return;
@@ -865,6 +1025,7 @@ fn apply_removals(source: &Path, progress: &UpdateProgress, ctx: &egui::Context)
 }
 
 /// Runs a command with no controlling terminal, streaming both pipes into the Details log.
+#[cfg(target_os = "macos")]
 fn run_streamed(
     program: &Path,
     args: &[&str],
@@ -913,6 +1074,7 @@ fn run_streamed(
 
 /// One pipe, one thread: stdout and stderr are read in parallel so neither buffer can fill
 /// and stall the build while the other is being drained.
+#[cfg(target_os = "macos")]
 fn stream_reader(
     pipe: impl std::io::Read + Send + 'static,
     progress: &UpdateProgress,
@@ -932,6 +1094,7 @@ fn stream_reader(
 }
 
 /// Install target, matching `scripts/build-macos-app.sh`.
+#[cfg(target_os = "macos")]
 fn install_destination() -> PathBuf {
     let system = PathBuf::from("/Applications");
     if system.is_dir() && is_writable(&system) {
@@ -944,6 +1107,7 @@ fn install_destination() -> PathBuf {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn is_writable(dir: &Path) -> bool {
     let probe = dir.join(".creblox-write-test");
     match fs::write(&probe, b"ok") {
@@ -957,6 +1121,7 @@ fn is_writable(dir: &Path) -> bool {
 
 /// Waits for this process to exit, swaps the bundle and reopens it. Detached, every standard
 /// stream on /dev/null: nothing pops up, and nothing keeps the closing window alive.
+#[cfg(target_os = "macos")]
 fn spawn_relaunch_waiter(old_pid: u32, built: &Path) -> Result<(), String> {
     let dest_path = install_destination();
     let staged_path = dest_path.with_extension("app.new");

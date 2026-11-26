@@ -14,6 +14,7 @@
 //! ```
 //! Corners: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
 
+#[cfg(target_os = "macos")]
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +36,7 @@ struct CGRect {
     h: f64,
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *const c_void;
@@ -46,6 +48,7 @@ unsafe extern "C" {
     static kCGWindowLayer: *const c_void;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFArrayGetCount(array: *const c_void) -> isize;
@@ -56,8 +59,11 @@ unsafe extern "C" {
     fn CFRelease(obj: *const c_void);
 }
 
+#[cfg(target_os = "macos")]
 const EXCLUDE_DESKTOP_ELEMENTS: u32 = 16;
+#[cfg(target_os = "macos")]
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[cfg(target_os = "macos")]
 const CF_NUMBER_SINT32: i32 = 3;
 
 /// Bounds (in points, origin top-left of the primary display) of the largest Roblox window.
@@ -66,6 +72,7 @@ const CF_NUMBER_SINT32: i32 = 3;
 /// lives on its own Space, and window layers differ between windowed, borderless and
 /// fullscreen modes, so a layer-0 on-screen search can come back empty while the game is
 /// right there. CREBLOX's own windows are skipped.
+#[cfg(target_os = "macos")]
 fn find_roblox_window() -> Option<CGRect> {
     unsafe {
         let list = CGWindowListCopyWindowInfo(EXCLUDE_DESKTOP_ELEMENTS, 0);
@@ -147,6 +154,7 @@ fn find_roblox_window() -> Option<CGRect> {
 /// Recording permission on modern macOS; without it the list can come back without
 /// Roblox in it. Falling back to the display means the overlays still appear (covering
 /// the game screen) instead of the whole overlay silently drawing nothing.
+#[cfg(target_os = "macos")]
 fn main_display_bounds() -> Option<CGRect> {
     unsafe {
         let rect = CGDisplayBounds(CGMainDisplayID());
@@ -155,9 +163,305 @@ fn main_display_bounds() -> Option<CGRect> {
 }
 
 // ---------------------------------------------------------------------------
+// Win32: find the Roblox window and drive our own overlay window
+// ---------------------------------------------------------------------------
+//
+// Same two questions the macOS path answers with CoreGraphics/AppKit: where is Roblox's
+// game window, and how does this process float a window above it without ever taking
+// focus? Everything here goes through the Win32 calls winit/eframe already use, so the
+// overlay needs no extra runtime and no external tool.
+
+#[cfg(windows)]
+mod win32 {
+    use super::CGRect;
+    use std::ffi::{OsString, c_void};
+    use std::os::windows::ffi::OsStringExt;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, RECT, TRUE};
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GWL_EXSTYLE, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
+        GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        HWND_TOPMOST, IsIconic, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE,
+        SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_EX_TRANSPARENT,
+    };
+
+    /// The title winit gives the overlay's only top-level window.
+    const OVERLAY_TITLE: &str = "CREBLOX Overlay";
+
+    fn scale_for(dpi: u32) -> f64 {
+        if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+    }
+
+    /// Base name of a process image, lower-case: `("robloxplayerbeta.exe")`.
+    ///
+    /// `QueryFullProcessImageNameW` reads the path through a query-only handle, so it works
+    /// on a normal user account and on protected games without any elevation.
+    fn process_name(pid: u32) -> Option<String> {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if handle as usize == 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(handle);
+            if ok == 0 || len == 0 {
+                return None;
+            }
+            let path = OsString::from_wide(&buf[..len as usize]);
+            let text = path.to_string_lossy().replace('/', "\\");
+            Some(text.rsplit('\\').next().unwrap_or_default().to_ascii_lowercase())
+        }
+    }
+
+    /// Window rectangle in egui points, excluding the invisible resize border.
+    fn window_rect(hwnd: HWND) -> Option<CGRect> {
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        // The DWM frame bounds are what the user sees; `GetWindowRect` includes the
+        // invisible border Windows 10 adds to every resizable window.
+        let mut ok = unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+                &mut rect as *mut RECT as *mut c_void,
+                std::mem::size_of::<RECT>() as u32,
+            )
+        };
+        if ok != 0 {
+            ok = unsafe { GetWindowRect(hwnd, &mut rect) };
+        }
+        if ok == 0 {
+            return None;
+        }
+        let scale = scale_for(unsafe { GetDpiForWindow(hwnd) });
+        Some(CGRect {
+            x: rect.left as f64 / scale,
+            y: rect.top as f64 / scale,
+            w: (rect.right - rect.left) as f64 / scale,
+            h: (rect.bottom - rect.top) as f64 / scale,
+        })
+    }
+
+    struct Pick {
+        best: Option<(CGRect, f64)>,
+        own_pid: u32,
+    }
+
+    unsafe extern "system" fn pick_roblox(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let pick = unsafe { &mut *(lparam as *mut Pick) };
+        unsafe {
+            // Minimised windows have a bogus rect; the overlay must never cover the desktop
+            // because the game was minimized.
+            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                return TRUE;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 || pid == pick.own_pid {
+                return TRUE;
+            }
+            let Some(name) = process_name(pid) else {
+                return TRUE;
+            };
+            if !name.starts_with("robloxplayer") {
+                return TRUE;
+            }
+            let Some(rect) = window_rect(hwnd) else {
+                return TRUE;
+            };
+            if rect.w <= 1.0 || rect.h <= 1.0 {
+                return TRUE;
+            }
+            let area = rect.w * rect.h;
+            if pick.best.as_ref().is_none_or(|(_, best)| area > *best) {
+                pick.best = Some((rect, area));
+            }
+        }
+        TRUE
+    }
+
+    pub fn find_roblox_window() -> Option<CGRect> {
+        let mut pick = Pick {
+            best: None,
+            own_pid: std::process::id(),
+        };
+        unsafe { EnumWindows(Some(pick_roblox), &mut pick as *mut Pick as LPARAM) };
+        pick.best.map(|(rect, _)| rect)
+    }
+
+    pub fn main_display_bounds() -> Option<CGRect> {
+        let scale = scale_for(unsafe { GetDpiForSystem() });
+        let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        Some(CGRect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f64 / scale,
+            h: h as f64 / scale,
+        })
+    }
+
+    pub fn frontmost_application() -> Option<(String, i32)> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd as usize == 0 {
+            return None;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid == 0 {
+            return None;
+        }
+        process_name(pid).map(|name| (name, pid as i32))
+    }
+
+    struct Own {
+        pid: u32,
+        title: Vec<u16>,
+        titled: HWND,
+        first: HWND,
+    }
+
+    unsafe extern "system" fn pick_own(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let own = unsafe { &mut *(lparam as *mut Own) };
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != own.pid {
+                return TRUE;
+            }
+            if own.first as usize == 0 {
+                own.first = hwnd;
+            }
+            if own.titled as usize == 0 {
+                let len = GetWindowTextLengthW(hwnd);
+                if len > 0 {
+                    let mut buf = vec![0u16; len as usize + 1];
+                    let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+                    if copied > 0 && buf[..copied as usize] == own.title[..] {
+                        own.titled = hwnd;
+                    }
+                }
+            }
+        }
+        TRUE
+    }
+
+    /// This process's overlay window, found by title and never by a guessed handle: winit
+    /// owns the HWND and would not survive us caching it across a recreate.
+    fn own_window() -> Option<HWND> {
+        let mut own = Own {
+            pid: std::process::id(),
+            title: OVERLAY_TITLE.encode_utf16().collect(),
+            titled: 0 as HWND,
+            first: 0 as HWND,
+        };
+        unsafe { EnumWindows(Some(pick_own), &mut own as *mut Own as LPARAM) };
+        let found = if own.titled as usize != 0 {
+            own.titled
+        } else {
+            own.first
+        };
+        (found as usize != 0).then_some(found)
+    }
+
+    /// Show or hide the overlay without destroying it, and without activating it.
+    pub fn set_overlay_visible(visible: bool) {
+        unsafe {
+            let Some(hwnd) = own_window() else {
+                return;
+            };
+            if visible {
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            } else {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+
+    /// Topmost, tool-window (no taskbar button), never focusable, click-through unless the
+    /// position editor asked for input. Returns false until the window exists.
+    pub fn tweak_overlay_window(interactive: bool) -> bool {
+        unsafe {
+            let Some(hwnd) = own_window() else {
+                return false;
+            };
+            let mut style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            style |= WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST;
+            if interactive {
+                style &= !WS_EX_TRANSPARENT;
+            } else {
+                style |= WS_EX_TRANSPARENT;
+            }
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize);
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        true
+    }
+}
+
+#[cfg(windows)]
+fn find_roblox_window() -> Option<CGRect> {
+    win32::find_roblox_window()
+}
+
+#[cfg(windows)]
+fn main_display_bounds() -> Option<CGRect> {
+    win32::main_display_bounds()
+}
+
+/// Nothing to do on Windows: a plain Win32 window has no Dock icon and no activation
+/// policy; `tweak_overlay_window` keeps it out of the taskbar and out of focus instead.
+#[cfg(windows)]
+fn set_accessory_policy() {}
+
+#[cfg(windows)]
+fn frontmost_application() -> Option<(String, i32)> {
+    win32::frontmost_application()
+}
+
+#[cfg(windows)]
+fn set_overlay_visible(visible: bool) {
+    win32::set_overlay_visible(visible);
+}
+
+#[cfg(windows)]
+fn tweak_overlay_window(interactive: bool) -> bool {
+    win32::tweak_overlay_window(interactive)
+}
+
+// ---------------------------------------------------------------------------
 // AppKit tweaks through the Objective-C runtime (no extra crates)
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
 #[link(name = "objc")]
 unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> *mut c_void;
@@ -165,10 +469,14 @@ unsafe extern "C" {
     fn objc_msgSend();
 }
 
+#[cfg(target_os = "macos")]
 type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+#[cfg(target_os = "macos")]
 type Msg1 = unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> *mut c_void;
+#[cfg(target_os = "macos")]
 type Msg1F = unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void;
 
+#[cfg(target_os = "macos")]
 unsafe fn msg0(obj: *mut c_void, sel: &str) -> *mut c_void {
     let Ok(name) = CString::new(sel) else {
         return std::ptr::null_mut();
@@ -179,6 +487,7 @@ unsafe fn msg0(obj: *mut c_void, sel: &str) -> *mut c_void {
     }
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn msg1(obj: *mut c_void, sel: &str, arg: isize) -> *mut c_void {
     let Ok(name) = CString::new(sel) else {
         return std::ptr::null_mut();
@@ -190,6 +499,7 @@ unsafe fn msg1(obj: *mut c_void, sel: &str, arg: isize) -> *mut c_void {
 }
 
 /// `objc_msgSend` for a `CGFloat` (f64) argument, such as `setAlphaValue:`.
+#[cfg(target_os = "macos")]
 unsafe fn msg1_f(obj: *mut c_void, sel: &str, arg: f64) -> *mut c_void {
     let Ok(name) = CString::new(sel) else {
         return std::ptr::null_mut();
@@ -205,6 +515,7 @@ unsafe fn msg1_f(obj: *mut c_void, sel: &str, arg: f64) -> *mut c_void {
 ///
 /// `interactive` is the position editor: it is the only state in which the overlay accepts a
 /// click, so the window stays strictly click-through for the whole rest of the session.
+#[cfg(target_os = "macos")]
 fn tweak_overlay_window(interactive: bool) -> bool {
     unsafe {
         let class = objc_getClass(c"NSApplication".as_ptr());
@@ -422,6 +733,7 @@ struct OverlayImage {
 /// creating the overlay can never steal focus from Roblox. Without this the overlay
 /// process could become the frontmost app for a moment, the "is Roblox in front" check
 /// then failed, and the overlay hid itself - and never came back.
+#[cfg(target_os = "macos")]
 fn set_accessory_policy() {
     unsafe {
         let class = objc_getClass(c"NSApplication".as_ptr());
@@ -438,6 +750,7 @@ fn set_accessory_policy() {
 
 /// `(name, pid)` of the application currently in front of everything else (name lower-case),
 /// e.g. `("roblox", 1234)`.
+#[cfg(target_os = "macos")]
 fn frontmost_application() -> Option<(String, i32)> {
     unsafe {
         let class = objc_getClass(c"NSWorkspace".as_ptr());
@@ -472,6 +785,7 @@ fn frontmost_application() -> Option<(String, i32)> {
 ///
 /// The window floats above every app and every Space, so without this it stayed on screen
 /// for a moment after switching away from Roblox (or kept sitting over the launcher).
+#[cfg(target_os = "macos")]
 fn set_overlay_visible(visible: bool) {
     unsafe {
         let class = objc_getClass(c"NSApplication".as_ptr());
@@ -1598,6 +1912,8 @@ pub fn run(spec_path: PathBuf) -> eframe::Result<()> {
         .with_transparent(true)
         .with_always_on_top()
         .with_mouse_passthrough(true)
+        // Tool-window style: the HUD must never add a second taskbar button.
+        .with_taskbar(false)
         .with_resizable(false);
     // `with_active(false)` used to be set here. It tells winit not to activate the app, but
     // an inactive, accessory-policy process is also the one winit is least willing to order

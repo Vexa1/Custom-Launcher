@@ -74,6 +74,21 @@ pub fn in_party() -> bool {
     IN_PARTY.load(Ordering::Relaxed)
 }
 
+/// A `creblox://party/<code>` link the process was started with (double-clicked, or handed
+/// over by the protocol handler). The UI takes it once the window exists, so a shared link
+/// behaves exactly like pasting the code into the join box.
+static PENDING_INVITE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_pending_invite(raw: &str) {
+    if let Ok(mut slot) = PENDING_INVITE.lock() {
+        *slot = Some(raw.to_string());
+    }
+}
+
+pub fn take_pending_invite() -> Option<String> {
+    PENDING_INVITE.lock().ok().and_then(|mut slot| slot.take())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartyStatus {
     Ready,

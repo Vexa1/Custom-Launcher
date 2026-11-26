@@ -6,11 +6,32 @@
 //! the game it closes the leftover Roblox app and opens the launcher again.
 
 use std::env;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Detaches a helper from this process, so it survives the launcher closing.
+///
+/// Unix: its own process group. Windows: no console at all (a GUI-subsystem launcher would
+/// otherwise attach the child to the parent's console) and its own process group so the
+/// console's Ctrl+C / close does not take the companion down with the launcher.
+#[cfg(unix)]
+fn detach(cmd: &mut Command) {
+    cmd.process_group(0);
+}
+
+#[cfg(windows)]
+fn detach(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
 
 use crate::auth::{load_settings, log};
 use crate::fastflags::load_fastflags;
@@ -29,18 +50,17 @@ pub const COMPANION_FLAG: &str = "--companion";
 #[allow(dead_code)]
 pub fn spawn_companion() -> Result<(), String> {
     let exe = env::current_exe().map_err(|e| e.to_string())?;
-    Command::new(exe)
-        .arg(COMPANION_FLAG)
+    let mut cmd = Command::new(exe);
+    cmd.arg(COMPANION_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .stderr(Stdio::null());
+    detach(&mut cmd);
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// `.../CREBLOX.app` when running from a bundle.
+#[cfg(target_os = "macos")]
 fn app_bundle_path() -> Option<PathBuf> {
     let exe = env::current_exe().ok()?;
     let app = exe.parent()?.parent()?.parent()?;
@@ -50,21 +70,26 @@ fn app_bundle_path() -> Option<PathBuf> {
 }
 
 fn relaunch_launcher() {
-    let result = match app_bundle_path() {
-        Some(bundle) => Command::new("/usr/bin/open")
-            .arg(bundle)
-            .status()
-            .map(|_| ()),
-        None => match env::current_exe() {
-            Ok(exe) => Command::new(exe)
-                .stdin(Stdio::null())
+    // On macOS a bundle is reopened through LaunchServices, which is what makes it come back
+    // as a normal app instead of a bare executable. Windows has nothing to hand over to: the
+    // launcher executable is started directly.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = app_bundle_path() {
+        match Command::new("/usr/bin/open").arg(bundle).status() {
+            Ok(_) => return,
+            Err(e) => log(&format!("companion: could not reopen the launcher: {e}")),
+        }
+    }
+    let result = match env::current_exe() {
+        Ok(exe) => {
+            let mut cmd = Command::new(exe);
+            cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .map(|_| ()),
-            Err(e) => Err(e),
-        },
+                .stderr(Stdio::null());
+            detach(&mut cmd);
+            cmd.spawn().map(|_| ())
+        }
+        Err(e) => Err(e),
     };
     if let Err(e) = result {
         log(&format!("companion: could not reopen the launcher: {e}"));

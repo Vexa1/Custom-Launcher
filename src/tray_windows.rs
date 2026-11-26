@@ -55,6 +55,9 @@ const CMD_HOP_RANDOM: usize = 1008;
 const CMD_HOP_LEAST: usize = 1009;
 const CMD_HOP_PING: usize = 1010;
 
+/// Both backends expose the same event set so `app.rs` matches it once; a few variants are
+/// only ever produced by the macOS menu, which Windows has no equivalent for.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayEvent {
     ShowAndFocus,
@@ -184,6 +187,13 @@ impl TrayController {
         if changed {
             self.post_msg(WM_APP_SYNC);
         }
+    }
+
+    /// The Windows tray thread posts every click straight to the app's channel, so there
+    /// is no second queue here to drain (the macOS backend keeps one because tray-icon
+    /// delivers through its own receivers).
+    pub fn drain_events(&self) -> Vec<crate::tray::TrayEvent> {
+        Vec::new()
     }
 
     pub fn show_balloon(&self, title: &str, body: &str) {

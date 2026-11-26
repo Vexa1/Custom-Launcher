@@ -274,6 +274,7 @@ pub struct Creblox {
     /// Watchdog for "the launcher says it is on but no window is on screen".
     pub last_window_check: Option<Instant>,
     /// Checks the real AppKit window state after a restore, not just our own flag.
+    #[cfg(target_os = "macos")]
     pub last_visibility_check: Option<Instant>,
     pub last_overlay_check: Option<Instant>,
     /// The tray's "Edit Overlay Position" mode is open: the HUD is draggable and the
@@ -569,6 +570,7 @@ impl Creblox {
             hidden_seen_inactive: false,
             last_hidden_check: None,
             last_window_check: None,
+            #[cfg(target_os = "macos")]
             last_visibility_check: None,
             last_overlay_check: None,
             overlay_editing: false,
@@ -3545,6 +3547,21 @@ impl Creblox {
         self.status = format!("Joining party {}...", invite.short_code());
         self.party.join(invite, me, self.cookie.clone());
         self.party_join_code.clear();
+    }
+
+    /// Fills the party join box with an invite link the launcher was started with. Joining
+    /// stays an explicit click, and an unsigned-in user sees the same sign-in hint as a
+    /// pasted code.
+    pub fn apply_startup_invite(&mut self) {
+        let Some(raw) = crate::party::take_pending_invite() else {
+            return;
+        };
+        if crate::party::parse_invite(&raw).is_none() {
+            crate::auth::log("party: the startup link is not a valid invite");
+            return;
+        }
+        self.party_join_code = raw;
+        self.party_invite_open = true;
     }
 
     pub fn party_leave(&mut self) {

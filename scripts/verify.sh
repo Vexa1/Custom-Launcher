@@ -5,6 +5,8 @@
 #      where the logic can actually run without a window or a Roblox session.
 #   2. The macOS target check proves the whole GUI crate still compiles for the release
 #      target after a change, including every `#[cfg(test)]` module and `#[cfg(macos)]` path.
+#   3. The Windows target check does the same for the x64 build, with warnings denied: every
+#      `#[cfg(windows)]` path is compiled on every developer machine, not only on Windows.
 #
 # Neither step is part of the shipped app: `vm-tests/` is a separate package that the launcher
 # does not depend on, and `scripts/package-release.sh` copies an explicit file list that does
@@ -35,7 +37,26 @@ cargo test --locked --manifest-path vm-tests/Cargo.toml
 echo "== creblox: compiles for the macOS release target"
 cargo check --locked --target x86_64-apple-darwin
 
+# Same trick as above for Windows: the C parts of the Windows build (ring, mimalloc) need a
+# cross cc, and zig's mingw-w64 backend is one. On a Windows host these variables are unset,
+# the paths do not exist, and the native build is what counts.
+if [[ -z "${CC_x86_64_pc_windows_gnu:-}" && -x /tmp/cc-win ]]; then
+    export CC_x86_64_pc_windows_gnu=/tmp/cc-win
+    if [[ -x /tmp/zig-linux-x86_64-0.13.0/zig ]]; then
+        export AR_x86_64_pc_windows_gnu="/tmp/zig-linux-x86_64-0.13.0/zig ar"
+    fi
+fi
+WINDOWS_STD="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-gnu"
+if [[ -d "$WINDOWS_STD" ]]; then
+    echo "== creblox: compiles for the Windows x64 target (warnings denied)"
+    # `-D warnings`: a warning on this target is a Windows-only path that nobody on a Mac
+    # would otherwise compile, so it fails here instead of in the Windows CI job.
+    RUSTFLAGS="-D warnings" cargo check --locked --target x86_64-pc-windows-gnu
+else
+    echo "== creblox: Windows target skipped (x86_64-pc-windows-gnu std not installed)"
+fi
+
 echo
-echo "Both passed. On macOS, also run 'cargo test --locked' to execute the in-crate"
+echo "All checks passed. On macOS, also run 'cargo test --locked' to execute the in-crate"
 echo "#[cfg(test)] suites (layout, updater, auth, theme, log parsing) - they need the"
 echo "window/OS APIs that only exist there and cannot run in this VM."

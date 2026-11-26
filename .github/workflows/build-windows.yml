@@ -1,0 +1,80 @@
+name: build-windows
+
+# The Windows x64 launcher, built the way users get it: one double-clickable exe with the
+# GUI subsystem, so no console window ever appears.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/build-windows.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-x64-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Verify the executable
+        shell: pwsh
+        run: |
+          $exe = "target/release/creblox.exe"
+          if (-not (Test-Path $exe)) { throw "creblox.exe was not produced" }
+
+          # The PE optional header's Subsystem must be 2 (Windows GUI): that is what stops
+          # a black console from flashing up when the exe is double-clicked.
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x18 + 0x44)
+          if ($subsystem -ne 2) { throw "expected the GUI subsystem (2), found $subsystem" }
+
+          # Start it once and make sure it stays alive: a launcher that exits immediately is
+          # broken even if it links.
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 6
+          if ($proc.HasExited) { throw "creblox.exe exited immediately (code $($proc.ExitCode))" }
+          Stop-Process -Id $proc.Id -Force
+
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          "CREBLOX_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/creblox.exe dist/creblox.exe
+          $zip = "CREBLOX-$env:CREBLOX_VERSION-windows-x64.zip"
+          Compress-Archive -Path dist/creblox.exe -DestinationPath $zip -Force
+          Get-FileHash $zip -Algorithm SHA256 | ForEach-Object { "sha256 $($_.Hash)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CREBLOX-${{ env.CREBLOX_VERSION }}-windows-x64
+          path: CREBLOX-${{ env.CREBLOX_VERSION }}-windows-x64.zip
+          if-no-files-found: error

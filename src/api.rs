@@ -1767,6 +1767,7 @@ pub fn fetch_users_by_ids(ids: &[u64], cookie: Option<&str>) -> Result<Vec<User>
 }
 
 /// Single user lookup by ID. One request, no search index, so it answers instantly.
+#[allow(dead_code)]
 pub fn lookup_user_by_id(id: u64) -> Result<Option<User>, String> {
     let v = match get_json(&format!("https://users.roblox.com/v1/users/{id}")) {
         Ok(v) => v,

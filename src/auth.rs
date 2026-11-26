@@ -14,12 +14,14 @@ use windows_sys::Win32::Security::Cryptography::{
 
 /// Folder name this app used before the CREBLOX rename. Only the migration
 /// below reads it; nothing else may depend on it.
+#[cfg(target_os = "macos")]
 const LEGACY_APP_FOLDER: &str = "Aurora";
 
 /// The pre-0.4 login item was registered under the old bundle identity, so it
 /// would point at an app that no longer exists. Start at login is re-enabled
 /// from Settings after the rename. Once per process only: `data_dir()` is called
 /// for every log line, so this must not touch the disk each time.
+#[cfg(target_os = "macos")]
 fn drop_legacy_launch_agent() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

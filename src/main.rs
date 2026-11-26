@@ -76,6 +76,16 @@ fn main() -> eframe::Result<()> {
             }
             return Ok(());
         }
+        // A party invite link opens the launcher with the code already in the join box.
+        if uri.starts_with("creblox://party/") {
+            party::set_pending_invite(uri);
+        }
+    }
+    // Windows: the `creblox:` scheme has to exist in the per-user registry for a link to
+    // reach this process at all. Best effort, no elevation, and harmless to repeat.
+    #[cfg(windows)]
+    if let Err(e) = roblox_process::register_invite_protocol() {
+        log(&format!("party: could not register the creblox: link handler: {e}"));
     }
 
     log(&format!(
@@ -84,7 +94,13 @@ fn main() -> eframe::Result<()> {
     ));
     let boot_settings = auth::load_settings();
     let start_in_tray = tray::should_start_in_tray(&args, boot_settings.tray_enabled);
-    if !start_in_tray && boot_settings.tray_enabled && tray::try_focus_existing_instance() {
+    // A restarted-after-update instance must not defer to the copy that is still closing.
+    let relaunched = args.iter().any(|a| a == "--updated");
+    if !relaunched
+        && !start_in_tray
+        && boot_settings.tray_enabled
+        && tray::try_focus_existing_instance()
+    {
         return Ok(());
     }
 
@@ -107,7 +123,9 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(Creblox::new(cc, start_in_tray)))
+            let mut app = Creblox::new(cc, start_in_tray);
+            app.apply_startup_invite();
+            Ok(Box::new(app))
         }),
     );
     if let Err(e) = &result {

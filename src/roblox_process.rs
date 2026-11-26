@@ -45,15 +45,23 @@ pub const CMD_KEY: &str = r"Software\Classes\roblox-player\shell\open\command";
 /// Locate the installed Roblox Player executable.
 #[cfg(windows)]
 pub fn find_player() -> Option<PathBuf> {
-    let base = PathBuf::from(env::var("LOCALAPPDATA").ok()?)
-        .join("Roblox")
-        .join("Versions");
+    // Roblox installs per user (%LOCALAPPDATA%) and, on shared machines, machine-wide
+    // (Program Files (x86), or Program Files on a 32-bit install). Both layouts are plain
+    // `Versions\version-*` folders; the newest player wins across all of them.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for var in ["LOCALAPPDATA", "ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(base) = env::var(var) {
+            roots.push(PathBuf::from(base).join("Roblox").join("Versions"));
+        }
+    }
     let mut best: Option<(SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(base).ok()?.flatten() {
-        let exe = entry.path().join("RobloxPlayerBeta.exe");
-        if let Some(time) = fs::metadata(&exe).ok().and_then(|m| m.modified().ok()) {
-            if best.as_ref().map_or(true, |(t, _)| time > *t) {
-                best = Some((time, exe));
+    for base in roots {
+        for entry in fs::read_dir(base).ok().into_iter().flatten().flatten() {
+            let exe = entry.path().join("RobloxPlayerBeta.exe");
+            if let Some(time) = fs::metadata(&exe).ok().and_then(|m| m.modified().ok()) {
+                if best.as_ref().is_none_or(|(t, _)| time > *t) {
+                    best = Some((time, exe));
+                }
             }
         }
     }
@@ -1543,6 +1551,31 @@ pub fn register() -> Result<String, String> {
     fs::write(data_dir().join("original_command.txt"), &current).map_err(|e| e.to_string())?;
     key.set_value("", &mine).map_err(|e| e.to_string())?;
     Ok("The launcher now opens Roblox links".to_string())
+}
+
+/// Registers `creblox:` for this user so `creblox://party/<code>` links open the launcher.
+///
+/// Everything lives under `HKCU\Software\Classes`, which needs no administrator rights and
+/// no UAC prompt; running it again just rewrites the same two values.
+#[cfg(windows)]
+pub fn register_invite_protocol() -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let me = env::current_exe().map_err(|e| e.to_string())?;
+    let command = format!("\"{}\" \"%1\"", me.display());
+    let (key, _) = hkcu
+        .create_subkey(r"Software\Classes\creblox")
+        .map_err(|e| e.to_string())?;
+    key.set_value("", &"URL:CREBLOX party invite".to_string())
+        .map_err(|e| e.to_string())?;
+    key.set_value("URL Protocol", &String::new())
+        .map_err(|e| e.to_string())?;
+    let (cmd, _) = hkcu
+        .create_subkey(r"Software\Classes\creblox\shell\open\command")
+        .map_err(|e| e.to_string())?;
+    if cmd.get_value::<String, _>("").ok().as_deref() != Some(command.as_str()) {
+        cmd.set_value("", &command).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

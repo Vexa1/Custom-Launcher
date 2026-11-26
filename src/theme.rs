@@ -469,6 +469,14 @@ const UI_FONT_CANDIDATES: &[&str] = &[
     "/Library/Fonts/Arial.ttf",
 ];
 
+/// Consolas is the crisp Windows terminal font; the fallback is the bitmap-safe system
+/// Courier so a stripped Windows install still gets a monospaced face.
+#[cfg(windows)]
+const MONO_FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\consola.ttf",
+    r"C:\Windows\Fonts\cour.ttf",
+];
+
 #[cfg(windows)]
 const SYMBOL_FONT_CANDIDATES: &[&str] = &[r"C:\Windows\Fonts\seguisym.ttf"];
 #[cfg(target_os = "macos")]
@@ -516,6 +524,20 @@ pub fn install_fonts(ctx: &egui::Context) {
             .insert("segoe_ui".to_owned(), Arc::new(data));
         if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             prop.insert(0, "segoe_ui".to_owned());
+        }
+    }
+
+    // Numbers in the HUD and the logs are read in the monospaced family; Consolas keeps
+    // them aligned the way the macOS build's system mono face does.
+    #[cfg(windows)]
+    if let Some(bytes) = read_first_font(MONO_FONT_CANDIDATES) {
+        let mut data = egui::FontData::from_owned(bytes);
+        data.tweak = tweak.clone();
+        fonts
+            .font_data
+            .insert("creblox_mono".to_owned(), Arc::new(data));
+        if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            mono.insert(0, "creblox_mono".to_owned());
         }
     }
 
@@ -679,6 +701,7 @@ pub fn panel_chrome_fill(ui: &egui::Ui, settings: &Settings) -> Color32 {
     }
 }
 
+#[allow(dead_code)]
 pub fn paint_glass_sheen(painter: &egui::Painter, rect: egui::Rect, radius: u8, p: Palette) {
     if !p.glass_edition || p.glass_highlight <= 0.01 || rect.width() < 12.0 || rect.height() < 10.0
     {

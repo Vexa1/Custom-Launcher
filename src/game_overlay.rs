@@ -461,6 +461,7 @@ pub fn take_position_result() -> Option<PositionResult> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn local_clock() -> String {
     unsafe {
         let now = libc::time(std::ptr::null_mut());
@@ -470,6 +471,21 @@ fn local_clock() -> String {
         }
         format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
     }
+}
+
+/// Wall-clock time from the OS, no C runtime needed.
+#[cfg(windows)]
+fn local_clock() -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut now: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut now) };
+    format!("{:02}:{:02}", now.wHour, now.wMinute)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn local_clock() -> String {
+    String::from("--:--")
 }
 
 /// Cumulative CPU time (ns) and resident bytes of one process.

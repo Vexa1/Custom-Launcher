@@ -427,6 +427,7 @@ pub fn parse_avatar_3d(
 }
 
 /// Fetch avatar 3D data from Roblox thumbnails API and CDN
+#[allow(dead_code)]
 pub fn load_avatar_3d_data(
     user_id: u64,
     cookie: Option<&str>,

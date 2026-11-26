@@ -48,7 +48,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
@@ -59,6 +61,11 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+
+# The Windows self-update unzips a release zip in pure Rust: no PowerShell, no external
+# unzip, and no extra runtime for the user to install.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
