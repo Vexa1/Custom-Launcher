@@ -309,6 +309,7 @@ impl Creblox {
                 signed_in: logged_in,
                 server_line: String::new(),
                 job_id: String::new(),
+                roblox_running: false,
                 overlay_server: settings.overlay_enabled,
                 overlay_stats: settings.overlay_stats_enabled,
                 overlay_crosshair: settings.crosshair_enabled,
@@ -2745,6 +2746,17 @@ impl Creblox {
                                 }
                             }
                         }
+                        TrayEvent::CloseRoblox => {
+                            // Deliberately the same call Settings uses, so the tray cannot
+                            // close a different set of processes than the UI would.
+                            let closed = crate::roblox_process::kill_all_roblox_processes();
+                            self.status = if closed == 0 {
+                                "No running Roblox process to close".to_string()
+                            } else {
+                                format!("Closed {closed} Roblox process(es)")
+                            };
+                            self.sync_tray_state();
+                        }
                         TrayEvent::ToggleDiscordRpc => {
                             self.settings.discord_rpc_enabled = !self.settings.discord_rpc_enabled;
                             save_settings(&self.settings);
@@ -3849,7 +3861,8 @@ impl Creblox {
         });
         let user_tag = self.me.as_ref().map(|p| format!("@{}", p.user.name));
         let status_line = match (&playing_name, &user_tag) {
-            (Some(game), _) => format!("Playing: {game}"),
+            (Some(game), Some(user)) => format!("Playing: {game} — {user}"),
+            (Some(game), None) => format!("Playing: {game}"),
             (None, Some(user)) => format!("Signed in: {user}"),
             (None, None) => "Not signed in".to_string(),
         };
@@ -3882,6 +3895,9 @@ impl Creblox {
                 .as_ref()
                 .map(|i| i.job_id.clone())
                 .unwrap_or_default(),
+            // The menu item is only useful while a player process exists; `roblox_running`
+            // is already maintained by the process scan that drives the tray state.
+            roblox_running: self.roblox_running || self.active_roblox_place_id.is_some(),
             overlay_server: self.settings.overlay_enabled,
             overlay_stats: self.settings.overlay_stats_enabled,
             overlay_crosshair: self.settings.crosshair_enabled,

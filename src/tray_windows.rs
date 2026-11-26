@@ -64,6 +64,7 @@ pub enum TrayEvent {
     ToggleStatsOverlay,
     ToggleCrosshair,
     CopyJobId,
+    CloseRoblox,
     ToggleDiscordRpc,
     CheckUpdates,
     QuitApp,
@@ -79,6 +80,9 @@ pub struct TrayState {
     pub signed_in: bool,
     pub server_line: String,
     pub job_id: String,
+    /// A Roblox player process is alive (the macOS menu uses this to enable its
+    /// "Close Roblox" item; Windows keeps the action in Settings).
+    pub roblox_running: bool,
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
@@ -95,6 +99,7 @@ impl Default for TrayState {
             signed_in: false,
             server_line: String::new(),
             job_id: String::new(),
+            roblox_running: false,
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,

@@ -33,6 +33,7 @@ const ITEM_TOGGLE_SERVER: &str = "creblox.overlay.server";
 const ITEM_TOGGLE_STATS: &str = "creblox.overlay.stats";
 const ITEM_TOGGLE_CROSSHAIR: &str = "creblox.overlay.crosshair";
 const ITEM_COPY_JOB: &str = "creblox.copy_job";
+const ITEM_CLOSE_ROBLOX: &str = "creblox.close_roblox";
 const ITEM_DISCORD: &str = "creblox.discord";
 const ITEM_UPDATES: &str = "creblox.updates";
 const ITEM_QUIT: &str = "creblox.quit";
@@ -53,6 +54,7 @@ pub enum TrayEvent {
     ToggleStatsOverlay,
     ToggleCrosshair,
     CopyJobId,
+    CloseRoblox,
     ToggleDiscordRpc,
     CheckUpdates,
     QuitApp,
@@ -71,6 +73,8 @@ pub struct TrayState {
     pub server_line: String,
     /// Roblox Job ID of the current server, empty when unknown.
     pub job_id: String,
+    /// A Roblox player process is alive, so "Close Roblox" has something to close.
+    pub roblox_running: bool,
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
@@ -87,6 +91,7 @@ impl Default for TrayState {
             signed_in: false,
             server_line: String::new(),
             job_id: String::new(),
+            roblox_running: false,
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,
@@ -114,6 +119,7 @@ fn map_menu_id(id: &str) -> Option<TrayEvent> {
         ITEM_TOGGLE_STATS => Some(TrayEvent::ToggleStatsOverlay),
         ITEM_TOGGLE_CROSSHAIR => Some(TrayEvent::ToggleCrosshair),
         ITEM_COPY_JOB => Some(TrayEvent::CopyJobId),
+        ITEM_CLOSE_ROBLOX => Some(TrayEvent::CloseRoblox),
         ITEM_DISCORD => Some(TrayEvent::ToggleDiscordRpc),
         ITEM_UPDATES => Some(TrayEvent::CheckUpdates),
         ITEM_QUIT => Some(TrayEvent::QuitApp),
@@ -129,6 +135,7 @@ pub struct TrayController {
     status_item: MenuItem,
     server_item: MenuItem,
     copy_job_item: MenuItem,
+    close_roblox_item: MenuItem,
     server_overlay_item: CheckMenuItem,
     stats_overlay_item: CheckMenuItem,
     crosshair_item: CheckMenuItem,
@@ -159,6 +166,14 @@ impl TrayController {
             ITEM_COPY_JOB,
             "Copy Job ID",
             !initial.job_id.is_empty(),
+            None,
+        );
+        // Killing the leftover Roblox app used to require opening Settings; it belongs in
+        // the menu that is reachable while the game owns the screen.
+        let close_roblox_item = MenuItem::with_id(
+            ITEM_CLOSE_ROBLOX,
+            "Close Roblox",
+            initial.roblox_running,
             None,
         );
         let server_overlay_item = CheckMenuItem::with_id(
@@ -211,6 +226,7 @@ impl TrayController {
                 &status_item,
                 &server_item,
                 &copy_job_item,
+                &close_roblox_item,
                 &sep3,
                 &server_overlay_item,
                 &stats_overlay_item,
@@ -225,7 +241,10 @@ impl TrayController {
                 .with_menu(Box::new(menu))
                 .with_menu_on_left_click(false)
                 .with_tooltip("CREBLOX")
-                .with_icon(load_tray_icon()?)
+                // Catalina draws the status item itself: a template image is recoloured
+                // black on a light menu bar and white on a dark one, which a plain colour
+                // icon cannot do.
+                .with_icon_templated(load_tray_icon()?)
                 .build()
                 .ok()
         })();
@@ -284,6 +303,7 @@ impl TrayController {
             status_item,
             server_item,
             copy_job_item,
+            close_roblox_item,
             server_overlay_item,
             stats_overlay_item,
             crosshair_item,
@@ -358,6 +378,8 @@ impl TrayController {
             next.server_line.clone()
         });
         self.copy_job_item.set_enabled(!next.job_id.is_empty());
+        self.close_roblox_item
+            .set_enabled(next.enabled && next.roblox_running);
         self.hide_item
             .set_enabled(next.enabled && next.window_visible);
         // Always usable: with Roblox fullscreen the window can be "visible" yet behind the
@@ -428,16 +450,32 @@ fn applescript_string(raw: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Builds the menu-bar image as a **template**: the mark's brightness becomes alpha and
+/// the RGB becomes black, so AppKit renders it black on a light menu bar and white on a
+/// dark one.
+///
+/// `assets/logo.png` is a dark opaque square with a cyan "C". Used directly it showed up as
+/// a dark block on a Dark Mode menu bar and as a mismatched rectangle on a light one; as a
+/// template it reads like a normal macOS status item on Catalina either way. The background
+/// is subtracted rather than used as-is, otherwise its (non-zero) luminance would paint a
+/// faint grey tile behind the mark.
 fn load_tray_icon() -> Option<Icon> {
-    let img = image::load_from_memory(include_bytes!("../assets/logo.png")).ok()?;
-    let resized = image::imageops::resize(
-        &img.to_rgba8(),
-        22,
-        22,
-        image::imageops::FilterType::Lanczos3,
-    );
+    const BACKGROUND_LUMA: i32 = 60;
+    let img = image::load_from_memory(include_bytes!("../assets/logo.png"))
+        .ok()?
+        .to_rgba8();
+    let resized = image::imageops::resize(&img, 22, 22, image::imageops::FilterType::Lanczos3);
     let (w, h) = resized.dimensions();
-    Icon::from_rgba(resized.into_raw(), w, h).ok()
+    let mut rgba = resized.into_raw();
+    for px in rgba.chunks_exact_mut(4) {
+        let luma = px[0].max(px[1]).max(px[2]) as i32;
+        let alpha = ((luma - BACKGROUND_LUMA).max(0) * 255 / (255 - BACKGROUND_LUMA)).min(255);
+        px[0] = 0;
+        px[1] = 0;
+        px[2] = 0;
+        px[3] = alpha as u8;
+    }
+    Icon::from_rgba(rgba, w, h).ok()
 }
 
 // ---------------------------------------------------------------------------

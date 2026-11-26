@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.18
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.19
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -120,7 +120,7 @@ Everything listed here exists in the code today. File references point at the im
 
 | Feature | How it works |
 |---|---|
-| **Menu-bar item** (`tray_macos.rs`) | Native `NSStatusItem` via `tray-icon`: left click reopens CREBLOX, right click gives Settings, Discord RPC toggle and Quit. The right-click **update check** entry is dormant — it still appears but does nothing while the update subsystem is left in place. Includes AppKit helpers to activate the app so the window surfaces over a fullscreen game. |
+| **Menu-bar item** (`tray_macos.rs`) | Native `NSStatusItem` via `tray-icon`, drawn as a **template image** so it is black on a light menu bar and white on a dark one. Left click brings the launcher forward; right click gives Open/Hide, the page shortcuts, a live status line, the server line, Copy Job ID, Close Roblox, the three overlay toggles, Discord Rich Presence and Quit. The **update check** entry is dormant. See *System tray and live sync*. |
 | **Single instance** (`tray_macos.rs:610-640`) | `.instance.lock` in the data folder; a second launch focuses the existing window instead of starting a rival process. |
 | **Launch at login** (`set_startup`) | Writes a login item/LaunchAgent for the resolved bundle path. |
 | **Discord Rich Presence** (`discord_rpc.rs`) | A hand-written Discord IPC client (Unix socket / named pipe, 8-byte frame header, `SET_ACTIVITY`), so no `discord-rich-presence` dependency. Shows the game being played; default app id `1005469189907173486`, overridable in Settings. |
@@ -238,6 +238,49 @@ and typography comes from `theme.rs`; page code reads a palette via `pal(ui)` an
 hard-codes a colour for a themed surface.
 
 ---
+
+### System tray and live sync
+
+The menu-bar item is the launcher's second face: with a game fullscreen it is the only way
+to reach CREBLOX without leaving the session.
+
+**Menu contents** — built in `TrayController::new` (`tray_macos.rs:148`):
+
+| Item | Source of truth | Behaviour |
+|---|---|---|
+| Open CREBLOX / Hide to Menu Bar | `TrayState.window_visible` | `restore_from_tray` (`app.rs:4061`) sends `Visible(true)`, `Minimized(false)` and `Focus`, then calls AppKit `activateIgnoringOtherApps:` and re-raises across 8 frames, so a hidden or occluded window returns over a fullscreen game. |
+| Page shortcuts (Home, Profile, Avatar, Notifications, Settings, FastFlags) | `TrayState.signed_in` | Disabled while signed out; each restores the window, then switches `Page`. |
+| Live status line | `tray_state_snapshot` (`app.rs:3853`) | `Playing: <game> — @user`, `Signed in: @user`, or `Not signed in`. The game name comes from the same place-Id lookup Discord presence uses. |
+| Server line + Copy Job ID | `server_info`, `server_locations` | Region when resolved, `locating…` while the lookup runs; Copy Job ID is disabled until a join id exists. |
+| Close Roblox | `TrayState.roblox_running` | Calls `kill_all_roblox_processes` (`roblox_process.rs:932`) — the same function Settings uses. Disabled when no player process is alive. macOS menu only; Windows keeps the action in Settings. |
+| Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
+| Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
+| Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
+
+**Live sync in both directions.** A menu click becomes `Msg::TrayAction` on the existing
+channel; the handler at `app.rs:2695` applies it exactly like the corresponding Settings
+control, persists it, and calls `sync_tray_state` (`app.rs:3907`) so the menu shows the new
+value on the same frame. Changes made in the window arrive the same way, because the tray
+state is rebuilt from `Settings` plus the live session on every sync. The tray reader thread
+calls `ctx.request_repaint()` when it forwards a click, so a minimized or idle launcher wakes
+immediately instead of waiting for a mouse move.
+
+**The overlay follows without a restart.** Toggling from the menu runs
+`maybe_show_game_overlay` (`app.rs:3943`), which pushes an `OverlayConfig` into
+`OverlayManager::start` (`game_overlay.rs:252`) — spawning the helper, or updating the
+running one's shared config. The helper rewrites the JSON spec (`game_overlay.rs:350`) and
+the overlay window re-reads it when the file's stamp changes, polling at 150 ms
+(`overlay_window.rs:543`). The overlay window is click-through and never becomes key, so the
+game keeps keyboard and mouse focus.
+
+**Threading.** Every `NSStatusItem` / `NSMenu` mutation happens on the main thread:
+`TrayController::new` and `sync` are called from eframe's UI thread. The background thread
+only drains `MenuEvent` / `TrayIconEvent` and pushes to the channel; it never touches AppKit.
+
+**One instance.** A second launch (Finder, Dock, Spotlight) fails the `flock` in
+`try_focus_existing_instance`, then asks the running copy over a Unix socket
+(`notify_running_instance_show` → `start_instance_listener`, `tray_macos.rs:774`) to show its
+window, instead of starting a duplicate that would fight over the status item.
 
 ### Updating an existing install (manual)
 
