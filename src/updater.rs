@@ -184,6 +184,7 @@ pub fn classify_update_kind(remote: &str, current: &str, title: &str, notes: &st
 /// Finds the first HTTPS `.zip` link in release notes. Release bodies use both bare
 /// URLs and Markdown links, so trailing punctuation is stripped.
 fn find_zip_url(text: &str) -> Option<String> {
+    let mut first: Option<String> = None;
     for token in text.split_whitespace() {
         let Some(start) = token.find("https://") else {
             continue;
@@ -192,11 +193,20 @@ fn find_zip_url(text: &str) -> Option<String> {
             token[start..].trim_end_matches([')', ']', '}', '>', '.', ',', ';', '`', '"', '\'']);
         let lower = candidate.to_ascii_lowercase();
         let path = lower.split(['?', '#']).next().unwrap_or("");
-        if path.ends_with(".zip") {
+        if !path.ends_with(".zip") {
+            continue;
+        }
+        // The body publishes the update overlay next to the full project zip.
+        // Prefer the overlay so an in-app update downloads ~347 KB, not ~677 KB.
+        let file = path.rsplit('/').next().unwrap_or(path);
+        if file.contains("update") && !file.contains("full") {
             return Some(candidate.to_string());
         }
+        if first.is_none() {
+            first = Some(candidate.to_string());
+        }
     }
-    None
+    first
 }
 
 /// The release body carries the SHA-256 of the update zip; accept any 64-hex token.
@@ -204,6 +214,18 @@ fn find_sha256(text: &str) -> Option<String> {
     text.split(|c: char| !c.is_ascii_hexdigit())
         .find(|token| token.len() == 64)
         .map(|token| token.to_ascii_lowercase())
+}
+
+/// The SHA-256 printed for the archive at `url`: the token on the same line,
+/// otherwise the first one after the link. The body lists several downloads, so
+/// taking the first hash in the body would verify the overlay against the full
+/// zip's checksum once the overlay is preferred.
+fn find_sha256_for(text: &str, url: &str) -> Option<String> {
+    let tail = text.get(text.find(url)? + url.len()..)?;
+    let line = tail.split('\n').next().unwrap_or(tail);
+    find_sha256(line)
+        .or_else(|| find_sha256(tail))
+        .or_else(|| find_sha256(text))
 }
 
 pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<CrebloxRelease> {
@@ -305,10 +327,9 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
             None => (None, None, 0),
         },
     };
-    let zip_sha256 = if zip_url.is_some() && !has_asset_zip {
-        find_sha256(&notes)
-    } else {
-        None
+    let zip_sha256 = match (&zip_url, has_asset_zip) {
+        (Some(url), false) => find_sha256_for(&notes, url),
+        _ => None,
     };
 
     Some(CrebloxRelease {
