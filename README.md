@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.20
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.21
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -137,6 +137,54 @@ No glows, gradients, pulsing borders or per-metric accent colours: the only chro
 elements are the crosshair (user-chosen) and those 5 px dots. Every setting in Settings →
 Overlay still drives it live — opacity, corner, crosshair style/size/gap/thickness/colour/
 opacity/offset, the custom image overlay, and the per-metric panel toggles.
+
+#### Where every number comes from
+
+Nothing on the HUD is a placeholder: if a value cannot be measured it prints `—`.
+
+| Readout | Source | Where |
+|---|---|---|
+| Server region | Game server IP parsed from Roblox's own player log, resolved through `lookup_server_location` on a worker thread and cached per IP | spec loop in `game_overlay.rs` |
+| CPU % | Delta of the Roblox process's own CPU time over the sample window via `proc_pidinfo(PROC_PIDTASKINFO)` — instantaneous, and 100 % means one busy core, the same scale Activity Monitor uses for a process | `process_counters` (`game_overlay.rs:467`), `Usage` (`:620`) |
+| RAM | `pti_resident_size` of that same process, never system-wide memory | `Usage::sample` (`game_overlay.rs:620`) |
+| Ping | TCP handshake RTT to the game server itself (ICMP fallback), re-measured every 2 s and cleared when the server changes; `—` until a server is known | `measure_ping` (`game_overlay.rs`) |
+| FastFlags | Preset derived from the config actually on disk (`Competitive` / `Quality` / `Custom`) plus the exact count of applied flags | `active_preset_name` (`game_overlay.rs:66`) |
+| Session / clock | Local monotonic timer and `localtime_r` | `fmt_session`, `local_clock` |
+
+Windows measures the same two numbers through `GetProcessTimes` + `GetProcessMemoryInfo`
+(`game_overlay.rs:523`), so the stats panel is real on both platforms.
+
+#### Edit Overlay Position (tray → drag → confirm)
+
+1. **Menu bar → Edit Overlay Position…** (same entry in the Windows tray menu). The overlay
+   opens even when no game is running, so the HUD can be placed any time.
+2. The HUD becomes draggable: click-through is switched off, a dashed hairline frames it,
+   the live `X, Y` offset is shown, guides appear near screen edges, and **Reset** /
+   **Confirm** pills sit under it. It is clamped to the visible area, so it cannot be lost
+   off-screen (`clamp_offset`, `overlay_window.rs:1337`).
+3. **Confirm** (or Return) saves the offset to `settings.json` (`overlay_offset_x` /
+   `overlay_offset_y`), restores click-through and non-activating behaviour, and puts the
+   tray item back. **Esc** reverts to the last saved position.
+
+Only an offset from the corner is stored, never an absolute screen position, so the HUD stays
+anchored across resolution and display changes. The editor lives in `paint_edit`
+(`overlay_window.rs:1133`); the answer travels back to the launcher through
+`overlay-position.json` (`take_position_result`, `game_overlay.rs:437`) because the overlay
+process owns the pointer while the launcher owns the config.
+
+#### Why the overlay costs almost nothing
+
+- **Event-driven repaints** (`overlay_window.rs:1549`): 16 ms only while dragging, 500 ms
+  when the HUD is on screen, 1000 ms when hidden. The previous build repainted every 150 ms
+  *and* ran a 400 ms heartbeat thread, i.e. ~9 transparent composites a second while idle.
+- **No per-frame text layout.** Every label and value is measured once per spec change and
+  cached (`relayout`, `overlay_window.rs:934`); `paint_layout` (`:1071`) only translates and
+  draws those galleys.
+- **A window the size of the HUD.** With text panels only — no crosshair, no picture — the
+  window shrinks to the HUD's bounding box instead of covering the game, so Catalina
+  composites a few hundred pixels rather than a full-screen transparent quad.
+- **One syscall per second** for CPU/RAM instead of forking `/bin/ps`, and every region
+  lookup, game lookup and ping runs on a worker thread, never on the UI thread.
 
 ### 2.6 Shell, menu bar and integrations
 
@@ -279,6 +327,7 @@ to reach CREBLOX without leaving the session.
 | Close Roblox | `TrayState.roblox_running` | Calls `kill_all_roblox_processes` (`roblox_process.rs:932`) — the same function Settings uses — **on a worker thread**, reporting the count back through `Msg::RobloxKilled`, so a tray click cannot stall the window while the kills run. Disabled when no player process is alive. macOS menu only; Windows keeps the action in Settings. |
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
+| Edit Overlay Position… | — | Opens the on-screen HUD editor: drag it, then Confirm (⏎) or Esc. Disabled while the editor is open, and when every overlay is off. |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
 
 **Live sync in both directions.** A menu click becomes `Msg::TrayAction` on the existing

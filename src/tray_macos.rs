@@ -32,6 +32,7 @@ const ITEM_FASTFLAGS: &str = "creblox.fastflags";
 const ITEM_TOGGLE_SERVER: &str = "creblox.overlay.server";
 const ITEM_TOGGLE_STATS: &str = "creblox.overlay.stats";
 const ITEM_TOGGLE_CROSSHAIR: &str = "creblox.overlay.crosshair";
+const ITEM_EDIT_POSITION: &str = "creblox.overlay.edit";
 const ITEM_COPY_JOB: &str = "creblox.copy_job";
 const ITEM_CLOSE_ROBLOX: &str = "creblox.close_roblox";
 const ITEM_ACCOUNT_PREFIX: &str = "creblox.account.";
@@ -59,6 +60,8 @@ pub enum TrayEvent {
     ToggleServerOverlay,
     ToggleStatsOverlay,
     ToggleCrosshair,
+    /// Drag the HUD on screen and confirm where it lands.
+    EditOverlayPosition,
     CopyJobId,
     CloseRoblox,
     /// Index into `TrayState.accounts`; the app resolves it, because it owns the list.
@@ -90,6 +93,8 @@ pub struct TrayState {
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
+    /// The position editor is open on screen.
+    pub overlay_editing: bool,
 }
 
 impl Default for TrayState {
@@ -108,6 +113,7 @@ impl Default for TrayState {
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,
+            overlay_editing: false,
         }
     }
 }
@@ -131,6 +137,7 @@ fn map_menu_id(id: &str) -> Option<TrayEvent> {
         ITEM_TOGGLE_SERVER => Some(TrayEvent::ToggleServerOverlay),
         ITEM_TOGGLE_STATS => Some(TrayEvent::ToggleStatsOverlay),
         ITEM_TOGGLE_CROSSHAIR => Some(TrayEvent::ToggleCrosshair),
+        ITEM_EDIT_POSITION => Some(TrayEvent::EditOverlayPosition),
         ITEM_COPY_JOB => Some(TrayEvent::CopyJobId),
         ITEM_CLOSE_ROBLOX => Some(TrayEvent::CloseRoblox),
         ITEM_PRESET_QUALITY => Some(TrayEvent::ApplyQualityPreset),
@@ -161,6 +168,7 @@ pub struct TrayController {
     server_overlay_item: CheckMenuItem,
     stats_overlay_item: CheckMenuItem,
     crosshair_item: CheckMenuItem,
+    edit_item: MenuItem,
     discord_item: CheckMenuItem,
     shared: Arc<Mutex<TrayShared>>,
     join: Mutex<Option<JoinHandle<()>>>,
@@ -232,6 +240,12 @@ impl TrayController {
             initial.overlay_crosshair,
             None,
         );
+        let edit_item = MenuItem::with_id(
+            ITEM_EDIT_POSITION,
+            "Edit Overlay Position…",
+            true,
+            None,
+        );
         let discord_item = CheckMenuItem::with_id(
             ITEM_DISCORD,
             "Discord Rich Presence",
@@ -277,6 +291,7 @@ impl TrayController {
                 &server_overlay_item,
                 &stats_overlay_item,
                 &crosshair_item,
+                &edit_item,
                 &discord_item,
                 &updates_item,
                 &sep4,
@@ -356,6 +371,7 @@ impl TrayController {
             server_overlay_item,
             stats_overlay_item,
             crosshair_item,
+            edit_item,
             discord_item,
             shared,
             join: Mutex::new(join),
@@ -417,6 +433,16 @@ impl TrayController {
         self.stats_overlay_item.set_enabled(next.enabled);
         self.crosshair_item.set_checked(next.overlay_crosshair);
         self.crosshair_item.set_enabled(next.enabled);
+        // Nothing to position when every overlay is off, and the item turns into a status
+        // line while the editor is open so the menu explains what is on screen.
+        let any_overlay = next.overlay_server || next.overlay_stats || next.overlay_crosshair;
+        self.edit_item
+            .set_enabled(next.enabled && any_overlay && !next.overlay_editing);
+        if next.overlay_editing {
+            self.edit_item.set_text("Editing Overlay…");
+        } else {
+            self.edit_item.set_text("Edit Overlay Position…");
+        }
         for item in &self.page_items {
             item.set_enabled(next.enabled && next.signed_in);
         }

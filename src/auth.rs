@@ -326,6 +326,16 @@ pub fn load_settings() -> Settings {
         close_launcher_during_game: v["close_launcher_during_game"]
             .as_bool()
             .unwrap_or(def.close_launcher_during_game),
+        // Missing in every settings.json written before 0.4.21: fall back to the corner
+        // anchor instead of refusing to load the file.
+        overlay_offset_x: v["overlay_offset_x"]
+            .as_i64()
+            .map(|n| n.clamp(-8000, 8000) as i16)
+            .unwrap_or(def.overlay_offset_x),
+        overlay_offset_y: v["overlay_offset_y"]
+            .as_i64()
+            .map(|n| n.clamp(-8000, 8000) as i16)
+            .unwrap_or(def.overlay_offset_y),
         overlay_stats_enabled: v["overlay_stats_enabled"]
             .as_bool()
             .unwrap_or(def.overlay_stats_enabled),
@@ -529,6 +539,8 @@ pub fn save_settings(s: &Settings) {
         "overlay_opacity": s.overlay_opacity,
         "overlay_show_ip": s.overlay_show_ip,
         "overlay_show_job_id": s.overlay_show_job_id,
+        "overlay_offset_x": s.overlay_offset_x,
+        "overlay_offset_y": s.overlay_offset_y,
         "show_server_badge": s.show_server_badge,
         "return_to_launcher_on_leave": s.return_to_launcher_on_leave,
         "minimize_on_game_launch": s.minimize_on_game_launch,

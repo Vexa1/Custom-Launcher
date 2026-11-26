@@ -261,6 +261,11 @@ pub struct Creblox {
     /// Checks the real AppKit window state after a restore, not just our own flag.
     pub last_visibility_check: Option<Instant>,
     pub last_overlay_check: Option<Instant>,
+    /// The tray's "Edit Overlay Position" mode is open: the HUD is draggable and the
+    /// overlay process is waiting for a Confirm / Esc.
+    pub overlay_editing: bool,
+    /// Last look at the editor's answer file.
+    pub last_overlay_edit_check: Option<Instant>,
     /// Frames to wait after showing the window before raising it over Roblox.
     pub raise_frames: u8,
     pub pending_start_in_tray_frames: u8,
@@ -314,6 +319,7 @@ impl Creblox {
                 overlay_server: settings.overlay_enabled,
                 overlay_stats: settings.overlay_stats_enabled,
                 overlay_crosshair: settings.crosshair_enabled,
+                overlay_editing: false,
             },
             tx.clone(),
             cc.egui_ctx.clone(),
@@ -537,6 +543,8 @@ impl Creblox {
             last_window_check: None,
             last_visibility_check: None,
             last_overlay_check: None,
+            overlay_editing: false,
+            last_overlay_edit_check: None,
             raise_frames: 0,
             pending_start_in_tray_frames: if start_in_tray { 2 } else { 0 },
             startup_err: None,
@@ -2747,6 +2755,25 @@ impl Creblox {
                             self.maybe_show_game_overlay();
                             self.sync_tray_state();
                         }
+                        TrayEvent::EditOverlayPosition => {
+                            // The overlay process owns the pointer and the launcher owns
+                            // settings.json, so the answer comes back as one small file
+                            // (polled below) instead of two processes writing one config.
+                            if !self.overlay_editing {
+                                self.overlay_editing = true;
+                                self.status =
+                                    "Drag the HUD, then Confirm (⏎) — Esc cancels".to_string();
+                                self.maybe_show_game_overlay();
+                                self.game_overlay.set_edit(true);
+                                if !self.game_overlay.is_running() {
+                                    // Never leave the menu in "Editing…" with nothing on
+                                    // screen to edit: that would look like a hang.
+                                    self.overlay_editing = false;
+                                    self.status = "Could not open the HUD editor".to_string();
+                                }
+                                self.sync_tray_state();
+                            }
+                        }
                         TrayEvent::CopyJobId => {
                             if let Some(info) = self.server_info.clone() {
                                 if !info.job_id.is_empty() {
@@ -3958,6 +3985,7 @@ impl Creblox {
             overlay_server: self.settings.overlay_enabled,
             overlay_stats: self.settings.overlay_stats_enabled,
             overlay_crosshair: self.settings.crosshair_enabled,
+            overlay_editing: self.overlay_editing,
         }
     }
 
@@ -4002,13 +4030,16 @@ impl Creblox {
         // overlays are always driven from here - also with "close the window while I play".
         let flags = crate::fastflags::load_fastflags();
         let mut cfg = crate::game_overlay::OverlayConfig::from_settings(&self.settings, &flags);
+        // The position editor needs the overlay on screen whether or not a game is running,
+        // so it overrides both of the "nothing to show" exits below.
+        cfg.edit = self.overlay_editing;
         if !cfg.any_enabled() {
             self.game_overlay.stop();
             return;
         }
         // Keep the helper while Roblox runs even if the place is not known yet: the tray
         // and settings then edit the overlays live instead of hitting a dead process.
-        if self.active_roblox_place_id.is_none() && !self.roblox_running {
+        if !self.overlay_editing && self.active_roblox_place_id.is_none() && !self.roblox_running {
             self.game_overlay.stop();
             return;
         }
@@ -4017,8 +4048,9 @@ impl Creblox {
         let launched_recently = now_unix_ms()
             .saturating_sub(self.last_roblox_launch_ms.load(Ordering::Relaxed))
             < 180_000;
-        cfg.game_active =
-            self.active_roblox_place_id.is_some() || (self.roblox_running && launched_recently);
+        cfg.game_active = self.overlay_editing
+            || self.active_roblox_place_id.is_some()
+            || (self.roblox_running && launched_recently);
         self.game_overlay.start(cfg);
         let server = self
             .server_info
@@ -4317,6 +4349,32 @@ impl eframe::App for Creblox {
                     self.maybe_show_game_overlay();
                 }
             }
+        }
+        // Position editor: pick up the overlay's answer (Confirm / Esc) and persist it.
+        if self.overlay_editing {
+            let due = self
+                .last_overlay_edit_check
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(250));
+            if due {
+                self.last_overlay_edit_check = Some(Instant::now());
+                if let Some(result) = crate::game_overlay::take_position_result() {
+                    self.overlay_editing = false;
+                    if result.confirmed {
+                        self.settings.overlay_offset_x = result.offset_x;
+                        self.settings.overlay_offset_y = result.offset_y;
+                        save_settings(&self.settings);
+                        self.status = format!(
+                            "HUD position saved ({}, {})",
+                            result.offset_x, result.offset_y
+                        );
+                    } else {
+                        self.status = "HUD position unchanged".to_string();
+                    }
+                    self.maybe_show_game_overlay();
+                    self.sync_tray_state();
+                }
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
         if self.raise_frames > 0 {
             self.raise_frames -= 1;

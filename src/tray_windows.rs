@@ -46,6 +46,7 @@ const WM_APP_RESTORE: u32 = WM_APP + 4;
 const CMD_SHOW_WINDOW: usize = 1001;
 const CMD_HIDE_WINDOW: usize = 1002;
 const CMD_OPEN_SETTINGS: usize = 1003;
+const CMD_EDIT_OVERLAY: usize = 1007;
 const CMD_TOGGLE_DISCORD_RPC: usize = 1004;
 const CMD_CHECK_UPDATES: usize = 1005;
 const CMD_QUIT_APP: usize = 1006;
@@ -63,6 +64,8 @@ pub enum TrayEvent {
     ToggleServerOverlay,
     ToggleStatsOverlay,
     ToggleCrosshair,
+    /// Drag the HUD on screen and confirm where it lands.
+    EditOverlayPosition,
     CopyJobId,
     CloseRoblox,
     /// Index into `TrayState.accounts`; the app resolves it, because it owns the list.
@@ -92,6 +95,8 @@ pub struct TrayState {
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
+    /// The position editor is open on screen.
+    pub overlay_editing: bool,
 }
 
 impl Default for TrayState {
@@ -110,6 +115,7 @@ impl Default for TrayState {
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,
+            overlay_editing: false,
         }
     }
 }
@@ -716,6 +722,23 @@ unsafe fn show_context_menu(hwnd: HWND) {
             CMD_OPEN_SETTINGS,
             wide_nul("Settings").as_ptr(),
         );
+        let any_overlay = state.overlay_server || state.overlay_stats || state.overlay_crosshair;
+        let edit_flag = if any_overlay && !state.overlay_editing {
+            MF_STRING
+        } else {
+            MF_STRING | MF_GRAYED
+        };
+        let edit_label = if state.overlay_editing {
+            "Editing Overlay…"
+        } else {
+            "Edit Overlay Position…"
+        };
+        AppendMenuW(
+            menu,
+            edit_flag,
+            CMD_EDIT_OVERLAY,
+            wide_nul(edit_label).as_ptr(),
+        );
         AppendMenuW(
             menu,
             MF_STRING,
@@ -750,6 +773,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
                 CMD_SHOW_WINDOW => emit_tray_event(TrayEvent::ShowAndFocus),
                 CMD_HIDE_WINDOW => emit_tray_event(TrayEvent::HideToTray),
                 CMD_OPEN_SETTINGS => emit_tray_event(TrayEvent::OpenSettings),
+                CMD_EDIT_OVERLAY => emit_tray_event(TrayEvent::EditOverlayPosition),
                 CMD_TOGGLE_DISCORD_RPC => emit_tray_event(TrayEvent::ToggleDiscordRpc),
                 CMD_CHECK_UPDATES => emit_tray_event(TrayEvent::CheckUpdates),
                 CMD_QUIT_APP => emit_tray_event(TrayEvent::QuitApp),

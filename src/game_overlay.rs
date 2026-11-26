@@ -52,8 +52,29 @@ pub struct StatsPanelCfg {
 pub struct FlagsPanelCfg {
     pub corner: u8,
     pub max_lines: usize,
+    /// Which built-in preset the live config matches: `Competitive`, `Quality` or `Custom`.
+    pub preset: &'static str,
     /// Pre-rendered `Key = value` lines of every FastFlag CREBLOX writes.
     pub flags: Vec<String>,
+}
+
+/// Which built-in preset the live FastFlags config matches.
+///
+/// Derived from the config itself rather than remembered from the last click, so a hand-edited
+/// `fastflags.json` or a half-applied preset can never make the overlay claim a preset that is
+/// not actually on disk.
+fn active_preset_name(ff: &FastFlagsConfig) -> &'static str {
+    let mut competitive = ff.clone();
+    competitive.apply_competitive_preset();
+    if *ff == competitive {
+        return "Competitive";
+    }
+    let mut quality = ff.clone();
+    quality.apply_quality_preset();
+    if *ff == quality {
+        return "Quality";
+    }
+    "Custom"
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +114,12 @@ pub struct OverlayConfig {
     /// but hides itself, so sitting in the Roblox menu never shows panels over it.
     pub game_active: bool,
     pub opacity: f32,
+    /// Where the user parked the HUD, in points from its corner anchor.
+    pub offset_x: i16,
+    pub offset_y: i16,
+    /// Interactive position editing: the overlay becomes draggable and stops being
+    /// click-through until the user confirms or cancels on the HUD itself.
+    pub edit: bool,
     pub server: Option<ServerPanelCfg>,
     pub stats: Option<StatsPanelCfg>,
     pub flags: Option<FlagsPanelCfg>,
@@ -137,6 +164,7 @@ impl OverlayConfig {
             FlagsPanelCfg {
                 corner: s.overlay_flags_corner.min(3),
                 max_lines: (s.overlay_flags_max_lines as usize).clamp(1, 40),
+                preset: active_preset_name(ff),
                 flags,
             }
         });
@@ -171,6 +199,9 @@ impl OverlayConfig {
             // drivers only build a config while a game is actually running.
             game_active: true,
             opacity: s.overlay_opacity.clamp(0.2, 1.0),
+            offset_x: s.overlay_offset_x,
+            offset_y: s.overlay_offset_y,
+            edit: false,
             server,
             stats,
             flags,
@@ -304,6 +335,23 @@ impl OverlayManager {
         }
     }
 
+    /// Puts the running overlay into (or out of) interactive position editing.
+    ///
+    /// Only flips a flag and wakes the loop: the overlay process is what actually becomes
+    /// draggable, so entering edit mode never restarts the window.
+    pub fn set_edit(&mut self, edit: bool) {
+        self.reap();
+        let Some(r) = &self.running else {
+            return;
+        };
+        if let Ok(mut g) = r.shared.lock() {
+            if g.cfg.edit != edit {
+                g.cfg.edit = edit;
+                g.dirty = true;
+            }
+        }
+    }
+
     /// Asks the overlays to close without blocking the caller.
     pub fn stop(&mut self) {
         if let Some(r) = self.running.take() {
@@ -369,6 +417,36 @@ fn write_spec(path: &std::path::Path, text: &str) {
     }
 }
 
+/// Where the overlay process leaves the answer of its position editor.
+///
+/// The overlay owns the drag (it has the pointer), the launcher owns `settings.json`, so the
+/// answer comes back as one small file in the same folder rather than two processes writing
+/// the same config.
+pub fn position_result_path() -> std::path::PathBuf {
+    data_dir().join("overlay-position.json")
+}
+
+/// What the user did in the position editor.
+pub struct PositionResult {
+    pub confirmed: bool,
+    pub offset_x: i16,
+    pub offset_y: i16,
+}
+
+/// Reads and removes the editor's answer. `None` while the user is still dragging.
+pub fn take_position_result() -> Option<PositionResult> {
+    let path = position_result_path();
+    let text = fs::read_to_string(&path).ok()?;
+    // Remove first: a failed parse must not leave a file that is read again every tick.
+    let _ = fs::remove_file(&path);
+    let v: Value = serde_json::from_str(&text).ok()?;
+    Some(PositionResult {
+        confirmed: v["state"].as_str() == Some("confirmed"),
+        offset_x: v["offset_x"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+        offset_y: v["offset_y"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+    })
+}
+
 fn local_clock() -> String {
     unsafe {
         let now = libc::time(std::ptr::null_mut());
@@ -380,20 +458,213 @@ fn local_clock() -> String {
     }
 }
 
-/// `(cpu %, resident MB)` of a process via `ps`.
-fn process_usage(pid: u32) -> Option<(f32, f32)> {
-    let out = Command::new("/bin/ps")
-        .args(["-o", "%cpu=,rss=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+/// Cumulative CPU time (ns) and resident bytes of one process.
+///
+/// The old implementation shelled out to `/bin/ps` once per sample: a fork plus an exec every
+/// second, and `ps`'s `%cpu` is an average over the process's whole lifetime, so the number
+/// lagged minutes behind what the game was actually doing. These are one syscall each.
+#[cfg(target_os = "macos")]
+fn process_counters(pid: u32) -> Option<(u64, u64)> {
+    use std::ffi::c_void;
+
+    // `struct proc_taskinfo` from <libproc.h>. Only the first four fields are read; the rest
+    // keeps the size (and therefore the kernel-side copy) exactly right.
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcTaskInfo {
+        pti_virtual_size: u64,
+        pti_resident_size: u64,
+        pti_total_user: u64,
+        pti_total_system: u64,
+        pti_threads_user: u64,
+        pti_threads_system: u64,
+        pti_policy: i32,
+        pti_faults: i32,
+        pti_pageins: i32,
+        pti_cow_faults: i32,
+        pti_messages_sent: i32,
+        pti_messages_received: i32,
+        pti_syscalls_mach: i32,
+        pti_syscalls_unix: i32,
+        pti_csw: i32,
+        pti_threadnum: i32,
+        pti_numrunning: i32,
+        pti_priority: i32,
+    }
+    const PROC_PIDTASKINFO: i32 = 4;
+    unsafe extern "C" {
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut c_void, size: i32) -> i32;
+    }
+
+    let mut info = ProcTaskInfo::default();
+    let size = std::mem::size_of::<ProcTaskInfo>() as i32;
+    let written = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDTASKINFO,
+            0,
+            (&mut info as *mut ProcTaskInfo).cast(),
+            size,
+        )
+    };
+    if written != size {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut it = text.split_whitespace();
-    let cpu: f32 = it.next()?.parse().ok()?;
-    let rss_kb: f32 = it.next()?.parse().ok()?;
-    Some((cpu, rss_kb / 1024.0))
+    // `pti_total_*` are nanoseconds, so no mach timebase conversion is involved. This works
+    // unchanged on Apple Silicon, where the timebase is 125/3.
+    Some((
+        info.pti_total_user.saturating_add(info.pti_total_system),
+        info.pti_resident_size,
+    ))
+}
+
+/// Cumulative CPU time (100 ns ticks → ns) and working-set bytes of one process.
+#[cfg(windows)]
+fn process_counters(pid: u32) -> Option<(u64, u64)> {
+    use core::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn CloseHandle(object: *mut c_void) -> i32;
+    }
+    #[link(name = "psapi")]
+    unsafe extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut c_void,
+            counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    fn ticks(t: &FileTime) -> u64 {
+        ((t.high as u64) << 32 | t.low as u64).saturating_mul(100)
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation = FileTime::default();
+        let mut exit = FileTime::default();
+        let mut kernel = FileTime::default();
+        let mut user = FileTime::default();
+        let times_ok = GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        ) != 0;
+        let mut counters = ProcessMemoryCounters {
+            cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+            ..Default::default()
+        };
+        let mem_ok = GetProcessMemoryInfo(
+            handle,
+            &mut counters,
+            std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        ) != 0;
+        CloseHandle(handle);
+        if !times_ok {
+            return None;
+        }
+        let cpu = ticks(&kernel).saturating_add(ticks(&user));
+        let mem = if mem_ok {
+            counters.working_set_size as u64
+        } else {
+            0
+        };
+        Some((cpu, mem))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn process_counters(_pid: u32) -> Option<(u64, u64)> {
+    None
+}
+
+/// Live CPU / memory of the Roblox process, sampled once per overlay tick.
+///
+/// CPU is the delta of the process's own CPU time over the wall time between two samples, so
+/// it is instantaneous rather than a lifetime average, and 100 % means one fully busy core -
+/// the same scale Activity Monitor uses for a single process.
+struct Usage {
+    pid: Option<u32>,
+    last_total_ns: u64,
+    last_at: Instant,
+    cpu: f32,
+    mem_mb: f32,
+    have: bool,
+}
+
+impl Usage {
+    fn new() -> Self {
+        Self {
+            pid: None,
+            last_total_ns: 0,
+            last_at: Instant::now(),
+            cpu: 0.0,
+            mem_mb: 0.0,
+            have: false,
+        }
+    }
+
+    fn sample(&mut self, pid: Option<u32>) {
+        let Some(pid) = pid else {
+            self.pid = None;
+            self.have = false;
+            self.cpu = 0.0;
+            self.mem_mb = 0.0;
+            return;
+        };
+        let Some((total_ns, mem_bytes)) = process_counters(pid) else {
+            // The process is gone or not inspectable (sandboxing): show `--`, never a stale
+            // number from the previous server.
+            self.pid = Some(pid);
+            self.have = false;
+            return;
+        };
+        let now = Instant::now();
+        let wall_ns = now.duration_since(self.last_at).as_nanos().max(1) as f64;
+        if self.pid == Some(pid) && self.have && total_ns >= self.last_total_ns {
+            let used = (total_ns - self.last_total_ns) as f64;
+            self.cpu = (used / wall_ns * 100.0).clamp(0.0, 1600.0) as f32;
+        }
+        self.pid = Some(pid);
+        self.last_total_ns = total_ns;
+        self.last_at = now;
+        self.mem_mb = mem_bytes as f32 / (1024.0 * 1024.0);
+        self.have = true;
+    }
 }
 
 /// Round-trip time in milliseconds to `target` (an IP or a host name), timed with a TCP
@@ -500,9 +771,8 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     let mut last_ping_target: Option<String> = None;
     let mut roblox_pid: Option<u32> = None;
     let mut last_pid_scan = Instant::now() - Duration::from_secs(60);
-    // `/bin/ps` is a process spawn. Refresh the CPU/RAM numbers at most every two seconds
-    // instead of forking it once per overlay update while a game is running.
-    let mut last_usage: Option<(Instant, Option<(f32, f32)>)> = None;
+    // One syscall per tick instead of a `/bin/ps` fork, and a delta-based CPU figure.
+    let mut usage = Usage::new();
     let mut pending_locations: Vec<String> = Vec::new();
     let mut last_game_fetch: Option<Instant> = None;
     let mut last_text = String::new();
@@ -564,11 +834,14 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             }
         }
 
-        // Which process are the stats about?
-        if cfg.stats.is_some() && last_pid_scan.elapsed() >= Duration::from_secs(3) {
-            last_pid_scan = Instant::now();
-            let (procs, _) = enumerate_roblox_processes();
-            roblox_pid = procs.iter().max_by_key(|p| p.start_ms).map(|p| p.pid);
+        // Which process are the stats about, and what is it using right now?
+        if cfg.stats.as_ref().is_some_and(|s| s.cpu || s.ram) {
+            if last_pid_scan.elapsed() >= Duration::from_secs(3) {
+                last_pid_scan = Instant::now();
+                let (procs, _) = enumerate_roblox_processes();
+                roblox_pid = procs.iter().max_by_key(|p| p.start_ms).map(|p| p.pid);
+            }
+            usage.sample(roblox_pid);
         }
         // Ping: measured even before the server IP is known (Roblox's web edge is the
         // fallback), and reset while switching servers so no stale number is shown.
@@ -666,24 +939,18 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         if let Some(st) = &cfg.stats {
             let mut lines: Vec<String> = Vec::new();
             if st.cpu || st.ram {
-                let usage = match &last_usage {
-                    Some((at, cached)) if at.elapsed() < Duration::from_secs(2) => *cached,
-                    _ => {
-                        let fresh = roblox_pid.and_then(process_usage);
-                        last_usage = Some((Instant::now(), fresh));
-                        fresh
-                    }
-                };
                 if st.cpu {
-                    lines.push(match usage {
-                        Some((cpu, _)) => format!("CPU      {cpu:.0}%"),
-                        None => "CPU      --".to_string(),
+                    lines.push(if usage.have {
+                        format!("CPU      {:.0}%", usage.cpu)
+                    } else {
+                        "CPU      --".to_string()
                     });
                 }
                 if st.ram {
-                    lines.push(match usage {
-                        Some((_, mb)) => format!("RAM      {mb:.0} MB"),
-                        None => "RAM      --".to_string(),
+                    lines.push(if usage.have {
+                        format!("RAM      {:.0} MB", usage.mem_mb)
+                    } else {
+                        "RAM      --".to_string()
                     });
                 }
             }
@@ -726,7 +993,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             panels.push(json!({
                 "id": "flags",
                 "corner": fl.corner,
-                "title": format!("FastFlags ({total})"),
+                "title": format!("FastFlags {} ({total})", fl.preset),
                 "lines": lines
             }));
         }
@@ -734,6 +1001,9 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         let mut spec = json!({
             "opacity": cfg.opacity,
             "game_active": cfg.game_active,
+            "offset_x": cfg.offset_x,
+            "offset_y": cfg.offset_y,
+            "edit": cfg.edit,
             "panels": panels
         });
         if let Some(img) = &cfg.image {

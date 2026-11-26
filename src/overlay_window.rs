@@ -16,6 +16,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, pos2, vec2};
@@ -200,8 +201,11 @@ unsafe fn msg1_f(obj: *mut c_void, sel: &str, arg: f64) -> *mut c_void {
 }
 
 /// Makes the overlay window float above everything - including fullscreen games - without a
-/// Dock icon, shadow or mouse handling. Returns false while the window does not exist yet.
-fn tweak_overlay_window() -> bool {
+/// Dock icon or shadow. Returns false while the window does not exist yet.
+///
+/// `interactive` is the position editor: it is the only state in which the overlay accepts a
+/// click, so the window stays strictly click-through for the whole rest of the session.
+fn tweak_overlay_window(interactive: bool) -> bool {
     unsafe {
         let class = objc_getClass(c"NSApplication".as_ptr());
         if class.is_null() {
@@ -225,16 +229,25 @@ fn tweak_overlay_window() -> bool {
             if window.is_null() {
                 continue;
             }
-            msg1(window, "setLevel:", 1000); // above the fullscreen window level
+            msg1(window, "setLevel:", if interactive { 1001 } else { 1000 });
             msg1(window, "setCollectionBehavior:", 1 | 16 | 256); // all Spaces | stationary | over fullscreen
-            msg1(window, "setIgnoresMouseEvents:", 1);
+            // Click-through except while the user is dragging the HUD. Edit mode hands the
+            // click straight back on Confirm, so Roblox never loses input for long.
+            msg1(window, "setIgnoresMouseEvents:", if interactive { 0 } else { 1 });
             msg1(window, "setHasShadow:", 0);
             msg1(window, "setHidesOnDeactivate:", 0);
             msg1(window, "setCanHide:", 0);
             msg1(window, "setOpaque:", 0);
-            // Show up without the app being active; without this the overlay can be
-            // created and positioned yet never ordered onto the screen.
-            msg0(window, "orderFrontRegardless");
+            if interactive {
+                // Return / Esc only reach a key window, and clicking the HUD activates the
+                // app - so the editor is usable without any extra permission.
+                msg1(window, "makeKeyAndOrderFront:", 0);
+            } else {
+                msg0(window, "resignKeyWindow");
+                // Show up without the app being active; without this the overlay can be
+                // created and positioned yet never ordered onto the screen.
+                msg0(window, "orderFrontRegardless");
+            }
         }
         true
     }
@@ -285,6 +298,25 @@ struct Panel {
     /// `lines` parsed into label/value pairs, also built once per spec change so the
     /// render loop never splits or allocates strings per frame.
     rows: Vec<Row>,
+}
+
+/// One laid-out row, in game-window coordinates. Built once per spec / scale change; the
+/// render loop only translates and draws these, so a frame allocates nothing.
+struct RowLayout {
+    label: Option<Arc<egui::Galley>>,
+    label_pos: Pos2,
+    value: Arc<egui::Galley>,
+    value_pos: Pos2,
+    tone: Option<(u8, u8, u8)>,
+    dot_pos: Pos2,
+}
+
+struct PanelLayout {
+    rect: Rect,
+    title: Option<(Pos2, Arc<egui::Galley>)>,
+    rows: Vec<RowLayout>,
+    /// Absolute y of every hairline inside the panel (title rule + row separators).
+    rules: Vec<f32>,
 }
 
 /// Uppercase with U+2009 between characters: egui has no letter-spacing, and this is the
@@ -482,6 +514,29 @@ struct OverlayWindowApp {
     /// The launcher says a game session is being played (not just the Roblox menu).
     /// Kept true when the spec does not say, so older specs still show.
     game_active: bool,
+    /// Position from `settings.json`, as the launcher sent it.
+    saved_offset: egui::Vec2,
+    /// Live position: the saved one, or the one being dragged right now.
+    offset: egui::Vec2,
+    /// Interactive position editing is on.
+    edit: bool,
+    /// The user already confirmed/cancelled; ignore the stale `edit: true` in the spec until
+    /// the launcher has caught up, otherwise the next spec reload would re-enter edit mode.
+    edit_done: bool,
+    dragging: bool,
+    /// The window accepts mouse input (edit mode only).
+    interactive: bool,
+    /// Laid-out panels, in game-window space.
+    layout: Vec<PanelLayout>,
+    /// `(spec generation, ppp, opacity, width, height, title bar)` the layout was built for.
+    layout_stamp: Option<(u64, u32, u32, f32, f32, f32)>,
+    /// Bumped on every spec reload so the layout cache is invalidated exactly once.
+    spec_gen: u64,
+    /// Window-local origin of the layout (non-zero while the window is trimmed to the HUD).
+    shift: egui::Vec2,
+    /// Cached `X, Y` readout, rebuilt only when the rounded offset actually changes.
+    readout: String,
+    readout_at: (i32, i32),
 }
 
 impl OverlayWindowApp {
@@ -507,26 +562,19 @@ impl OverlayWindowApp {
             last_proc_check: Instant::now() - Duration::from_secs(10),
             roblox_running: false,
             game_active: true,
+            saved_offset: egui::Vec2::ZERO,
+            offset: egui::Vec2::ZERO,
+            edit: false,
+            edit_done: false,
+            dragging: false,
+            interactive: false,
+            layout: Vec::new(),
+            layout_stamp: None,
+            spec_gen: 0,
+            shift: egui::Vec2::ZERO,
+            readout: String::from("0, 0"),
+            readout_at: (0, 0),
         }
-    }
-
-    /// Loads (or reloads) the image crosshair. Only runs when the configured path changes,
-    /// so a still image is decoded exactly once.
-    fn ensure_crosshair_texture(
-        &mut self,
-        ctx: &egui::Context,
-        path: &str,
-    ) -> Option<egui::TextureHandle> {
-        texture_for(ctx, &mut self.crosshair_tex, path, "crosshair-image")
-    }
-
-    /// Loads (or reloads) the custom image overlay, again only when the path changes.
-    fn ensure_image_texture(
-        &mut self,
-        ctx: &egui::Context,
-        path: &str,
-    ) -> Option<egui::TextureHandle> {
-        texture_for(ctx, &mut self.image_tex, path, "overlay-image")
     }
 
     /// Shows/hides the window only when the state actually changes.
@@ -567,6 +615,25 @@ impl OverlayWindowApp {
         }
         self.opacity = spec["opacity"].as_f64().unwrap_or(0.9).clamp(0.2, 1.0) as f32;
         self.game_active = spec["game_active"].as_bool().unwrap_or(true);
+        self.spec_gen = self.spec_gen.wrapping_add(1);
+        // Where the launcher thinks the HUD sits. Ignored while the user drags: the spec is
+        // rewritten about once a second (the session timer changes), and taking the saved
+        // value again would snap the HUD back under the pointer mid-drag.
+        self.saved_offset = vec2(
+            spec["offset_x"].as_f64().unwrap_or(0.0) as f32,
+            spec["offset_y"].as_f64().unwrap_or(0.0) as f32,
+        );
+        let edit = spec["edit"].as_bool().unwrap_or(false);
+        if !edit {
+            self.edit = false;
+            self.edit_done = false;
+            self.offset = self.saved_offset;
+        } else if !self.edit && !self.edit_done {
+            // Entered from the tray: start from the saved position.
+            self.edit = true;
+            self.offset = self.saved_offset;
+            self.readout_at = (i32::MIN, i32::MIN);
+        }
         self.panels = spec["panels"]
             .as_array()
             .map(|arr| {
@@ -691,9 +758,18 @@ impl OverlayWindowApp {
         // front app - with a short grace period so it appears with the game instead of a
         // few seconds later.
         let grace = self.roblox_running && self.started.elapsed() < Duration::from_secs(10);
-        self.update_visibility(
-            self.game_active && self.roblox_running && (roblox_in_front || grace),
-        );
+        // Editing wins over every "should it show" rule: the user asked for it from the tray,
+        // possibly with no game running at all.
+        self.update_visibility(if self.edit {
+            true
+        } else {
+            self.game_active && self.roblox_running && (roblox_in_front || grace)
+        });
+        // Mouse input is enabled only for the editor, and taken back the moment it ends.
+        if self.interactive != self.edit {
+            self.interactive = self.edit;
+            tweak_overlay_window(self.interactive);
+        }
 
         // Spec file: the launcher rewrites it only when something changed, so when the
         // size and modification time are unchanged there is nothing to read or parse.
@@ -705,6 +781,8 @@ impl OverlayWindowApp {
             self.reload_spec();
         }
 
+        // The layout is built in `paint` (it needs a painter to measure text) and cached, so
+        // the union here is at most one frame behind - enough to size a HUD-only window.
         match self.bounds {
             Some(b) => {
                 self.misses = 0;
@@ -714,14 +792,40 @@ impl OverlayWindowApp {
                         b.x, b.y, b.w, b.h
                     );
                 }
-                if self.applied_bounds != Some(b) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos2(
-                        b.x as f32, b.y as f32,
-                    )));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(
-                        b.w as f32, b.h as f32,
-                    )));
-                    self.applied_bounds = Some(b);
+                let union = self.layout_union();
+                // Text panels only: shrink the window to the HUD itself. On a Catalina Intel
+                // GPU that is the difference between compositing a few thousand pixels and a
+                // full-screen transparent quad every time the HUD updates. A crosshair or a
+                // picture needs the whole game area, and so does the editor.
+                let tight = !self.edit
+                    && self.crosshair.is_none()
+                    && self.image.is_none()
+                    && !union.is_negative()
+                    && union.width() > 1.0
+                    && union.height() > 1.0;
+                let (pos, size) = if tight {
+                    (
+                        pos2(b.x as f32 + union.min.x, b.y as f32 + union.min.y),
+                        union.size(),
+                    )
+                } else {
+                    (pos2(b.x as f32, b.y as f32), vec2(b.w as f32, b.h as f32))
+                };
+                self.shift = if tight {
+                    union.min.to_vec2()
+                } else {
+                    egui::Vec2::ZERO
+                };
+                let want = CGRect {
+                    x: pos.x as f64,
+                    y: pos.y as f64,
+                    w: size.x as f64,
+                    h: size.y as f64,
+                };
+                if self.applied_bounds != Some(want) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    self.applied_bounds = Some(want);
                 }
             }
             None => {
@@ -743,7 +847,7 @@ impl OverlayWindowApp {
             .last_tweak
             .is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
         if due {
-            let ok = tweak_overlay_window();
+            let ok = tweak_overlay_window(self.interactive);
             self.last_tweak = if ok { Some(Instant::now()) } else { None };
             // `update_visibility` only acts on changes. If the very first "visible" poll ran
             // before the NSWindow existed, the alpha stayed 0 forever; now that the window
@@ -755,38 +859,37 @@ impl OverlayWindowApp {
     }
 
     fn paint(&mut self, ui: &egui::Ui) {
-        if !self.visible {
+        if !self.visible && !self.edit {
             return;
         }
         let painter = ui.painter();
         let area = ui.max_rect();
-        let monitor_h = ui
-            .ctx()
-            .input(|i| i.viewport().monitor_size.map(|m| m.y))
-            .unwrap_or(0.0);
-        // Windowed Roblox has a ~28 pt title bar inside its window bounds. With no window
-        // (display fallback) or a fullscreen one, the panels use the whole area.
-        let title_bar = match self.bounds {
-            Some(b) if monitor_h > 0.0 && b.h as f32 >= monitor_h - 2.0 => 0.0,
-            Some(_) => 28.0,
-            None => 0.0,
-        };
+        let title_bar = self.title_bar(ui.ctx());
+        // Measures every label and value once, then caches the galleys.
+        self.relayout(painter, title_bar);
 
         // Image overlay first: it is a background decoration, the text panels go on top.
-        if let Some(img) = self.image.clone() {
+        // Borrowed, never cloned: the old version cloned the path string every frame.
+        if let Some(img) = self.image.as_ref() {
             if !img.path.is_empty() {
-                if let Some(tex) = self.ensure_image_texture(ui.ctx(), &img.path) {
-                    paint_overlay_image(painter, area, title_bar, &img, &tex);
+                let tex = texture_for(ui.ctx(), &mut self.image_tex, &img.path, "overlay-image");
+                if let Some(tex) = tex {
+                    paint_overlay_image(painter, area, title_bar, img, &tex);
                 }
             }
         }
 
-        let crosshair_image = self
+        let crosshair_path = self
             .crosshair
             .as_ref()
-            .map(|ch| ch.image.clone())
-            .unwrap_or_default();
-        let crosshair_tex = self.ensure_crosshair_texture(ui.ctx(), &crosshair_image);
+            .map(|ch| ch.image.as_str())
+            .unwrap_or("");
+        let crosshair_tex = texture_for(
+            ui.ctx(),
+            &mut self.crosshair_tex,
+            crosshair_path,
+            "crosshair-image",
+        );
         if let Some(ch) = &self.crosshair {
             let center = pos2(
                 area.center().x + ch.offset_x,
@@ -798,17 +901,56 @@ impl OverlayWindowApp {
             }
         }
 
-        self.paint_panels(painter, area, title_bar);
+        self.paint_layout(painter);
+        if self.edit {
+            self.paint_edit(ui);
+        }
     }
 
-    /// Draws the telemetry panels.
+    /// Title-bar height of the game window (0 when it is fullscreen or unknown).
+    fn title_bar(&self, ctx: &egui::Context) -> f32 {
+        let monitor_h = ctx
+            .input(|i| i.viewport().monitor_size.map(|m| m.y))
+            .unwrap_or(0.0);
+        match self.bounds {
+            Some(b) if monitor_h > 0.0 && b.h as f32 >= monitor_h - 2.0 => 0.0,
+            Some(_) => 28.0,
+            None => 0.0,
+        }
+    }
+
+    /// Bounding box of every panel, in game-window coordinates.
+    fn layout_union(&self) -> Rect {
+        self.layout
+            .iter()
+            .fold(Rect::NOTHING, |acc, p| acc.union(p.rect))
+    }
+
+    /// Lays the panels out in game-window coordinates.
     ///
-    /// Surface, one hairline, two text weights: a tracked 10 pt micro-label on the left, a
-    /// tabular 12.5 pt value right-aligned on the same line, hairline row separators, and a
-    /// 5 px dot only where a row has health meaning. Everything is snapped to the physical
-    /// pixel grid so the 1 px edges stay crisp at 1x and 2x.
-    fn paint_panels(&self, painter: &egui::Painter, area: Rect, title_bar: f32) {
+    /// Runs only when the spec, the scale, the opacity or the window size changed. Every
+    /// frame after that draws the cached galleys, so painting allocates nothing - the old
+    /// version laid out every label and value again on each frame.
+    fn relayout(&mut self, painter: &egui::Painter, title_bar: f32) {
         let ppp = painter.ctx().pixels_per_point().max(0.5);
+        let size = self
+            .bounds
+            .map(|b| vec2(b.w as f32, b.h as f32))
+            .unwrap_or(vec2(400.0, 300.0));
+        let key = (
+            self.spec_gen,
+            (ppp * 1000.0) as u32,
+            (self.opacity * 1000.0) as u32,
+            size.x,
+            size.y,
+            title_bar,
+        );
+        if self.layout_stamp == Some(key) {
+            return;
+        }
+        self.layout_stamp = Some(key);
+        self.layout.clear();
+
         let px = 1.0 / ppp;
         let margin = 16.0;
         let gap = 8.0;
@@ -816,31 +958,20 @@ impl OverlayWindowApp {
         let row_h = 17.0;
         let label_font = FontId::proportional(10.0);
         let value_font = FontId::monospace(12.5);
-        let alpha = |a: f32| (a * self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+        let alpha = (self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
         let label_color =
-            Color32::from_rgba_unmultiplied(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2, alpha(1.0));
+            Color32::from_rgba_unmultiplied(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2, alpha);
         let value_color =
-            Color32::from_rgba_unmultiplied(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2, alpha(1.0));
-        let surface = Color32::from_rgba_unmultiplied(
-            SURFACE_RGB.0,
-            SURFACE_RGB.1,
-            SURFACE_RGB.2,
-            alpha(SURFACE_ALPHA),
-        );
-        let hairline = Color32::from_rgba_unmultiplied(255, 255, 255, alpha(HAIRLINE_ALPHA));
-        let divider = Color32::from_rgba_unmultiplied(255, 255, 255, alpha(DIVIDER_ALPHA));
+            Color32::from_rgba_unmultiplied(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2, alpha);
+        let area = Rect::from_min_size(Pos2::ZERO, size);
         let mut used = [0.0_f32; 4];
 
         for panel in &self.panels {
             if panel.title_display.is_empty() && panel.rows.is_empty() {
                 continue;
             }
-            let title_galley = (!panel.title_display.is_empty()).then(|| {
-                painter.layout_no_wrap(
-                    panel.title_display.clone(),
-                    label_font.clone(),
-                    label_color,
-                )
+            let title = (!panel.title_display.is_empty()).then(|| {
+                painter.layout_no_wrap(panel.title_display.clone(), label_font.clone(), label_color)
             });
 
             let mut label_w = 0.0_f32;
@@ -855,7 +986,7 @@ impl OverlayWindowApp {
                     painter.layout_no_wrap(row.value.clone(), value_font.clone(), value_color);
                 label_w = label_w.max(label.as_ref().map_or(0.0, |g| g.size().x));
                 value_w = value_w.max(value.size().x);
-                let tone = tone_rgba(&row.label, &row.value, alpha(1.0));
+                let tone = tone_rgba(&row.label, &row.value, 255).map(|c| (c.r(), c.g(), c.b()));
                 has_dot |= tone.is_some();
                 rows.push((label, value, tone));
             }
@@ -867,30 +998,101 @@ impl OverlayWindowApp {
                 + value_w
                 + pad * 2.0;
             let mut height = pad * 2.0;
-            if let Some(t) = &title_galley {
+            if let Some(t) = &title {
                 width = width.max(t.size().x + pad * 2.0);
                 height += t.size().y + gap;
             }
             if !rows.is_empty() {
                 height += px + gap + row_h * rows.len() as f32;
             }
-            let size = vec2(width, height);
+            let panel_size = vec2(width, height);
 
             let corner = panel.corner.min(3) as usize;
             let x = if corner % 2 == 1 {
-                area.right() - size.x - margin
+                area.right() - panel_size.x - margin
             } else {
                 area.left() + margin
             };
             let y = if corner < 2 {
                 area.top() + title_bar + margin + used[corner]
             } else {
-                area.bottom() - size.y - margin - used[corner]
+                area.bottom() - panel_size.y - margin - used[corner]
             };
-            used[corner] += size.y + gap;
+            used[corner] += panel_size.y + gap;
+            let rect = Rect::from_min_size(pos2(snap_px(x, ppp), snap_px(y, ppp)), panel_size);
 
-            let rect = Rect::from_min_size(pos2(snap_px(x, ppp), snap_px(y, ppp)), size);
-            let radius = CornerRadius::same(8);
+            let mut cursor_y = rect.top() + pad;
+            let title = title.map(|g| {
+                let pos = pos2(rect.left() + pad, cursor_y);
+                cursor_y += g.size().y + gap;
+                (pos, g)
+            });
+
+            let mut rules = Vec::with_capacity(rows.len() + 1);
+            let mut out_rows = Vec::with_capacity(rows.len());
+            if !rows.is_empty() {
+                rules.push(snap_half_px(cursor_y, ppp));
+                cursor_y += px + gap;
+                let row_count = rows.len();
+                for (i, (label, value, tone)) in rows.into_iter().enumerate() {
+                    let value_pos = pos2(
+                        rect.right() - pad - value.size().x,
+                        cursor_y + (row_h - value.size().y) / 2.0,
+                    );
+                    let label_pos = label
+                        .as_ref()
+                        .map(|g| pos2(rect.left() + pad, cursor_y + (row_h - g.size().y) / 2.0))
+                        .unwrap_or(value_pos);
+                    let dot_pos = pos2(value_pos.x - 8.0, cursor_y + row_h / 2.0);
+                    cursor_y += row_h;
+                    if i + 1 < row_count {
+                        rules.push(snap_half_px(cursor_y, ppp));
+                    }
+                    out_rows.push(RowLayout {
+                        label,
+                        label_pos,
+                        value,
+                        value_pos,
+                        tone,
+                        dot_pos,
+                    });
+                }
+            }
+            self.layout.push(PanelLayout {
+                rect,
+                title,
+                rows: out_rows,
+                rules,
+            });
+        }
+    }
+
+    /// Draws the cached layout. Pure translation and fills: no text is laid out here.
+    fn paint_layout(&self, painter: &egui::Painter) {
+        if self.layout.is_empty() {
+            return;
+        }
+        let ppp = painter.ctx().pixels_per_point().max(0.5);
+        let px = 1.0 / ppp;
+        let alpha = (self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+        let scaled = |v: f32| (v * self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+        let surface = Color32::from_rgba_unmultiplied(
+            SURFACE_RGB.0,
+            SURFACE_RGB.1,
+            SURFACE_RGB.2,
+            scaled(SURFACE_ALPHA),
+        );
+        let hairline = Color32::from_rgba_unmultiplied(255, 255, 255, scaled(HAIRLINE_ALPHA));
+        let divider = Color32::from_rgba_unmultiplied(255, 255, 255, scaled(DIVIDER_ALPHA));
+        let label_color =
+            Color32::from_rgba_unmultiplied(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2, alpha);
+        let value_color =
+            Color32::from_rgba_unmultiplied(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2, alpha);
+        let shift = self.offset - self.shift;
+        let radius = CornerRadius::same(8);
+
+        for panel in &self.layout {
+            let rect = panel.rect.translate(shift);
             painter.rect_filled(rect, radius, surface);
             painter.rect_stroke(
                 rect,
@@ -898,49 +1100,291 @@ impl OverlayWindowApp {
                 Stroke::new(px, hairline),
                 egui::StrokeKind::Inside,
             );
-
-            let mut cursor_y = rect.top() + pad;
-            if let Some(g) = title_galley {
-                painter.galley(pos2(rect.left() + pad, cursor_y), g.clone(), label_color);
-                cursor_y += g.size().y + gap;
+            if let Some((pos, galley)) = &panel.title {
+                painter.galley(*pos + shift, galley.clone(), label_color);
             }
-            if !rows.is_empty() {
-                let rule = snap_half_px(cursor_y, ppp);
+            for y in &panel.rules {
                 painter.line_segment(
                     [
-                        pos2(rect.left() + pad, rule),
-                        pos2(rect.right() - pad, rule),
+                        pos2(rect.left() + 12.0, y + shift.y),
+                        pos2(rect.right() - 12.0, y + shift.y),
                     ],
                     Stroke::new(px, divider),
                 );
-                cursor_y += px + gap;
-                for (i, (label, value, tone)) in rows.iter().enumerate() {
-                    if let Some(l) = label {
-                        let ly = cursor_y + (row_h - l.size().y) / 2.0;
-                        painter.galley(pos2(rect.left() + pad, ly), l.clone(), label_color);
-                    }
-                    let vx = rect.right() - pad - value.size().x;
-                    let vy = cursor_y + (row_h - value.size().y) / 2.0;
-                    if let Some(color) = tone {
-                        // 5 px diameter, no glow: colour is the whole signal.
-                        painter.circle_filled(pos2(vx - 8.0, cursor_y + row_h / 2.0), 2.5, *color);
-                    }
-                    painter.galley(pos2(vx, vy), value.clone(), value_color);
-                    cursor_y += row_h;
-                    if i + 1 < rows.len() {
-                        let rule = snap_half_px(cursor_y, ppp);
-                        painter.line_segment(
-                            [
-                                pos2(rect.left() + pad, rule),
-                                pos2(rect.right() - pad, rule),
-                            ],
-                            Stroke::new(px, divider),
-                        );
-                    }
+            }
+            for row in &panel.rows {
+                if let Some(label) = &row.label {
+                    painter.galley(row.label_pos + shift, label.clone(), label_color);
                 }
+                if let Some((r, g, b)) = row.tone {
+                    painter.circle_filled(
+                        row.dot_pos + shift,
+                        2.5,
+                        Color32::from_rgba_unmultiplied(r, g, b, alpha),
+                    );
+                }
+                painter.galley(row.value_pos + shift, row.value.clone(), value_color);
             }
         }
     }
+
+    /// The position editor: dashed outline, edge guides, live pixel readout and the
+    /// Confirm / Reset pills. Also the only place that mutates `offset`.
+    fn paint_edit(&mut self, ui: &egui::Ui) {
+        let ppp = ui.ctx().pixels_per_point().max(0.5);
+        let px = 1.0 / ppp;
+        let painter = ui.painter();
+        let view = ui.max_rect();
+        let union = self.layout_union();
+        if union.is_negative() {
+            return;
+        }
+        let local = union.translate(self.offset - self.shift);
+
+        // Grab anywhere on the HUD itself.
+        let grab = ui.interact(
+            local.expand(6.0),
+            ui.scope_id().with("creblox-hud-grab"),
+            egui::Sense::drag(),
+        );
+        if grab.dragged() {
+            self.offset += grab.drag_delta();
+            self.dragging = true;
+            self.clamp_offset();
+            ui.ctx().request_repaint();
+        } else {
+            self.dragging = false;
+        }
+        if grab.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+
+        let outline = Color32::from_rgba_unmultiplied(255, 255, 255, 170);
+        let hairline = Color32::from_rgba_unmultiplied(255, 255, 255, 60);
+        let surface = Color32::from_rgba_unmultiplied(SURFACE_RGB.0, SURFACE_RGB.1, SURFACE_RGB.2, 240);
+        let text_color = Color32::from_rgb(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2);
+
+        // Dashed hairline around the HUD: unmistakably "editing", still quiet.
+        let frame = local.expand(4.0);
+        let dash = 6.0;
+        let mut x = frame.left();
+        while x < frame.right() {
+            let end = (x + dash).min(frame.right());
+            painter.line_segment(
+                [pos2(x, frame.top()), pos2(end, frame.top())],
+                Stroke::new(px, outline),
+            );
+            painter.line_segment(
+                [pos2(x, frame.bottom()), pos2(end, frame.bottom())],
+                Stroke::new(px, outline),
+            );
+            x += dash * 2.0;
+        }
+        let mut y = frame.top();
+        while y < frame.bottom() {
+            let end = (y + dash).min(frame.bottom());
+            painter.line_segment(
+                [pos2(frame.left(), y), pos2(frame.left(), end)],
+                Stroke::new(px, outline),
+            );
+            painter.line_segment(
+                [pos2(frame.right(), y), pos2(frame.right(), end)],
+                Stroke::new(px, outline),
+            );
+            y += dash * 2.0;
+        }
+
+        // Edge guides while the HUD is close to a screen edge.
+        let snap = 8.0;
+        let guide = Color32::from_rgba_unmultiplied(120, 170, 255, 200);
+        let edges = [
+            (local.left() - view.left(), view.left()),
+            (view.right() - local.right(), view.right()),
+            (local.top() - view.top(), view.top()),
+            (view.bottom() - local.bottom(), view.bottom()),
+        ];
+        if edges[0].0.abs() < snap {
+            painter.line_segment(
+                [pos2(edges[0].1 + px * 0.5, view.top()), pos2(edges[0].1 + px * 0.5, view.bottom())],
+                Stroke::new(px, guide),
+            );
+        }
+        if edges[1].0.abs() < snap {
+            painter.line_segment(
+                [pos2(edges[1].1 - px * 0.5, view.top()), pos2(edges[1].1 - px * 0.5, view.bottom())],
+                Stroke::new(px, guide),
+            );
+        }
+        if edges[2].0.abs() < snap {
+            painter.line_segment(
+                [pos2(view.left(), edges[2].1 + px * 0.5), pos2(view.right(), edges[2].1 + px * 0.5)],
+                Stroke::new(px, guide),
+            );
+        }
+        if edges[3].0.abs() < snap {
+            painter.line_segment(
+                [pos2(view.left(), edges[3].1 - px * 0.5), pos2(view.right(), edges[3].1 - px * 0.5)],
+                Stroke::new(px, guide),
+            );
+        }
+
+        let rounded = (self.offset.x.round() as i32, self.offset.y.round() as i32);
+        if rounded != self.readout_at {
+            self.readout_at = rounded;
+            self.readout.clear();
+            let _ = std::fmt::Write::write_fmt(
+                &mut self.readout,
+                format_args!("{}, {}", rounded.0, rounded.1),
+            );
+        }
+
+        // Action bar: readout on the left, Reset and Confirm on the right.
+        let bar_h = 30.0;
+        let bar_w = 300.0;
+        let below = local.max.y + 12.0;
+        let bar_y = if below + bar_h <= view.max.y - 8.0 {
+            below
+        } else {
+            (local.min.y - 12.0 - bar_h).max(view.min.y + 8.0)
+        };
+        let bar_x = local
+            .min
+            .x
+            .clamp(view.min.x + 8.0, (view.max.x - bar_w - 8.0).max(view.min.x + 8.0));
+        let bar = Rect::from_min_size(pos2(bar_x, bar_y), vec2(bar_w, bar_h));
+        painter.rect_filled(bar, CornerRadius::same(8), surface);
+        painter.rect_stroke(
+            bar,
+            CornerRadius::same(8),
+            Stroke::new(px, hairline),
+            egui::StrokeKind::Inside,
+        );
+
+        let confirm = Rect::from_min_size(
+            pos2(bar.right() - 8.0 - 78.0, bar.top() + 5.0),
+            vec2(78.0, bar_h - 10.0),
+        );
+        let reset = Rect::from_min_size(
+            pos2(confirm.left() - 6.0 - 60.0, bar.top() + 5.0),
+            vec2(60.0, bar_h - 10.0),
+        );
+        painter.text(
+            pos2(bar.left() + 10.0, bar.center().y),
+            egui::Align2::LEFT_CENTER,
+            &self.readout,
+            FontId::monospace(11.5),
+            text_color,
+        );
+        painter.text(
+            pos2(bar.left() + 10.0 + 74.0, bar.center().y),
+            egui::Align2::LEFT_CENTER,
+            "drag · ⏎ save · esc cancel",
+            FontId::proportional(10.0),
+            Color32::from_rgb(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2),
+        );
+        for (rect, label) in [(reset, "Reset"), (confirm, "Confirm")] {
+            painter.rect_filled(
+                rect,
+                CornerRadius::same(6),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+            );
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(6),
+                Stroke::new(px, hairline),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(11.0),
+                text_color,
+            );
+        }
+
+        let confirm_clicked = ui
+            .interact(
+                confirm,
+                ui.scope_id().with("creblox-hud-confirm"),
+                egui::Sense::click(),
+            )
+            .clicked();
+        let reset_clicked = ui
+            .interact(
+                reset,
+                ui.scope_id().with("creblox-hud-reset"),
+                egui::Sense::click(),
+            )
+            .clicked();
+        let (enter, esc) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if reset_clicked {
+            self.offset = self.saved_offset;
+        }
+        if confirm_clicked || enter {
+            self.finish_edit(true);
+        } else if esc {
+            self.finish_edit(false);
+        }
+    }
+
+    /// Keeps the HUD fully inside the game window, so it can never be dragged off-screen.
+    fn clamp_offset(&mut self) {
+        let Some(b) = self.bounds else {
+            return;
+        };
+        let union = self.layout_union();
+        if union.is_negative() {
+            return;
+        }
+        let view_w = b.w as f32;
+        let view_h = b.h as f32;
+        let min = union.min + self.offset;
+        let max_x = (view_w - union.width()).max(0.0);
+        let max_y = (view_h - union.height()).max(0.0);
+        let clamped = pos2(min.x.clamp(0.0, max_x), min.y.clamp(0.0, max_y));
+        self.offset = clamped - union.min;
+    }
+
+    /// Ends the edit session: saves (or reverts) the position and hands input back to the game.
+    fn finish_edit(&mut self, confirmed: bool) {
+        if confirmed {
+            self.saved_offset = self.offset;
+        } else {
+            self.offset = self.saved_offset;
+        }
+        self.write_result(confirmed);
+        self.edit = false;
+        // The spec still says `edit: true` until the launcher reads the answer; without this
+        // the next reload (the session timer ticks every second) would re-open the editor.
+        self.edit_done = true;
+        self.dragging = false;
+        if self.interactive {
+            self.interactive = false;
+            tweak_overlay_window(false);
+        }
+    }
+
+    /// Leaves the answer for the launcher, atomically so a half-written file is never read.
+    fn write_result(&self, confirmed: bool) {
+        let path = self.spec_path.with_file_name("overlay-position.json");
+        let body = format!(
+            "{{\"state\":\"{}\",\"offset_x\":{},\"offset_y\":{}}}",
+            if confirmed { "confirmed" } else { "cancelled" },
+            self.offset.x.round() as i32,
+            self.offset.y.round() as i32
+        );
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
 }
 
 /// Decodes `path` into an egui texture, reusing `cache` when the path did not change.
@@ -1091,7 +1535,18 @@ impl eframe::App for OverlayWindowApp {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
         self.paint(ui);
-        ctx.request_repaint_after(Duration::from_millis(150));
+        // Event-driven, not a loop: 60 fps only while the user is dragging, otherwise two
+        // wake-ups a second when the HUD is on screen and one when it is hidden. The old
+        // build had a 150 ms repaint plus a 400 ms heartbeat thread, i.e. ~9 full transparent
+        // composites a second whether anything had changed or not.
+        let interval = if self.edit || self.dragging {
+            Duration::from_millis(16)
+        } else if self.visible {
+            Duration::from_millis(500)
+        } else {
+            Duration::from_millis(1000)
+        };
+        ctx.request_repaint_after(interval);
     }
 }
 
@@ -1123,15 +1578,8 @@ pub fn run(spec_path: PathBuf) -> eframe::Result<()> {
             visuals.window_fill = Color32::TRANSPARENT;
             visuals.extreme_bg_color = Color32::TRANSPARENT;
             cc.egui_ctx.set_visuals(visuals);
-            // Keep frames coming even while the overlay is transparent: the visibility check
-            // lives in `ui()`, and a window macOS considers idle may stop being redrawn.
-            let heartbeat_ctx = cc.egui_ctx.clone();
-            std::thread::spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_millis(400));
-                    heartbeat_ctx.request_repaint();
-                }
-            });
+            // No heartbeat thread: `ui()` schedules its own wake-ups (500 ms idle, 16 ms
+            // while dragging), so an idle overlay costs one frame every two seconds.
             Ok(Box::new(OverlayWindowApp::new(spec_path)))
         }),
     )
