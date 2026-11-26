@@ -252,7 +252,9 @@ to reach CREBLOX without leaving the session.
 | Page shortcuts (Home, Profile, Avatar, Notifications, Settings, FastFlags) | `TrayState.signed_in` | Disabled while signed out; each restores the window, then switches `Page`. |
 | Live status line | `tray_state_snapshot` (`app.rs:3853`) | `Playing: <game> — @user`, `Signed in: @user`, or `Not signed in`. The game name comes from the same place-Id lookup Discord presence uses. |
 | Server line + Copy Job ID | `server_info`, `server_locations` | Region when resolved, `locating…` while the lookup runs; Copy Job ID is disabled until a join id exists. |
-| Close Roblox | `TrayState.roblox_running` | Calls `kill_all_roblox_processes` (`roblox_process.rs:932`) — the same function Settings uses. Disabled when no player process is alive. macOS menu only; Windows keeps the action in Settings. |
+| Switch Account | `TrayState.accounts` (the active one carries a ✓) | Four fixed slots, because the native menu is built once at startup. A click reports only the slot index; the app resolves it against `saved_accounts`, so a stale menu can never switch to a deleted account. |
+| FastFlags Preset | `self.fastflags` | `Quality` and `Max FPS` run the same two preset calls the Settings buttons use, then persist and push them to a running client. |
+| Close Roblox | `TrayState.roblox_running` | Calls `kill_all_roblox_processes` (`roblox_process.rs:932`) — the same function Settings uses — **on a worker thread**, reporting the count back through `Msg::RobloxKilled`, so a tray click cannot stall the window while the kills run. Disabled when no player process is alive. macOS menu only; Windows keeps the action in Settings. |
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
@@ -270,8 +272,10 @@ immediately instead of waiting for a mouse move.
 `OverlayManager::start` (`game_overlay.rs:252`) — spawning the helper, or updating the
 running one's shared config. The helper rewrites the JSON spec (`game_overlay.rs:350`) and
 the overlay window re-reads it when the file's stamp changes, polling at 150 ms
-(`overlay_window.rs:543`). The overlay window is click-through and never becomes key, so the
-game keeps keyboard and mouse focus.
+(`overlay_window.rs:543`). A config change also sets a wake flag (`Shared.dirty`,
+`game_overlay.rs:216`) that cuts the one-second tick short, so the spec is rewritten within one
+100 ms step instead of waiting out the tick. The overlay window is click-through and never
+becomes key, so the game keeps keyboard and mouse focus.
 
 **Threading.** Every `NSStatusItem` / `NSMenu` mutation happens on the main thread:
 `TrayController::new` and `sync` are called from eframe's UI thread. The background thread

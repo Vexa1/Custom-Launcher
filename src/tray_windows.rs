@@ -65,6 +65,10 @@ pub enum TrayEvent {
     ToggleCrosshair,
     CopyJobId,
     CloseRoblox,
+    /// Index into `TrayState.accounts`; the app resolves it, because it owns the list.
+    SwitchAccountSlot(usize),
+    ApplyQualityPreset,
+    ApplyCompetitivePreset,
     ToggleDiscordRpc,
     CheckUpdates,
     QuitApp,
@@ -83,6 +87,8 @@ pub struct TrayState {
     /// A Roblox player process is alive (the macOS menu uses this to enable its
     /// "Close Roblox" item; Windows keeps the action in Settings).
     pub roblox_running: bool,
+    /// Saved accounts for the macOS menu's switcher (Windows switches accounts in the UI).
+    pub accounts: Vec<String>,
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
@@ -100,6 +106,7 @@ impl Default for TrayState {
             server_line: String::new(),
             job_id: String::new(),
             roblox_running: false,
+            accounts: Vec::new(),
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,

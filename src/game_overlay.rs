@@ -214,6 +214,9 @@ struct Shared {
     /// `(game name, players online)` for the current place.
     game_info: Option<(String, u64)>,
     stop: bool,
+    /// A config or server change arrived: rebuild the spec now instead of sleeping out
+    /// the rest of the tick. This is what makes a tray toggle land immediately.
+    dirty: bool,
 }
 
 struct Running {
@@ -258,6 +261,7 @@ impl OverlayManager {
         if let Some(r) = &self.running {
             if let Ok(mut g) = r.shared.lock() {
                 g.cfg = cfg;
+                g.dirty = true;
             }
             return;
         }
@@ -268,6 +272,7 @@ impl OverlayManager {
             locations: HashMap::new(),
             game_info: None,
             stop: false,
+            dirty: false,
         }));
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -294,6 +299,7 @@ impl OverlayManager {
                 g.server = new;
                 g.server_since = Instant::now();
                 g.game_info = None;
+                g.dirty = true;
             }
         }
     }
@@ -340,8 +346,17 @@ fn sleep_unless_stopped(shared: &Arc<Mutex<Shared>>, total: Duration) -> bool {
     while waited < total {
         thread::sleep(step);
         waited += step;
-        if shared.lock().map(|g| g.stop).unwrap_or(true) {
+        let (stop, dirty) = shared
+            .lock()
+            .map(|g| (g.stop, g.dirty))
+            .unwrap_or((true, false));
+        if stop {
             return false;
+        }
+        // A tray toggle changed the config mid-tick: return so the loop rebuilds the spec
+        // immediately. The worst-case latency becomes one 100 ms step, not a full second.
+        if dirty {
+            return true;
         }
     }
     true
@@ -748,6 +763,11 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         if text != last_text {
             write_spec(&spec_path, &text);
             last_text = text;
+        }
+        // Everything this tick is published; clear the wake flag so the sleep below is not
+        // interrupted by a change that has already been applied.
+        if let Ok(mut g) = shared.lock() {
+            g.dirty = false;
         }
 
         if !sleep_unless_stopped(&shared, Duration::from_secs(1)) {

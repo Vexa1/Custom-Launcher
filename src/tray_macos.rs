@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use eframe::egui;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::types::Msg;
@@ -34,6 +34,12 @@ const ITEM_TOGGLE_STATS: &str = "creblox.overlay.stats";
 const ITEM_TOGGLE_CROSSHAIR: &str = "creblox.overlay.crosshair";
 const ITEM_COPY_JOB: &str = "creblox.copy_job";
 const ITEM_CLOSE_ROBLOX: &str = "creblox.close_roblox";
+const ITEM_ACCOUNT_PREFIX: &str = "creblox.account.";
+const ITEM_PRESET_QUALITY: &str = "creblox.preset.quality";
+const ITEM_PRESET_COMPETITIVE: &str = "creblox.preset.competitive";
+/// Fixed menu slots: the menu is built once at startup, so the switcher shows at most this
+/// many accounts instead of rebuilding native menu items whenever the list changes.
+const ACCOUNT_SLOTS: usize = 4;
 const ITEM_DISCORD: &str = "creblox.discord";
 const ITEM_UPDATES: &str = "creblox.updates";
 const ITEM_QUIT: &str = "creblox.quit";
@@ -55,6 +61,10 @@ pub enum TrayEvent {
     ToggleCrosshair,
     CopyJobId,
     CloseRoblox,
+    /// Index into `TrayState.accounts`; the app resolves it, because it owns the list.
+    SwitchAccountSlot(usize),
+    ApplyQualityPreset,
+    ApplyCompetitivePreset,
     ToggleDiscordRpc,
     CheckUpdates,
     QuitApp,
@@ -75,6 +85,8 @@ pub struct TrayState {
     pub job_id: String,
     /// A Roblox player process is alive, so "Close Roblox" has something to close.
     pub roblox_running: bool,
+    /// Saved accounts for the switcher, active one prefixed with a check mark.
+    pub accounts: Vec<String>,
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
@@ -92,6 +104,7 @@ impl Default for TrayState {
             server_line: String::new(),
             job_id: String::new(),
             roblox_running: false,
+            accounts: Vec::new(),
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,
@@ -120,10 +133,16 @@ fn map_menu_id(id: &str) -> Option<TrayEvent> {
         ITEM_TOGGLE_CROSSHAIR => Some(TrayEvent::ToggleCrosshair),
         ITEM_COPY_JOB => Some(TrayEvent::CopyJobId),
         ITEM_CLOSE_ROBLOX => Some(TrayEvent::CloseRoblox),
+        ITEM_PRESET_QUALITY => Some(TrayEvent::ApplyQualityPreset),
+        ITEM_PRESET_COMPETITIVE => Some(TrayEvent::ApplyCompetitivePreset),
         ITEM_DISCORD => Some(TrayEvent::ToggleDiscordRpc),
         ITEM_UPDATES => Some(TrayEvent::CheckUpdates),
         ITEM_QUIT => Some(TrayEvent::QuitApp),
-        _ => None,
+        _ => id
+            .strip_prefix(ITEM_ACCOUNT_PREFIX)
+            .and_then(|slot| slot.parse::<usize>().ok())
+            .filter(|slot| *slot < ACCOUNT_SLOTS)
+            .map(TrayEvent::SwitchAccountSlot),
     }
 }
 
@@ -136,6 +155,9 @@ pub struct TrayController {
     server_item: MenuItem,
     copy_job_item: MenuItem,
     close_roblox_item: MenuItem,
+    account_items: Vec<MenuItem>,
+    preset_quality_item: MenuItem,
+    preset_competitive_item: MenuItem,
     server_overlay_item: CheckMenuItem,
     stats_overlay_item: CheckMenuItem,
     crosshair_item: CheckMenuItem,
@@ -176,6 +198,19 @@ impl TrayController {
             initial.roblox_running,
             None,
         );
+        let account_items: Vec<MenuItem> = (0..ACCOUNT_SLOTS)
+            .map(|slot| {
+                MenuItem::with_id(
+                    format!("{ITEM_ACCOUNT_PREFIX}{slot}"),
+                    "No saved account",
+                    false,
+                    None,
+                )
+            })
+            .collect();
+        let preset_quality_item = MenuItem::with_id(ITEM_PRESET_QUALITY, "Quality", true, None);
+        let preset_competitive_item =
+            MenuItem::with_id(ITEM_PRESET_COMPETITIVE, "Max FPS", true, None);
         let server_overlay_item = CheckMenuItem::with_id(
             ITEM_TOGGLE_SERVER,
             "Server region overlay",
@@ -212,6 +247,15 @@ impl TrayController {
         let sep4 = PredefinedMenuItem::separator();
 
         let icon = (|| -> Option<TrayIcon> {
+            let account_refs: Vec<&dyn IsMenuItem> = account_items
+                .iter()
+                .map(|item| item as &dyn IsMenuItem)
+                .collect();
+            let account_menu = Submenu::with_items("Switch Account", true, &account_refs).ok()?;
+            let preset_refs: [&dyn IsMenuItem; 2] =
+                [&preset_quality_item, &preset_competitive_item];
+            let presets_menu =
+                Submenu::with_items("FastFlags Preset", true, &preset_refs).ok()?;
             let menu = Menu::with_items(&[
                 &show_item,
                 &hide_item,
@@ -222,6 +266,8 @@ impl TrayController {
                 &notifications_item,
                 &settings_item,
                 &fastflags_item,
+                &account_menu,
+                &presets_menu,
                 &sep2,
                 &status_item,
                 &server_item,
@@ -304,6 +350,9 @@ impl TrayController {
             server_item,
             copy_job_item,
             close_roblox_item,
+            account_items,
+            preset_quality_item,
+            preset_competitive_item,
             server_overlay_item,
             stats_overlay_item,
             crosshair_item,
@@ -380,6 +429,20 @@ impl TrayController {
         self.copy_job_item.set_enabled(!next.job_id.is_empty());
         self.close_roblox_item
             .set_enabled(next.enabled && next.roblox_running);
+        for (slot, item) in self.account_items.iter().enumerate() {
+            match next.accounts.get(slot) {
+                Some(name) => {
+                    item.set_text(name.clone());
+                    item.set_enabled(next.enabled && next.signed_in);
+                }
+                None => {
+                    item.set_text("No saved account");
+                    item.set_enabled(false);
+                }
+            }
+        }
+        self.preset_quality_item.set_enabled(next.enabled);
+        self.preset_competitive_item.set_enabled(next.enabled);
         self.hide_item
             .set_enabled(next.enabled && next.window_visible);
         // Always usable: with Roblox fullscreen the window can be "visible" yet behind the

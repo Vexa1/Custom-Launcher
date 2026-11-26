@@ -310,6 +310,7 @@ impl Creblox {
                 server_line: String::new(),
                 job_id: String::new(),
                 roblox_running: false,
+                accounts: Vec::new(),
                 overlay_server: settings.overlay_enabled,
                 overlay_stats: settings.overlay_stats_enabled,
                 overlay_crosshair: settings.crosshair_enabled,
@@ -2692,6 +2693,14 @@ impl Creblox {
                         self.sync_discord_presence();
                     }
                 }
+                Msg::RobloxKilled(closed) => {
+                    self.status = if closed == 0 {
+                        "No running Roblox process to close".to_string()
+                    } else {
+                        format!("Closed {closed} Roblox process(es)")
+                    };
+                    self.sync_tray_state();
+                }
                 Msg::TrayAction(ev) => {
                     crate::auth::log(&format!("tray: {ev:?}"));
                     match ev {
@@ -2748,13 +2757,43 @@ impl Creblox {
                         }
                         TrayEvent::CloseRoblox => {
                             // Deliberately the same call Settings uses, so the tray cannot
-                            // close a different set of processes than the UI would.
-                            let closed = crate::roblox_process::kill_all_roblox_processes();
-                            self.status = if closed == 0 {
-                                "No running Roblox process to close".to_string()
-                            } else {
-                                format!("Closed {closed} Roblox process(es)")
-                            };
+                            // close a different set of processes than the UI would - but off
+                            // the UI thread: it shells out to kill per process, and a menu
+                            // click must never stall the window while that runs.
+                            self.status = "Closing Roblox…".to_string();
+                            self.roblox_running = false;
+                            self.sync_tray_state();
+                            let tx = self.tx.clone();
+                            let ctx = self.ctx.clone();
+                            std::thread::spawn(move || {
+                                let closed = crate::roblox_process::kill_all_roblox_processes();
+                                let _ = tx.send(Msg::RobloxKilled(closed));
+                                ctx.request_repaint();
+                            });
+                        }
+                        TrayEvent::SwitchAccountSlot(slot) => {
+                            // The menu only knows slot indexes; the account list lives here,
+                            // so a stale menu can never switch to a deleted account.
+                            if let Some(account) = self.saved_accounts.get(slot) {
+                                let user_id = account.id;
+                                self.switch_account(user_id);
+                                self.sync_tray_state();
+                            }
+                        }
+                        TrayEvent::ApplyQualityPreset => {
+                            // The same calls the Settings buttons make, so the menu cannot
+                            // leave FastFlags in a state the UI does not show.
+                            self.fastflags.apply_quality_preset();
+                            let _ = save_fastflags(&self.fastflags);
+                            let _ = crate::fastflags::sync_saved_fastflags_before_launch();
+                            self.status = "Applied the Quality FastFlags preset".to_string();
+                            self.sync_tray_state();
+                        }
+                        TrayEvent::ApplyCompetitivePreset => {
+                            self.fastflags.apply_competitive_preset();
+                            let _ = save_fastflags(&self.fastflags);
+                            let _ = crate::fastflags::sync_saved_fastflags_before_launch();
+                            self.status = "Applied the Max FPS FastFlags preset".to_string();
                             self.sync_tray_state();
                         }
                         TrayEvent::ToggleDiscordRpc => {
@@ -3898,6 +3937,24 @@ impl Creblox {
             // The menu item is only useful while a player process exists; `roblox_running`
             // is already maintained by the process scan that drives the tray state.
             roblox_running: self.roblox_running || self.active_roblox_place_id.is_some(),
+            // The menu has four fixed slots (tray_macos::ACCOUNT_SLOTS); the active account
+            // is marked so the switcher reads like a radio group.
+            accounts: self
+                .saved_accounts
+                .iter()
+                .take(4)
+                .map(|account| {
+                    let active = self
+                        .me
+                        .as_ref()
+                        .is_some_and(|profile| profile.user.name == account.name);
+                    if active {
+                        format!("✓ {}", account.name)
+                    } else {
+                        account.name.clone()
+                    }
+                })
+                .collect(),
             overlay_server: self.settings.overlay_enabled,
             overlay_stats: self.settings.overlay_stats_enabled,
             overlay_crosshair: self.settings.crosshair_enabled,

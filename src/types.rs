@@ -983,6 +983,8 @@ pub enum Msg {
     ServerLocationResolved(String, Option<String>),
     DiscordGameResolved(u64, Option<(Game, Option<String>)>),
     TrayAction(crate::tray::TrayEvent),
+    /// Result of an off-thread "Close Roblox": how many processes were killed.
+    RobloxKilled(usize),
     RobloxBackgroundDetected {
         pid: u32,
         is_playing: bool,
