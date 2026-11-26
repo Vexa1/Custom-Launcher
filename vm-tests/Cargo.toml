@@ -14,4 +14,9 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 igd-next = { version = "0.18", default-features = false, features = ["io_sync"] }
 eframe = { path = "eframe" }
 
+# `tests/stub_drift.rs` compares the stand-ins below with the real declarations.
+[dev-dependencies]
+syn = { version = "2", features = ["full", "parsing", "printing"] }
+quote = "1"
+
 [workspace]

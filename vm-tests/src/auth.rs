@@ -11,8 +11,5 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("creblox-vm-tests"))
 }
 
-/// The launcher's `log` stamps the line and returns it; nothing here records it, so the
-/// stand-in hands the text straight back. The return type is checked by `tests/stub_drift.rs`.
-pub fn log(line: &str) -> String {
-    line.to_string()
-}
+/// Nothing here records log lines; the shape is the launcher's, checked by `tests/stub_drift.rs`.
+pub fn log(_msg: &str) {}

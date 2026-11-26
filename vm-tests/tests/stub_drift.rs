@@ -1,32 +1,32 @@
-//! Fails when a stand-in in `vm-tests/src/` drifts away from the real declaration.
+//! Fails when a stand-in in `vm-tests/src/` drifts from the real declaration it restates.
 //!
 //! The harness compiles the shipping `party.rs` and `server_hop.rs`, but it has to restate the
-//! few types and functions those files borrow from the GUI crate. A restated type can go stale
-//! and the harness keeps passing, silently testing a shape the launcher no longer has. Each test
-//! below reads the real source and compares its fields, variant payload and function signatures
-//! with the stand-in, so the mismatch fails here instead of passing quietly.
+//! few types and functions they borrow from the GUI crate. A restated shape can go stale and the
+//! harness keeps passing, so this reads the real sources with `syn` and compares declarations.
 
+use quote::ToTokens;
 use std::fs;
 use std::path::PathBuf;
 
-fn repo_file(relative: &str) -> String {
+fn parse(relative: &str) -> syn::File {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(relative);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()))
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+    syn::parse_file(&text).unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()))
 }
 
-/// Collapses whitespace and drops every `path::` prefix, so `crate::types::ServerItem` and
-/// `ServerItem` - or `std::path::PathBuf` and `PathBuf` - compare as the same type.
-fn normalize(text: &str) -> String {
-    let mut compact = String::new();
-    for ch in text.chars() {
-        if !ch.is_whitespace() {
-            compact.push(ch);
-        }
-    }
-    let chars: Vec<char> = compact.chars().collect();
+/// Token text without whitespace or `path::` prefixes, so `crate::types::ServerItem` and
+/// `ServerItem` compare as the same type.
+fn shape<T: ToTokens>(item: &T) -> String {
+    let raw: String = item
+        .to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let chars: Vec<char> = raw.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
@@ -43,211 +43,83 @@ fn normalize(text: &str) -> String {
     out
 }
 
-/// The text between the braces of `header`, brace-balanced.
-fn body_of(src: &str, header: &str) -> String {
-    let start = src
-        .find(header)
-        .unwrap_or_else(|| panic!("`{header}` is not in the source any more"));
-    let rest = &src[start + header.len()..];
-    let next = rest
-        .chars()
-        .find(|c| !c.is_whitespace())
-        .unwrap_or_else(|| panic!("`{header}` ends the file"));
-    assert!(
-        next == '{' || next == '<' || next == '(',
-        "`{header}` matched a longer name in the source"
-    );
-    let open = start + src[start..].find('{').expect("header has no body") as usize;
-    let mut depth = 0usize;
-    for (offset, ch) in src[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return src[open + 1..open + offset].to_string();
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("unbalanced braces after `{header}`")
-}
-
-/// Splits on `separator` at the top level only, ignoring separators inside `<>`, `()`, `[]`,
-/// `{}` and string literals.
-fn split_top_level(text: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    for ch in text.chars() {
-        if in_string {
-            current.push(ch);
-            if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => {
-                in_string = true;
-                current.push(ch);
-            }
-            '(' | '[' | '{' | '<' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' | ']' | '}' | '>' => {
-                depth -= 1;
-                current.push(ch);
-            }
-            ',' if depth == 0 => {
-                parts.push(std::mem::take(&mut current));
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        parts.push(current);
-    }
-    parts
-}
-
-/// Strips `#[...]` attributes and `//` comments so only declarations remain.
-fn strip_noise(text: &str) -> String {
-    let mut out = String::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("#[") || trimmed.starts_with("//") || trimmed.starts_with("#!") {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// `field: type` for every declared field, sorted so a reordering is not a failure.
-fn struct_fields(src: &str, name: &str) -> Vec<String> {
-    let body = strip_noise(&body_of(src, &format!("pub struct {name}")));
-    let mut fields = Vec::new();
-    for part in split_top_level(&body) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let Some((field, ty)) = part.split_once(':') else {
-            panic!("{name} has a field without a type: {part:?}");
-        };
-        let field = field.trim().trim_start_matches("pub ").trim();
-        fields.push(format!("{}:{}", field, normalize(ty)));
-    }
-    fields.sort();
+fn field_shapes(fields: &syn::Fields) -> Vec<String> {
     fields
-}
-
-/// A variant's payload, e.g. `Party(PartyEvent)`, normalized for comparison.
-fn enum_variant(src: &str, name: &str, variant: &str) -> String {
-    let body = strip_noise(&body_of(src, &format!("pub enum {name}")));
-    let marker = format!("{variant}(");
-    let start = body
-        .find(&marker)
-        .unwrap_or_else(|| panic!("`{name}::{variant}` is gone from the real enum"));
-    let mut depth = 0usize;
-    for (offset, ch) in body[start..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return normalize(&body[start..start + offset + 1]);
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("unbalanced payload for `{name}::{variant}`")
-}
-
-/// Parameter types and return type of a `pub fn`, ignoring parameter names.
-fn fn_shape(src: &str, name: &str) -> String {
-    let header = format!("pub fn {name}(");
-    let start = src
-        .find(&header)
-        .unwrap_or_else(|| panic!("`{header}` is gone from the real source"));
-    let open = start + header.len() - 1;
-    let mut depth = 0usize;
-    let mut close = None;
-    for (offset, ch) in src[open..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + offset);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let close = close.expect("unbalanced parameter list");
-    let params = split_top_level(&src[open + 1..close])
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .map(|part| match part.split_once(':') {
-            Some((_, ty)) => normalize(ty),
-            None => normalize(&part),
+        .iter()
+        .map(|f| match &f.ident {
+            Some(name) => format!("{name}:{}", shape(&f.ty)),
+            None => shape(&f.ty),
         })
-        .collect::<Vec<_>>()
-        .join(",");
-    let after = &src[close + 1..];
-    let returns = match after.find("->") {
-        Some(at) => {
-            let tail = &after[at + 2..];
-            let end = tail.find(&['{', ';'][..]).unwrap_or(tail.len());
-            normalize(&tail[..end])
+        .collect()
+}
+
+/// Field shapes sorted, so reordering a declaration is not mistaken for drift.
+fn struct_shapes(file: &syn::File, name: &str) -> Vec<String> {
+    for item in &file.items {
+        if let syn::Item::Struct(s) = item {
+            if s.ident == name {
+                let mut shapes = field_shapes(&s.fields);
+                shapes.sort();
+                return shapes;
+            }
         }
-        None => "()".to_string(),
-    };
-    format!("({params})->{returns}")
+    }
+    panic!("`{name}` is no longer a struct in the real source")
+}
+
+fn variant_shape(file: &syn::File, name: &str, variant: &str) -> String {
+    for item in &file.items {
+        if let syn::Item::Enum(e) = item {
+            if e.ident == name {
+                let found = e
+                    .variants
+                    .iter()
+                    .find(|v| v.ident == variant)
+                    .unwrap_or_else(|| panic!("`{name}::{variant}` is gone from the real enum"));
+                let payload = field_shapes(&found.fields);
+                return if payload.is_empty() {
+                    variant.to_string()
+                } else {
+                    format!("{variant}({})", payload.join(","))
+                };
+            }
+        }
+    }
+    panic!("`{name}` is no longer an enum in the real source")
+}
+
+/// Parameter types and return type, ignoring parameter names.
+fn fn_shape(file: &syn::File, name: &str) -> String {
+    for item in &file.items {
+        if let syn::Item::Fn(f) = item {
+            if f.sig.ident == name && matches!(f.vis, syn::Visibility::Public(_)) {
+                let params: Vec<String> = f
+                    .sig
+                    .inputs
+                    .iter()
+                    .map(|arg| match arg {
+                        syn::FnArg::Typed(t) => shape(&t.ty),
+                        other => shape(other),
+                    })
+                    .collect();
+                let returns = match &f.sig.output {
+                    syn::ReturnType::Default => "()".to_string(),
+                    syn::ReturnType::Type(_, ty) => shape(&*ty),
+                };
+                return format!("({})->{returns}", params.join(","));
+            }
+        }
+    }
+    panic!("`pub fn {name}` is gone from the real source")
 }
 
 #[test]
-fn server_item_matches_the_launcher() {
-    let real = struct_fields(&repo_file("src/types.rs"), "ServerItem");
-    let stub = struct_fields(&repo_file("vm-tests/src/types.rs"), "ServerItem");
-    assert_eq!(
-        stub, real,
-        "\nvm-tests/src/types.rs restates ServerItem and it no longer matches src/types.rs.\n\
-         Update the stand-in (and anything that builds it) to the real fields.\n"
-    );
-}
-
-#[test]
-fn party_presence_matches_the_launcher() {
-    let real = struct_fields(&repo_file("src/api.rs"), "PartyPresence");
-    let stub = struct_fields(&repo_file("vm-tests/src/api.rs"), "PartyPresence");
-    assert_eq!(
-        stub, real,
-        "\nvm-tests/src/api.rs restates PartyPresence and it no longer matches src/api.rs.\n"
-    );
-}
-
-#[test]
-fn msg_carries_the_party_event_variant() {
-    let real = enum_variant(&repo_file("src/types.rs"), "Msg", "Party");
-    let stub = enum_variant(&repo_file("vm-tests/src/types.rs"), "Msg", "Party");
-    assert_eq!(
-        stub, real,
-        "\nvm-tests/src/types.rs restates Msg::Party and its payload changed in src/types.rs.\n"
-    );
-}
-
-#[test]
-fn stubbed_function_signatures_match() {
-    // (real file, stand-in file, function) - the stand-ins party.rs and server_hop.rs call.
+fn stand_ins_match_the_launcher() {
+    let structs = [
+        ("src/types.rs", "vm-tests/src/types.rs", "ServerItem"),
+        ("src/api.rs", "vm-tests/src/api.rs", "PartyPresence"),
+    ];
+    // The stand-ins `party.rs` and `server_hop.rs` call.
     let functions = [
         ("src/api.rs", "vm-tests/src/api.rs", "party_presence"),
         (
@@ -268,17 +140,29 @@ fn stubbed_function_signatures_match() {
             "launch_authenticated_server",
         ),
     ];
+
     let mut drift = Vec::new();
-    for (real_file, stub_file, name) in functions {
-        let real = fn_shape(&repo_file(real_file), name);
-        let stub = fn_shape(&repo_file(stub_file), name);
+    for (real, stub, name) in structs {
+        let (real, stub) = (struct_shapes(&parse(real), name), struct_shapes(&parse(stub), name));
         if real != stub {
-            drift.push(format!("{name}: real {real} / stub {stub}"));
+            drift.push(format!("struct {name}: real {real:?} / stub {stub:?}"));
         }
     }
+    let real = variant_shape(&parse("src/types.rs"), "Msg", "Party");
+    let stub = variant_shape(&parse("vm-tests/src/types.rs"), "Msg", "Party");
+    if real != stub {
+        drift.push(format!("enum Msg: real {real} / stub {stub}"));
+    }
+    for (real, stub, name) in functions {
+        let (real, stub) = (fn_shape(&parse(real), name), fn_shape(&parse(stub), name));
+        if real != stub {
+            drift.push(format!("fn {name}: real {real} / stub {stub}"));
+        }
+    }
+
     assert!(
         drift.is_empty(),
-        "\nA stand-in function no longer matches the launcher:\n  {}\n",
+        "\nA stand-in no longer matches the launcher - update vm-tests/src/:\n  {}\n",
         drift.join("\n  ")
     );
 }

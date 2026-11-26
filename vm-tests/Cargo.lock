@@ -82,8 +82,10 @@ version = "0.0.0"
 dependencies = [
  "eframe",
  "igd-next",
+ "quote",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tungstenite",
 ]
 
