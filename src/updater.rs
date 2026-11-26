@@ -650,15 +650,25 @@ pub fn install_update_zip(zip: &Path, version: &str) -> Result<(), String> {
 
     let script = updates_dir().join(format!("install-{version}.sh"));
     let log_path = crate::auth::data_dir().join("update.log");
+    // Output goes to the terminal *and* the log. Redirecting everything into the log made
+    // the installer look frozen for the whole build, and a failure closed the window with
+    // nothing on screen - the user could not tell waiting from broken.
     let body = format!(
         "#!/bin/bash\nset -euo pipefail\n\
          export PATH=\"$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
          LOG={log}\n\
-         exec >>\"$LOG\" 2>&1\n\
+         {{\n\
          echo \"==> Installing CREBLOX {version}\"\n\
+         echo \"    Building now; a copy of this output goes to: $LOG\"\n\
          cp -R {root}/. {source}/\n\
          cd {source}\n\
-         bash scripts/update-macos.sh\n",
+         bash scripts/update-macos.sh\n\
+         }} 2>&1 | tee -a \"$LOG\" || status=$?\n\
+         if [ \"${{status:-0}}\" -ne 0 ]; then\n\
+         echo\n\
+         echo \"Update failed (exit $status). Full log: $LOG\"\n\
+         read -n 1 -s -r -p \"Press any key to close this window...\" || true\n\
+         fi\n",
         log = shell_quote(&log_path),
         root = shell_quote(&root),
         source = shell_quote(&source),
