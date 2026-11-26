@@ -3155,7 +3155,10 @@ impl Creblox {
                         self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     Err(e) => {
+                        // Drop the progress state so the card returns to the release with its
+                        // error and an Install button, rather than a bar that never finishes.
                         self.app_update_installing = false;
+                        self.app_update_install = None;
                         self.app_update_error = Some(e.clone());
                         self.app_update_status = None;
                         self.status = format!("Update failed: {e}");
