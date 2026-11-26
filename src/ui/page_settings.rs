@@ -2866,12 +2866,19 @@ impl Creblox {
                             .show_rows(ui, row_h, count, |ui, rows| {
                                 if let Ok(lines) = log.lock() {
                                     for line in lines.get(rows.clone()).unwrap_or(&[]) {
-                                        ui.label(
-                                            RichText::new(line)
-                                                .monospace()
-                                                .size(11.0)
-                                                .color(p.muted),
-                                        );
+                                        // `show_rows` reserves exactly one row height per
+                                        // line, so a long line must not wrap: keep it on a
+                                        // single row and offer the cut-off tail on hover.
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(line)
+                                                    .monospace()
+                                                    .size(11.0)
+                                                    .color(p.muted),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(line.as_str());
                                     }
                                 }
                             });
