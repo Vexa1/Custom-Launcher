@@ -1,7 +1,7 @@
 //! The fling detector that lets a scroll frame skip hover/preview work, exercised on the
 //! build host through the real `src/scroll.rs`.
 
-use creblox_vm_tests::scroll::ScrollPace;
+use creblox_vm_tests::scroll::{ScrollPace, AVATAR_TEXTURES_PER_FRAME, adopt_budget};
 
 const HZ_120: f32 = 1.0 / 120.0;
 
@@ -56,6 +56,17 @@ fn a_page_change_clears_the_fling() {
     assert!(pace.is_fast());
     pace.reset();
     assert!(!pace.is_fast());
+}
+
+#[test]
+fn a_model_load_is_adopted_a_few_textures_at_a_time() {
+    assert_eq!(adopt_budget(0), 0);
+    assert_eq!(adopt_budget(1), 1);
+    // However many textures an avatar arrives with, one frame never takes the whole batch.
+    for pending in [2usize, 3, 12, 40] {
+        assert_eq!(adopt_budget(pending), AVATAR_TEXTURES_PER_FRAME.min(pending));
+        assert!(adopt_budget(pending) <= AVATAR_TEXTURES_PER_FRAME);
+    }
 }
 
 #[test]

@@ -6,7 +6,10 @@
 //! keeps one decaying estimate of how hard the page is moving so the drawing code can skip
 //! that work and resume the moment the page settles.
 //!
-//! Deliberately free of egui so the rule is testable on the build host
+//! It also holds the small per-frame budgets that keep a burst of work from landing in a
+//! single frame, such as adopting an avatar model's decoded textures.
+//!
+//! Deliberately free of egui so the rules are testable on the build host
 //! (`vm-tests/tests/scroll_pace.rs`); `Creblox::ui` feeds it the frame's scroll delta.
 
 /// Travel in points per second above which a frame counts as a fling rather than a scroll.
@@ -29,6 +32,17 @@ const MIN_FRAME_SECS: f32 = 1.0 / 240.0;
 
 /// Longest frame we account for, so returning from a sleep does not drain the whole estimate.
 const MAX_FRAME_SECS: f32 = 0.1;
+
+/// How many decoded avatar textures may move into the live set in one frame.
+///
+/// A model arrives with a dozen or more of them. Decoding happens on the loader thread, but
+/// adopting them all at once still lands the whole batch in the frame the model arrives.
+pub const AVATAR_TEXTURES_PER_FRAME: usize = 2;
+
+/// How many of the `pending` items to adopt this frame: the budget, or all that are left.
+pub fn adopt_budget(pending: usize) -> usize {
+    pending.min(AVATAR_TEXTURES_PER_FRAME)
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScrollPace {
@@ -109,6 +123,18 @@ mod tests {
             pace.update(0.0, HZ_120);
         }
         assert!(!pace.is_fast());
+    }
+
+    #[test]
+    fn avatar_texture_adoption_is_budgeted() {
+        assert_eq!(adopt_budget(0), 0);
+        assert_eq!(adopt_budget(1), 1);
+        assert_eq!(
+            adopt_budget(AVATAR_TEXTURES_PER_FRAME),
+            AVATAR_TEXTURES_PER_FRAME
+        );
+        // A whole model's worth never lands in one frame.
+        assert_eq!(adopt_budget(40), AVATAR_TEXTURES_PER_FRAME);
     }
 
     #[test]

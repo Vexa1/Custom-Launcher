@@ -968,7 +968,7 @@ pub enum Msg {
     AvatarApplied(u64, Result<(AvatarState, String, String, String), String>),
     Avatar3DLoaded(
         u64,
-        Result<(avatar_3d::Avatar3DModel, Vec<(String, Vec<u8>)>), String>,
+        Result<(avatar_3d::Avatar3DModel, Vec<avatar_3d::LoadedTexture>), String>,
     ),
     AuthSession(Result<(Profile, Vec<User>), String>),
     QuickLoginCreated {

@@ -29,8 +29,23 @@ fn avatar_assets_grid(
         pal_colors.surface_bg
     };
     let accent = accent_color(ui);
+    // Card height depends only on the column count and card width, so a row scrolled out of
+    // view is reserved as blank space instead of laying out, painting and tooltipping every
+    // card in it - the same rule the game grids follow.
+    let row_id = ui.scope_id().with(("avatar_row_h", cols, card_w.to_bits()));
+    let cached_h = ui.ctx().data(|d| d.get_temp::<f32>(row_id));
+    let clip = ui.clip_rect();
+    let mut measured = cached_h;
+    let flinging = fast_scrolling(ui);
     for row in items.chunks(cols) {
-        ui.horizontal(|ui| {
+        if let Some(h) = cached_h {
+            let top = ui.cursor().top();
+            if top + h < clip.top() - 40.0 || top > clip.bottom() + 40.0 {
+                ui.add_space(h + gap);
+                continue;
+            }
+        }
+        let row_resp = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for item in row {
                 let is_worn = worn_ids.contains(&item.id);
@@ -57,7 +72,7 @@ fn avatar_assets_grid(
                             if thumb_resp.clicked() {
                                 card_clicked = true;
                             }
-                            if thumb_resp.hovered() {
+                            if thumb_resp.hovered() && !flinging {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
 
@@ -136,24 +151,36 @@ fn avatar_assets_grid(
                 if resp.clicked() || card_clicked {
                     acts.push(Action::ToggleWearAsset(item.clone()));
                 }
-                if resp.hovered() {
+                // Hover work only for a card the pointer is actually resting on: during a
+                // fling cards sweep past and neither the cursor nor a tooltip means anything.
+                if resp.hovered() && !flinging {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    let tip = if is_worn {
+                        format!("Click to unequip {}", item.name)
+                    } else {
+                        format!("Click to equip {}", item.name)
+                    };
+                    resp.on_hover_text(tip);
                 }
-                let tip = if is_worn {
-                    format!("Click to unequip {}", item.name)
-                } else {
-                    format!("Click to equip {}", item.name)
-                };
-                resp.on_hover_text(tip);
             }
         });
+        let h = row_resp.response.rect.height();
+        if h > 0.0 {
+            measured = Some(h);
+        }
         ui.add_space(gap);
+    }
+    if measured != cached_h {
+        if let Some(h) = measured {
+            ui.ctx().data_mut(|d| d.insert_temp(row_id, h));
+        }
     }
 }
 
 impl Creblox {
     pub fn page_avatar(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
         let pal_colors = pal(ui);
+        let flinging = fast_scrolling(ui);
         ui.add_space(10.0);
         let Some(avatar_url) = self.me.as_ref().map(|p| p.avatar.clone()) else {
             avatar_glass_frame(ui, 24).show(ui, |ui| {
@@ -791,7 +818,7 @@ impl Creblox {
                                                                                 )
                                                                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                                                                 .on_hover_text(format!("Delete saved outfit \"{}\"", outfit.name));
-                                                                            let del_bg = if del_resp.hovered() {
+                                                                            let del_bg = if del_resp.hovered() && !flinging {
                                                                                 RED
                                                                             } else {
                                                                                 Color32::from_black_alpha(155)
@@ -841,10 +868,13 @@ impl Creblox {
                                                             } else if resp.clicked() || clicked {
                                                                 acts.push(Action::WearOutfit((*outfit).clone()));
                                                             }
-                                                            if resp.hovered() && !delete_clicked {
+                                                            if resp.hovered() && !delete_clicked && !flinging {
                                                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                                resp.on_hover_text(format!(
+                                                                    "Click to wear outfit \"{}\"",
+                                                                    outfit.name
+                                                                ));
                                                             }
-                                                            resp.on_hover_text(format!("Click to wear outfit \"{}\"", outfit.name));
                                                         }
                                                     });
                                                     ui.add_space(gap);

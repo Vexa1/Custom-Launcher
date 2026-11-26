@@ -666,7 +666,10 @@ impl Creblox {
                     for item in &profile.currently_wearing {
                         let card_size = egui::vec2(150.0, 200.0);
                         let (card_rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
-                        let hovered = resp.hovered();
+                        // These are the only hover effects in the row, so a card sweeping
+                        // past under a fling must not claim one.
+                        let hovered =
+                            resp.hovered() && !crate::ui::widgets::fast_scrolling(ui);
 
                         let border_color = if hovered {
                             accent_color(ui)
@@ -876,7 +879,10 @@ impl Creblox {
                     for badge in &profile.badges {
                         let card_size = egui::vec2(134.0, 168.0);
                         let (card_rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
-                        let hovered = resp.hovered();
+                        // These are the only hover effects in the row, so a card sweeping
+                        // past under a fling must not claim one.
+                        let hovered =
+                            resp.hovered() && !crate::ui::widgets::fast_scrolling(ui);
 
                         let border_color = if hovered {
                             accent_color(ui)

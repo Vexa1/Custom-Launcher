@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::api::*;
 use crate::auth::*;
-use crate::avatar_3d::{self, Avatar3DState, load_avatar_3d_data_ex};
+use crate::avatar_3d::{Avatar3DState, load_avatar_3d_data_ex};
 use crate::discord_rpc::{DiscordActivity, DiscordRpcClient, DiscordRpcConfig};
 use crate::fastflags::{FastFlagsConfig, load_fastflags, save_fastflags, sync_client_fastflags};
 use crate::roblox_process::*;
@@ -2399,33 +2399,15 @@ impl Creblox {
                     self.avatar_3d.loading = false;
                     let run_again = std::mem::take(&mut self.avatar_3d.reload_queued);
                     match res {
-                        Ok((model, raw_textures)) => {
+                        Ok((model, textures)) => {
                             self.avatar_3d.loaded_user_id = Some(uid);
                             self.avatar_3d.model = Some(model);
                             self.avatar_3d.err = None;
+                            // Already decoded on the loader thread; queued here so the
+                            // whole set is adopted a couple of textures at a time rather
+                            // than landing in this one frame.
                             self.avatar_3d.textures.clear();
-                            for (hash, bytes) in raw_textures {
-                                if let Ok(img) = image::load_from_memory(&bytes) {
-                                    let size = [img.width() as _, img.height() as _];
-                                    let mut rgba = img.to_rgba8();
-                                    // Roblox's avatar textures can carry alpha (clothing
-                                    // cut-outs, faded decals). CREBLOX stacks the layers by
-                                    // depth, so a transparent texel would let whatever is
-                                    // behind show through the clothes. Bake the alpha out.
-                                    for px in rgba.pixels_mut() {
-                                        px.0[3] = 255;
-                                    }
-                                    let color_img = egui::ColorImage::from_rgba_unmultiplied(
-                                        size,
-                                        rgba.as_flat_samples().as_slice(),
-                                    );
-                                    self.avatar_3d.textures.push(avatar_3d::LoadedTexture {
-                                        hash,
-                                        image: color_img,
-                                        handle: None,
-                                    });
-                                }
-                            }
+                            self.avatar_3d.pending_textures = textures;
                         }
                         Err(e) => {
                             self.avatar_3d.err = Some(e);
@@ -3249,6 +3231,21 @@ impl Creblox {
             texture: tex,
             is_loading,
         })
+    }
+
+    /// Move a couple of the decoded avatar textures into the live set, once per frame.
+    pub fn adopt_avatar_textures(&mut self) {
+        let take = crate::scroll::adopt_budget(self.avatar_3d.pending_textures.len());
+        if take == 0 {
+            return;
+        }
+        self.avatar_3d
+            .textures
+            .extend(self.avatar_3d.pending_textures.drain(..take));
+        if !self.avatar_3d.pending_textures.is_empty() {
+            // Keep adopting even if nothing else is asking for frames.
+            self.ctx.request_repaint();
+        }
     }
 
     pub fn handle_game_hover(&mut self, hovered: Option<u64>, ctx: &egui::Context) {
@@ -4677,6 +4674,8 @@ impl eframe::App for Creblox {
             ui.ctx()
                 .data_mut(|d| d.insert_temp(fast_scroll_id, self.fast_scroll));
         }
+        // Adopt at most a couple of the avatar's textures before anything is drawn.
+        self.adopt_avatar_textures();
         // CREBLOX hid itself for a game. If the game is gone but the watcher's last message was
         // missed, the window would never come back - so check for ourselves now and then.
         if self.hidden_for_game {

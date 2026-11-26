@@ -83,6 +83,28 @@ pub struct LoadedTexture {
     pub handle: Option<egui::TextureHandle>,
 }
 
+/// Decode one downloaded texture into the form the rasteriser samples.
+///
+/// This runs on the loader thread: an avatar carries a dozen or more textures, and decoding
+/// them all inside the frame that receives the model was a visible hitch.
+pub fn decode_texture(hash: String, bytes: &[u8]) -> Option<LoadedTexture> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let size = [img.width() as _, img.height() as _];
+    let mut rgba = img.to_rgba8();
+    // Roblox's avatar textures can carry alpha (clothing cut-outs, faded decals). CREBLOX
+    // stacks the layers by depth, so a transparent texel would let whatever is behind show
+    // through the clothes. Bake the alpha out.
+    for px in rgba.pixels_mut() {
+        px.0[3] = 255;
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice());
+    Some(LoadedTexture {
+        hash,
+        image,
+        handle: None,
+    })
+}
+
 /// State container for the 3D avatar viewport
 pub struct Avatar3DState {
     pub is_3d: bool,
@@ -91,6 +113,8 @@ pub struct Avatar3DState {
     pub zoom: f32,
     pub model: Option<Avatar3DModel>,
     pub textures: Vec<LoadedTexture>,
+    /// Decoded textures waiting to be adopted, a couple per frame (see `scroll::adopt_budget`).
+    pub pending_textures: Vec<LoadedTexture>,
     pub loading: bool,
     pub err: Option<String>,
     pub loaded_user_id: Option<u64>,
@@ -118,6 +142,7 @@ impl Default for Avatar3DState {
             zoom: 1.0,
             model: None,
             textures: Vec::new(),
+            pending_textures: Vec::new(),
             loading: false,
             err: None,
             loaded_user_id: None,
@@ -405,7 +430,7 @@ pub fn parse_avatar_3d(
 pub fn load_avatar_3d_data(
     user_id: u64,
     cookie: Option<&str>,
-) -> Result<(Avatar3DModel, Vec<(String, Vec<u8>)>), String> {
+) -> Result<(Avatar3DModel, Vec<LoadedTexture>), String> {
     load_avatar_3d_data_ex(user_id, cookie, None)
 }
 
@@ -416,7 +441,7 @@ pub fn load_avatar_3d_data_ex(
     user_id: u64,
     cookie: Option<&str>,
     stale_obj_hash: Option<&str>,
-) -> Result<(Avatar3DModel, Vec<(String, Vec<u8>)>), String> {
+) -> Result<(Avatar3DModel, Vec<LoadedTexture>), String> {
     let url = format!("https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}");
     let max_attempts = if stale_obj_hash.is_some() { 10 } else { 6 };
     let mut last_err = String::from("Avatar 3D thumbnail is not ready yet");
@@ -492,15 +517,23 @@ pub fn load_avatar_3d_data_ex(
     let (obj_bytes, mtl_bytes, raw_textures) = std::thread::scope(|s| {
         let obj_job = s.spawn(|| download_rbx_asset(obj_hash));
         let mtl_job = s.spawn(|| mtl_hash.and_then(|mh| download_rbx_asset(mh).ok()));
+        // Download and decode on the same worker thread: the UI frame that receives the
+        // model then has nothing left to do but adopt ready images.
         let tex_jobs: Vec<_> = tex_hashes
             .iter()
-            .map(|th| s.spawn(move || download_rbx_asset(th).ok().map(|b| (th.clone(), b))))
+            .map(|th| {
+                s.spawn(move || {
+                    download_rbx_asset(th)
+                        .ok()
+                        .and_then(|bytes| decode_texture(th.clone(), &bytes))
+                })
+            })
             .collect();
         let obj = obj_job
             .join()
             .unwrap_or_else(|_| Err("OBJ download thread failed".to_string()));
         let mtl = mtl_job.join().unwrap_or(None);
-        let textures: Vec<(String, Vec<u8>)> = tex_jobs
+        let textures: Vec<LoadedTexture> = tex_jobs
             .into_iter()
             .filter_map(|j| j.join().ok().flatten())
             .collect();
@@ -654,8 +687,24 @@ pub fn render_avatar_3d_mesh(
     pitch: f32,
     zoom: f32,
     viewport_rect: Rect,
+    textures_ready: bool,
 ) {
     if viewport_rect.width() < 2.0 || viewport_rect.height() < 2.0 {
+        return;
+    }
+    // Textures are adopted a couple per frame, so mid-load the set is incomplete. Rasterising
+    // it would burn a full software render per frame and flicker material colours, so keep
+    // showing the last finished image until the set is whole.
+    if !textures_ready {
+        let previous = RASTER_CACHE.with(|c| c.borrow().as_ref().map(|(_, h)| h.clone()));
+        if let Some(handle) = previous {
+            painter.image(
+                handle.id(),
+                viewport_rect,
+                Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
         return;
     }
     // Rasterise a little above screen resolution so the GPU's linear filtering smooths the
@@ -991,6 +1040,7 @@ pub fn render_avatar_viewport(
     // 3. Render 3D Model or 2D image
     let has_3d_model = state.model.is_some();
 
+    let textures_ready = state.pending_textures.is_empty();
     if let (true, Some(model)) = (state.is_3d, state.model.as_ref()) {
         render_avatar_3d_mesh(
             &painter,
@@ -1000,6 +1050,7 @@ pub fn render_avatar_viewport(
             state.pitch,
             state.zoom,
             rect,
+            textures_ready,
         );
     } else {
         // Fallback to high-resolution 2D avatar preview.

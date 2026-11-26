@@ -2049,7 +2049,7 @@ impl Creblox {
                     || title_resp.clicked()
             });
 
-            if header.response.hovered() {
+            if header.response.hovered() && !crate::ui::widgets::fast_scrolling(ui) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if header.inner {
@@ -2847,13 +2847,25 @@ impl Creblox {
                 egui::CollapsingHeader::new(format!("Details ({count} lines)"))
                     .id_salt("creblox_update_details")
                     .show(ui, |ui| {
+                        // Only the rows on screen are laid out: the installer's log can
+                        // run to thousands of lines and every one of them used to be built
+                        // on every drawn frame of this box.
+                        let row_h = ui
+                            .painter()
+                            .layout_no_wrap(
+                                "0".to_string(),
+                                egui::FontId::monospace(11.0),
+                                p.muted,
+                            )
+                            .size()
+                            .y;
                         egui::ScrollArea::vertical()
                             .id_salt("creblox_update_log")
                             .max_height(170.0)
                             .stick_to_bottom(true)
-                            .show(ui, |ui| {
+                            .show_rows(ui, row_h, count, |ui, rows| {
                                 if let Ok(lines) = log.lock() {
-                                    for line in lines.iter() {
+                                    for line in lines.get(rows.clone()).unwrap_or(&[]) {
                                         ui.label(
                                             RichText::new(line)
                                                 .monospace()
@@ -3164,12 +3176,19 @@ impl Creblox {
                             .max_height(220.0)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.add(
-                                    egui::TextEdit::multiline(shown)
-                                        .font(egui::TextStyle::Monospace)
-                                        .desired_width(f32::INFINITY)
-                                        .interactive(false),
-                                );
+                                // A log tail is kilobytes of text laid out on the CPU. While
+                                // the page is being flung that layout buys nothing, so hold
+                                // the box at its size and skip it for those frames.
+                                if crate::ui::widgets::fast_scrolling(ui) {
+                                    ui.allocate_space(egui::vec2(ui.available_width(), 200.0));
+                                } else {
+                                    ui.add(
+                                        egui::TextEdit::multiline(shown)
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY)
+                                            .interactive(false),
+                                    );
+                                }
                             });
                     });
                 ui.add_space(8.0);
