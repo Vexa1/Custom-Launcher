@@ -1,10 +1,13 @@
 name: build-windows
 
-# The Windows x64 launcher, built the way users get it: one double-clickable exe with the
-# GUI subsystem, so no console window ever appears.
+# The Windows x64 launcher, built the way users get it: one double-clickable exe with the GUI
+# subsystem, so no console window ever appears. Pushing a v* tag also attaches
+# CREBLOX-<version>-windows-x64.zip to that release, which is what the in-app Windows
+# self-update downloads.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "src/**"
       - "assets/**"
@@ -19,6 +22,10 @@ on:
       - "Cargo.lock"
       - "build.rs"
   workflow_dispatch:
+
+# Needed to upload an asset to the release; nothing else in the job writes to the repo.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -72,6 +79,48 @@ jobs:
           $zip = "CREBLOX-$env:CREBLOX_VERSION-windows-x64.zip"
           Compress-Archive -Path dist/creblox.exe -DestinationPath $zip -Force
           Get-FileHash $zip -Algorithm SHA256 | ForEach-Object { "sha256 $($_.Hash)" }
+
+      - name: Attach the zip to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $env:CREBLOX_VERSION
+          # A zip named for a different version would be invisible to the updater's release
+          # check, so stop instead of publishing a file nobody can find.
+          if ($tag -ne "v$version") {
+            throw "tag $tag does not match Cargo.toml version $version - bump the version or retag"
+          }
+
+          $zip = "CREBLOX-$version-windows-x64.zip"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          # The macOS release flow normally creates the release first; create it here only
+          # when the tag arrives on its own, so the upload never fails on a missing release.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "CREBLOX $version" --notes "CREBLOX $version release."
+            if ($LASTEXITCODE -ne 0) { throw "could not create the release for $tag" }
+          }
+
+          gh release upload $tag $zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw "could not upload $zip to $tag" }
+
+          # The in-app updater reads the release notes to find the download URL and the
+          # SHA-256 it must match. Add one line for this asset, once, keeping the existing
+          # notes (the macOS downloads) intact.
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$zip"
+          $body = (gh release view $tag --json body -q .body) -join "`n"
+          if ($body -match [regex]::Escape($zip)) {
+            "note: $zip is already listed in the release notes"
+            exit 0
+          }
+          $entry = "Windows x64: $url`nsha256 $hash"
+          $notes = if ([string]::IsNullOrWhiteSpace($body)) { $entry } else { "$body`n`n$entry" }
+          $notes | Out-File -FilePath release-notes.md -Encoding utf8 -NoNewline
+          gh release edit $tag --notes-file release-notes.md
 
       - uses: actions/upload-artifact@v4
         with:
