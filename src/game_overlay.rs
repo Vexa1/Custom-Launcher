@@ -629,6 +629,32 @@ fn process_counters(_pid: u32) -> Option<(u64, u64)> {
     None
 }
 
+/// `(cpu %, resident MB)` of a process via `/bin/ps`.
+///
+/// Only used when `process_counters` cannot read the process (sandboxing, permissions).
+/// `ps`'s `%cpu` is an average over the process's whole lifetime, so this is a fallback that
+/// keeps a number on screen - not the primary path.
+#[cfg(target_os = "macos")]
+fn ps_usage(pid: u32) -> Option<(f32, f32)> {
+    let out = Command::new("/bin/ps")
+        .args(["-o", "%cpu=,rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut it = text.split_whitespace();
+    let cpu: f32 = it.next()?.parse().ok()?;
+    let rss_kb: f32 = it.next()?.parse().ok()?;
+    Some((cpu, rss_kb / 1024.0))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ps_usage(_pid: u32) -> Option<(f32, f32)> {
+    None
+}
+
 /// Live CPU / memory of the Roblox process, sampled once per overlay tick.
 ///
 /// CPU is the delta of the process's own CPU time over the wall time between two samples, so
@@ -675,15 +701,34 @@ impl Usage {
             return;
         };
         let Some((total_ns, mem_bytes)) = process_counters(pid) else {
-            // The process is gone or not inspectable (sandboxing): show `--`, never a stale
-            // number from the previous server.
-            self.pid = Some(pid);
-            self.have = false;
+            // The process could not be inspected (sandboxing, permissions). Fall back to
+            // `/bin/ps` instead of leaving CPU/RAM at `--` for the whole session, and show
+            // `--` only when that fails too.
+            match ps_usage(pid) {
+                Some((cpu, mem_mb)) => {
+                    self.pid = Some(pid);
+                    // No cumulative counter to diff against: the next real sample must not
+                    // read as a spike of every CPU second since the process started.
+                    self.last_total_ns = 0;
+                    self.last_at = Instant::now();
+                    self.cpu = cpu;
+                    self.mem_mb = mem_mb;
+                    self.have = true;
+                }
+                None => {
+                    self.pid = Some(pid);
+                    self.have = false;
+                }
+            }
             return;
         };
         let now = Instant::now();
         let wall_ns = now.duration_since(self.last_at).as_nanos().max(1) as f64;
-        if self.pid == Some(pid) && self.have && total_ns >= self.last_total_ns {
+        if self.pid == Some(pid)
+            && self.have
+            && self.last_total_ns > 0
+            && total_ns >= self.last_total_ns
+        {
             let used = (total_ns - self.last_total_ns) as f64;
             self.cpu = (used / wall_ns * 100.0).clamp(0.0, 1600.0) as f32;
         }
@@ -733,11 +778,12 @@ fn icmp_rtt(target: &str) -> Option<u32> {
     num.parse::<f32>().ok().map(|ms| ms.round() as u32)
 }
 
-/// Round trip to the game server itself. There is deliberately no fallback to a Roblox web
-/// host: that number measures the website, not your game, and the overlay must not print a
-/// value that is not the truth.
+/// Best measurement available: the game server first, then Roblox's web edge, so the panel
+/// shows a real number instead of `--` when a server drops both TCP and ICMP.
 fn measure_ping(target: &str) -> Option<u32> {
-    tcp_rtt(target).or_else(|| icmp_rtt(target))
+    tcp_rtt(target)
+        .or_else(|| icmp_rtt(target))
+        .or_else(|| tcp_rtt("www.roblox.com"))
 }
 
 fn spawn_ping(target: String, out: Arc<AtomicU32>) {
@@ -746,6 +792,39 @@ fn spawn_ping(target: String, out: Arc<AtomicU32>) {
         .spawn(move || {
             out.store(measure_ping(&target).unwrap_or(NO_PING), Ordering::Relaxed);
         });
+}
+
+/// Newest Roblox player process found by name.
+///
+/// Used when the regular process scan comes back empty, so CPU / RAM do not sit at `--`
+/// while the game is clearly running. `pgrep` lists pids ascending, so the last one is the
+/// most recently started player.
+#[cfg(target_os = "macos")]
+fn find_roblox_pid_by_name() -> Option<u32> {
+    for args in [
+        ["-n", "-x", "RobloxPlayer"],
+        ["-n", "-f", "Roblox.app/Contents/MacOS"],
+    ] {
+        let Ok(out) = Command::new("/usr/bin/pgrep").args(args).output() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        if let Some(pid) = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .last()
+            .and_then(|t| t.parse::<u32>().ok())
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_roblox_pid_by_name() -> Option<u32> {
+    None
 }
 
 fn fmt_session(elapsed: Duration) -> String {
@@ -805,6 +884,9 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     let mut last_game_fetch: Option<Instant> = None;
     let mut last_place: Option<u64> = None;
     let mut last_text = String::new();
+    // What was last written to log.txt, so only changes are logged.
+    let mut logged_pid: Option<Option<u32>> = None;
+    let mut logged_server: Option<Option<String>> = None;
 
     loop {
         let (cfg, server, since, locations, game_info, rev) = {
@@ -826,6 +908,19 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             // dies on its first frame looks like from log.txt.
             crate::auth::log("overlay: overlay window process exited");
             break; // overlay window exited (Roblox window gone)
+        }
+
+        // Which server the panels are describing. One line per change: this is the first
+        // thing to read when the HUD says it does not know the server.
+        let server_key = server
+            .as_ref()
+            .map(|s| format!("{} job {} place {}", s.ip, s.job_id, s.place_id));
+        if logged_server.as_ref() != Some(&server_key) {
+            crate::auth::log(&format!(
+                "overlay: server is {}",
+                server_key.as_deref().unwrap_or("not known yet")
+            ));
+            logged_server = Some(server_key);
         }
 
         // Resolve the server's location once per IP.
@@ -889,7 +984,19 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             if last_pid_scan.elapsed() >= Duration::from_secs(3) {
                 last_pid_scan = Instant::now();
                 let (procs, _) = enumerate_roblox_processes();
-                roblox_pid = procs.iter().max_by_key(|p| p.start_ms).map(|p| p.pid);
+                roblox_pid = procs
+                    .iter()
+                    .max_by_key(|p| p.start_ms)
+                    .map(|p| p.pid)
+                    // The scan can miss the player (helper names, sandboxing, permissions);
+                    // a name lookup keeps CPU/RAM from sitting at `--` for the session.
+                    .or_else(find_roblox_pid_by_name);
+                if logged_pid != Some(roblox_pid) {
+                    logged_pid = Some(roblox_pid);
+                    crate::auth::log(&format!(
+                        "overlay: stats are measuring process {roblox_pid:?}"
+                    ));
+                }
             }
             usage.sample(roblox_pid);
         } else {
@@ -900,25 +1007,23 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         // fallback), and reset while switching servers so no stale number is shown.
         if let Some(stats) = &cfg.stats {
             if stats.ping {
+                // Always measure something: the game server once its address is known,
+                // Roblox's web edge before that and if the server never answers. Leaving
+                // the row at `--` until the log yields an address is what made the stats
+                // panel look dead while the game was running fine.
                 let target = server
                     .as_ref()
                     .map(|s| s.ip.clone())
                     .filter(|ip| !ip.is_empty())
-                    .unwrap_or_default();
-                if target.is_empty() {
-                    // No server yet: show `--` rather than a made-up website number.
-                    last_ping_target = None;
+                    .unwrap_or_else(|| "www.roblox.com".to_string());
+                if last_ping_target.as_deref() != Some(target.as_str()) {
+                    last_ping_target = Some(target.clone());
                     ping_ms.store(NO_PING, Ordering::Relaxed);
-                } else {
-                    if last_ping_target.as_deref() != Some(target.as_str()) {
-                        last_ping_target = Some(target.clone());
-                        ping_ms.store(NO_PING, Ordering::Relaxed);
-                        last_ping = Instant::now() - Duration::from_secs(60);
-                    }
-                    if last_ping.elapsed() >= Duration::from_secs(2) {
-                        last_ping = Instant::now();
-                        spawn_ping(target, Arc::clone(&ping_ms));
-                    }
+                    last_ping = Instant::now() - Duration::from_secs(60);
+                }
+                if last_ping.elapsed() >= Duration::from_secs(2) {
+                    last_ping = Instant::now();
+                    spawn_ping(target, Arc::clone(&ping_ms));
                 }
             } else {
                 // Ping is off: drop the target so switching it back on shows `--` until
