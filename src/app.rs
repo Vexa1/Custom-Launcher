@@ -4027,6 +4027,13 @@ impl Creblox {
         // nothing inside `update()` runs while the window is ordered out.
         #[cfg(target_os = "macos")]
         crate::tray::set_hidden_for_game(self.hidden_for_game);
+        // macOS: never `Visible(false)`. Ordering the window out stops the event loop, so the
+        // "the game ended" and "the Dock was clicked" messages were queued and never read
+        // (the log shows `dock: reopen requested` twice with no restore after it). AppKit's
+        // `hide:` hides the app while the loop keeps running, so those messages arrive.
+        #[cfg(target_os = "macos")]
+        crate::tray::hide_launcher_window();
+        #[cfg(not(target_os = "macos"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         self.sync_tray_state();
         if show_balloon && self.settings.tray_enabled {
@@ -4178,7 +4185,7 @@ impl Creblox {
         // `makeKeyAndOrderFront:` also brings the window in front of a fullscreen Roblox
         // Space. The repeated frames below are kept as a second chance.
         #[cfg(target_os = "macos")]
-        crate::tray::activate_app();
+        crate::tray::show_launcher_window();
         // Raising the window has to happen *after* eframe applied the visibility change,
         // otherwise the window can stay ordered out / behind Roblox. Several frames of
         // re-asserting visibility are cheap and survive a dropped window-server message.

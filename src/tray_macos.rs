@@ -745,6 +745,69 @@ pub fn dispatch_main<F: FnOnce() + Send + 'static>(f: F) {
     unsafe { dispatch_async_f(dispatch_get_main_queue(), boxed.cast(), trampoline::<F>) };
 }
 
+/// Hides the launcher **without** freezing the egui event loop.
+///
+/// `ViewportCommand::Visible(false)` orders the window out, and an ordered-out window gives
+/// winit nothing to do: `App::update()` stops being called, so every queued message - "a
+/// game ended, come back", "the Dock was clicked" - waits forever. That is exactly the log:
+/// `dock: reopen requested while the app had no visible window` twice, and never a single
+/// `window: restoring the launcher`. `[NSApp hide:]` hides the app while the window stays
+/// ordered in, so the loop keeps ticking, the messages are read, and the Dock icon behaves
+/// like any other app's.
+pub fn hide_launcher_window() {
+    use std::os::raw::c_void;
+    type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    type Msg1 = unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> *mut c_void;
+    unsafe {
+        let class = objc_getClass(c"NSApplication".as_ptr());
+        if class.is_null() {
+            return;
+        }
+        let shared: Msg0 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let app = shared(class, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return;
+        }
+        let msg: Msg1 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        msg(app, sel_registerName(c"hide:".as_ptr()), 0);
+    }
+    crate::auth::log("window: hidden to the menu bar (NSApp hide, event loop stays alive)");
+}
+
+/// Puts the launcher back on screen, from the main thread, without needing `App::update()`.
+///
+/// Same AppKit sequence Apple's own reopen path performs: Regular policy (back in the Dock),
+/// `unhide:`, `deminiaturize:` + `makeKeyAndOrderFront:` per real window, then
+/// `activateIgnoringOtherApps:`. Safe to call from a `dispatch_async_f` block.
+pub fn show_launcher_window() {
+    crate::auth::log("window: restoring the launcher");
+    activate_app();
+}
+
+/// Whether the whole app is hidden (`[NSApp isHidden]`).
+///
+/// A hidden app still owns ordered-in windows, so "no visible window" alone cannot detect
+/// it - and the post-game restore has to fire for a hidden app just as much as for an
+/// ordered-out one.
+pub fn app_is_hidden() -> bool {
+    use std::os::raw::c_void;
+    type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    type MsgBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i8;
+    unsafe {
+        let class = objc_getClass(c"NSApplication".as_ptr());
+        if class.is_null() {
+            return false;
+        }
+        let shared: Msg0 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let app = shared(class, sel_registerName(c"sharedApplication".as_ptr()));
+        if app.is_null() {
+            return false;
+        }
+        let is_hidden: MsgBool = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        is_hidden(app, sel_registerName(c"isHidden".as_ptr())) != 0
+    }
+}
+
 /// Sets the AppKit activation policy (`0` = Regular/Dock icon, `1` = Accessory/none).
 fn set_activation_policy(policy: isize) {
     use std::os::raw::c_void;
@@ -913,7 +976,9 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
                 // 400 ms keeps "left the game -> launcher back" under a second while the
                 // hidden window is doing nothing; the checks are two objc calls.
                 thread::sleep(Duration::from_millis(400));
-                let no_window = !any_window_visible();
+                // Either state means "the launcher is not on screen": an ordered-out window
+                // (the old hide) or a hidden app (the new one, whose window stays ordered in).
+                let no_window = !any_window_visible() || app_is_hidden();
                 if !no_window {
                     idle_checks = 0;
                     continue;
@@ -962,7 +1027,7 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
                 // `request_repaint()` wakes nothing and the message waits forever.
                 dispatch_main(|| {
                     set_hidden_for_game(false);
-                    activate_app();
+                    show_launcher_window();
                 });
                 let _ = tx.send(Msg::TrayAction(TrayEvent::ShowAndFocus));
                 ctx.request_repaint();

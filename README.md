@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.24
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.25
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -221,6 +221,28 @@ live - so there is something to drag. Drag anywhere on the HUD, `⏎`/Confirm sa
 to `settings.json` and hands input back to the game (`setIgnoresMouseEvents:YES`), `Esc`
 reverts. The dashed 1 px frame, edge guides, live `x, y` readout and Reset/Confirm pills are
 drawn in `overlay_window.rs::paint_edit`.
+
+#### The frozen event loop, and the two panels that never got data (fixed in 0.4.25)
+
+A real Catalina run produced this, which pins both bugs down:
+
+```text
+overlay: overlay window started (pid 14494, panels file overlay-panels-1795676335066070000.json)
+watcher: closing Roblox pid 14493 after leaving the game (state Some(AppAfterPlay))
+dock: reopen requested while the app had no visible window
+dock: reopen requested while the app had no visible window
+```
+
+`window: restoring the launcher` never appears - twice detected, never restored.
+
+| Link | What the log proves | Fix |
+|---|---|---|
+| Hide path | `hide_to_tray` used `ViewportCommand::Visible(false)` = `orderOut:`. An ordered-out window gives winit nothing to do, so `App::update()` stops being called; the `Msg` queued by the watcher and the one queued by the Dock click were **never read**. The watchdog was awake and shouting into an empty room | macOS now hides with `[NSApp hide:]` (`tray_macos.rs::hide_launcher_window`): the app leaves the screen but the window stays ordered in, so the loop keeps ticking and those messages are read |
+| Restore path | Nothing on the main thread ever ran the AppKit sequence | `tray_macos.rs::show_launcher_window` logs `window: restoring the launcher` and performs the full sequence - `setActivationPolicy:Regular`, `unhide:`, `deminiaturize:` + `makeKeyAndOrderFront:` per window, `activateIgnoringOtherApps:YES`. The watcher calls it through `dispatch_main`, and `restore_from_tray` calls it directly (`app.rs`), so restoration no longer depends on a frame ever running |
+| Hidden vs. invisible | `[NSApp hide:]` keeps windows *ordered in*, so `isVisible` stays true and "no visible window" alone can no longer detect the hidden state | The watcher also checks `[NSApp isHidden]` (`app_is_hidden`), so both the Dock click and the post-game restore fire in either state |
+| Server panel | `Server: …` / `ROBLOX STATS` sat on `Server info unavailable` and `Ping --` for the whole session: the parser never matched a line | `ip_from_network_lines` matched only `UDMUX Address` / `Connection accepted from` / `Connected to`. It now matches **`serverId:`**, the line a normal join writes, plus `raknet`; it scans the whole 512 KB chunk instead of the last 600 lines (a long session pushes the connect line far back); it skips loopback/private/link-local candidates so a local UDMUX relay can never be GeoIP'd into `Unknown location`; and `placeId:` / `PlaceId:` is parsed when the `! Joining game … place N` banner is missing |
+
+What to expect in `~/Library/Application Support/CREBLOX/`: `window: hidden to the menu bar (NSApp hide, event loop stays alive)` when a game starts, `window: restoring the launcher` when it ends or the Dock icon is clicked, and `overlay.log` showing `spec loaded (N panels)` followed by a `Server: <city>, <region>` title within a second of the join.
 
 #### Edit Overlay Position (tray → drag → confirm)
 

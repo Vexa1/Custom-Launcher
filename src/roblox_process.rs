@@ -629,6 +629,20 @@ pub fn extract_active_place_id_from_log(text: &str) -> Option<u64> {
         .chars()
         .take_while(|c| c.is_ascii_digit())
         .collect();
+    digits
+        .parse::<u64>()
+        .ok()
+        .filter(|&id| id > 0)
+        .or_else(|| place_id_from_marker(text))
+}
+
+/// `placeId:1818` / `PlaceId: 1818` - written by the join pipeline and by several macOS
+/// builds that do not emit the `! Joining game ... place N` banner at all.
+fn place_id_from_marker(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let p = lower.rfind("placeid")?;
+    let rest = text[p + "placeid".len()..].trim_start_matches([' ', '=', ':', '"']);
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse::<u64>().ok().filter(|&id| id > 0)
 }
 
@@ -698,25 +712,47 @@ pub fn session_banner_active() -> bool {
 
 fn ip_from_network_lines(text: &str) -> Option<String> {
     // The spellings the desktop client actually writes, macOS included:
+    //   [FLog::Network] serverId: 128.116.1.2|53640          <- the canonical one
     //   [FLog::Network] Connection accepted from 128.116.1.2|53640
     //   [FLog::Network] UDMUX Address = 128.116.1.2, Port = 53640
     //   [FLog::Network] Connected to 128.116.1.2|53640
-    // The old check also demanded the word "server" on the line, which none of these have.
-    const MARKERS: [&str; 4] = [
+    // `serverId:` was missing entirely, and that is the line a normal join writes - which
+    // is why the server panel could sit on "Server info unavailable" for a whole session.
+    const MARKERS: [&str; 6] = [
+        "serverid",
         "udmux address",
         "connection accepted from",
         "connected to",
         "connecting to",
+        "raknet",
     ];
-    text.lines().rev().take(600).find_map(|line| {
-        let lower = line.to_ascii_lowercase();
-        if !MARKERS.iter().any(|m| lower.contains(m)) {
+    // The whole chunk, not the last 600 lines: the connect line is written once when the
+    // session starts, and a long session pushes it arbitrarily far back. Lowercased once
+    // rather than per line - this runs twice a second while a game is live.
+    // Tokens are digits and dots, which lowercasing cannot change, so scanning the lowered
+    // copy is enough and costs one allocation instead of thousands.
+    let lower = text.to_ascii_lowercase();
+    lower.lines().rev().find_map(|line| {
+        if !MARKERS.iter().any(|m| line.contains(m)) {
             return None;
         }
         line.split(|c: char| !(c.is_ascii_digit() || c == '.'))
-            .find(|token| looks_like_ip(token))
+            .find(|token| looks_like_ip(token) && !is_private_ip(token))
             .map(str::to_string)
     })
+}
+
+/// LAN / loopback / link-local addresses. The client writes its local UDMUX relay address
+/// on some network lines; resolving that with GeoIP gives "Unknown location" and a ping to
+/// nothing, so such candidates are skipped in favour of the real public server address.
+fn is_private_ip(ip: &str) -> bool {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback() || v6.is_unspecified(),
+        Err(_) => true,
+    }
 }
 
 /// Finds the newest `Joining game '<job>' place <id> at <ip>` line and, if present,
@@ -748,7 +784,9 @@ pub fn extract_server_info_from_log(text: &str) -> Option<ServerInfo> {
         .rsplit_once(" at ")
         .map(|(_, ip)| ip.trim().to_string())
         .filter(|ip| looks_like_ip(ip));
+    // A public address wins over the local UDMUX relay the line sometimes carries.
     let ip = ip_after_marker(tail, &["UDMUX Address =", "UDMUX Address="])
+        .filter(|ip| !is_private_ip(ip))
         .or(join_ip)
         .or_else(|| ip_from_network_lines(tail))?;
     Some(ServerInfo {
