@@ -120,7 +120,7 @@ Everything listed here exists in the code today. File references point at the im
 
 | Feature | How it works |
 |---|---|
-| **Menu-bar item** (`tray_macos.rs`) | Native `NSStatusItem` via `tray-icon`: left click reopens CREBLOX, right click gives Settings, Discord RPC toggle, update check and Quit. Includes AppKit helpers to activate the app so the window surfaces over a fullscreen game. |
+| **Menu-bar item** (`tray_macos.rs`) | Native `NSStatusItem` via `tray-icon`: left click reopens CREBLOX, right click gives Settings, Discord RPC toggle and Quit. The right-click **update check** entry is dormant — it still appears but does nothing while the update subsystem is left in place. Includes AppKit helpers to activate the app so the window surfaces over a fullscreen game. |
 | **Single instance** (`tray_macos.rs:610-640`) | `.instance.lock` in the data folder; a second launch focuses the existing window instead of starting a rival process. |
 | **Launch at login** (`set_startup`) | Writes a login item/LaunchAgent for the resolved bundle path. |
 | **Discord Rich Presence** (`discord_rpc.rs`) | A hand-written Discord IPC client (Unix socket / named pipe, 8-byte frame header, `SET_ACTIVITY`), so no `discord-rich-presence` dependency. Shows the game being played; default app id `1005469189907173486`, overridable in Settings. |
