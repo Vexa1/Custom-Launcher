@@ -1300,8 +1300,9 @@ pub fn start_roblox_watcher(
                 // found the log", which is otherwise invisible from log.txt.
                 match &active_server {
                     Some(s) => crate::auth::log(&format!(
-                        "watcher: server {} place {} (playing place {:?})",
-                        s.ip, s.place_id, active_playing_place
+                        // No address: this line ends up in bug reports.
+                        "watcher: server place {} (playing place {:?})",
+                        s.place_id, active_playing_place
                     )),
                     None => crate::auth::log(&format!(
                         "watcher: no server in the player log (playing place {:?})",

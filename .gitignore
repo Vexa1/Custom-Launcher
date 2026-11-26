@@ -1,3 +1,36 @@
+# Build output
 /target
+/dist
 *.exe
 *.pdb
+
+# Runtime data and logs (never belongs in the repo; lives in
+# ~/Library/Application Support/CREBLOX at runtime)
+*.log
+*.dat
+*.key
+session.dat
+settings.json
+fastflags.json
+
+# Local keys, certificates and environment files
+*.pem
+*.p12
+.env
+.env.*
+
+# OS and editor artifacts
+.DS_Store
+._*
+*.swp
+
+# Local scratch files, downloaded archives and working copies
+/files/
+/freebuff-saved-files.zip
+/*.patch
+/work-*/
+/portcheck.sh
+/.antigravityignor
+
+# Note: release/*.zip is intentionally NOT ignored - the release archives are
+# committed and linked from the GitHub release notes.

@@ -912,9 +912,11 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
 
         // Which server the panels are describing. One line per change: this is the first
         // thing to read when the HUD says it does not know the server.
+        // No address in this line: log.txt is pasted into bug reports, and the job id
+        // already identifies the server.
         let server_key = server
             .as_ref()
-            .map(|s| format!("{} job {} place {}", s.ip, s.job_id, s.place_id));
+            .map(|s| format!("job {} place {}", s.job_id, s.place_id));
         if logged_server.as_ref() != Some(&server_key) {
             crate::auth::log(&format!(
                 "overlay: server is {}",
