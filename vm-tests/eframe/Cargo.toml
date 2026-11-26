@@ -1,0 +1,8 @@
+[package]
+name = "eframe"
+version = "0.37.0"
+edition = "2024"
+publish = false
+
+# Stand-in for the GUI crate: party.rs only ever asks egui for a Context and calls
+# request_repaint() on it, so the socket code can be exercised without a window.

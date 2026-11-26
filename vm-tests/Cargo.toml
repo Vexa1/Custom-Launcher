@@ -1,0 +1,17 @@
+[package]
+name = "creblox-vm-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Dev-only harness: it compiles real launcher modules for the host so they can be tested in
+# the Linux VM. Nothing here is a dependency of `creblox`, so release builds are untouched.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.154"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+igd-next = { version = "0.18", default-features = false, features = ["io_sync"] }
+eframe = { path = "eframe" }
+
+[workspace]

@@ -38,3 +38,6 @@ fastflags.json
 # Cloudflare/Miniflare local state created by `wrangler dev` in relay/
 relay/node_modules/
 relay/.wrangler/
+
+# Dev-only harness build output
+/vm-tests/target

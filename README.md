@@ -650,6 +650,36 @@ it cannot link AppKit or sign a bundle, so it never replaces a real macOS build.
 reason `scripts/verify-release-link.sh` refuses to run on a non-Darwin host instead of
 reporting a link it could not have performed.
 
+### Automated VM verification (zero release overhead)
+
+Every change is checked by one command, and none of it reaches a release build:
+
+```bash
+scripts/verify.sh
+```
+
+| Step | What it proves | Runs where |
+|---|---|---|
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml` | The real `src/party.rs` and `src/server_hop.rs` - invite codec, room-token handshake, roster/kick, presence fallback, hop ranking - plus loopback end-to-end joins | Any host, including a Linux VM where the GUI crate cannot compile |
+| `cargo check --locked --target x86_64-apple-darwin` | The whole GUI crate, including `#[cfg(macos)]` FFI and every `#[cfg(test)]` module, still compiles for the release target | Any host with the target installed |
+| `cargo test --locked` (macOS only) | The in-crate suites: layout, updater parsing, auth paths, theme tokens, Roblox log parser | A Mac; they need the window and OS APIs |
+
+`vm-tests/` is a **separate package with its own `[workspace]`** that includes the real source
+files by path (`#[path = "../../src/party.rs"]`) and supplies stand-ins only for what needs a
+window, a Roblox session or macOS (`eframe` stub, `api`, `auth`, `roblox_process`). Add a module
+there when you want host-runnable coverage of it, and put new checks in `vm-tests/tests/`.
+
+Why a release build is untouched:
+
+* the root package does not depend on `vm-tests`, so `cargo build --release` never compiles it;
+* every test detail lives in `#[cfg(test)]` or `vm-tests/tests/`, and no test crate appears in
+  `[dependencies]` (`[dev-dependencies]` only, which release builds ignore);
+* no test flag, thread, timer or log line exists in runtime code, so there is nothing to switch
+  off in the shipped app;
+* `scripts/package-release.sh` copies an explicit file list (`assets scripts src`, the manifest
+  and the two `.command` files) that does not include `vm-tests/`, so no test code or test
+  dependency can reach a release archive.
+
 ---
 
 ## 6. Troubleshooting (Catalina)
@@ -700,9 +730,9 @@ Read this before editing. These are not preferences; breaking them breaks Catali
    exact asset names, binaries built from the tagged commit, never re-upload an asset.
 9. **The macOS binary must contain an x86_64 slice.** Catalina is Intel-only; keep the
    universal build in `scripts/build-macos-app.sh` working.
-10. **Test on the target.** `cargo check`/`clippy` for `x86_64-apple-darwin` is the minimum;
-    UI changes are unverified until the app has actually been seen on Catalina (or at least
-    on the macOS build you ship).
+10. **Test on the target.** `scripts/verify.sh` (VM tests + the `x86_64-apple-darwin` check)
+    is the minimum for every change; UI changes are unverified until the app has actually been
+    seen on Catalina (or at least on the macOS build you ship).
 11. **Project house rule (`AGENTS.md`):** don't read the same file twice in one task unless it
     changed. Search with line numbers, then read one window.
 
