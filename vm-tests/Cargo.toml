@@ -13,6 +13,8 @@ serde_json = "1.0.154"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 igd-next = { version = "0.18", default-features = false, features = ["io_sync"] }
 eframe = { path = "eframe" }
+# Used by the real `src/zip_update.rs`, which `tests/update_zip.rs` exercises.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # `tests/stub_drift.rs` compares the stand-ins below with the real declarations.
 [dev-dependencies]

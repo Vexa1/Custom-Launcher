@@ -24,3 +24,9 @@ pub mod scroll;
 
 #[path = "../../src/server_hop.rs"]
 pub mod server_hop;
+
+#[path = "../../src/release_links.rs"]
+pub mod release_links;
+
+#[path = "../../src/zip_update.rs"]
+pub mod zip_update;

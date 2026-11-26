@@ -14,6 +14,7 @@ mod party;
 mod party_server;
 mod platform;
 mod playtime;
+mod release_links;
 mod roblox_process;
 mod scroll;
 mod server_hop;
@@ -25,6 +26,9 @@ mod types;
 mod ui;
 mod updater;
 mod video_preview;
+
+#[cfg(windows)]
+mod zip_update;
 
 use std::env;
 

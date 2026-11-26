@@ -185,42 +185,12 @@ pub fn classify_update_kind(remote: &str, current: &str, title: &str, notes: &st
 /// Finds the first HTTPS `.zip` link in release notes. Release bodies use both bare
 /// URLs and Markdown links, so trailing punctuation is stripped.
 fn find_zip_url(text: &str) -> Option<String> {
-    let mut first: Option<String> = None;
-    for token in text.split_whitespace() {
-        let Some(start) = token.find("https://") else {
-            continue;
-        };
-        let candidate =
-            token[start..].trim_end_matches([')', ']', '}', '>', '.', ',', ';', '`', '"', '\'']);
-        let lower = candidate.to_ascii_lowercase();
-        let path = lower.split(['?', '#']).next().unwrap_or("");
-        if !path.ends_with(".zip") {
-            continue;
-        }
-        // The body publishes the update overlay next to the full project zip.
-        // Prefer the overlay so an in-app update downloads ~347 KB, not ~677 KB; on Windows
-        // the matching artifact is the small x64 build instead.
-        let file = path.rsplit('/').next().unwrap_or(path);
-        let wanted = if cfg!(target_os = "windows") {
-            file.contains("windows")
-        } else {
-            file.contains("update") && !file.contains("full")
-        };
-        if wanted {
-            return Some(candidate.to_string());
-        }
-        if first.is_none() {
-            first = Some(candidate.to_string());
-        }
-    }
-    first
+    crate::release_links::pick_zip_url(text, cfg!(target_os = "windows"))
 }
 
 /// The release body carries the SHA-256 of the update zip; accept any 64-hex token.
 fn find_sha256(text: &str) -> Option<String> {
-    text.split(|c: char| !c.is_ascii_hexdigit())
-        .find(|token| token.len() == 64)
-        .map(|token| token.to_ascii_lowercase())
+    crate::release_links::find_sha256(text)
 }
 
 /// The SHA-256 printed for the archive at `url`: the token on the same line,
@@ -228,11 +198,7 @@ fn find_sha256(text: &str) -> Option<String> {
 /// taking the first hash in the body would verify the overlay against the full
 /// zip's checksum once the overlay is preferred.
 fn find_sha256_for(text: &str, url: &str) -> Option<String> {
-    let tail = text.get(text.find(url)? + url.len()..)?;
-    let line = tail.split('\n').next().unwrap_or(tail);
-    find_sha256(line)
-        .or_else(|| find_sha256(tail))
-        .or_else(|| find_sha256(text))
+    crate::release_links::find_sha256_near(text, url).or_else(|| find_sha256(text))
 }
 
 pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<CrebloxRelease> {
@@ -278,11 +244,8 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
                 continue;
             }
             if lower.ends_with(".zip") {
-                let preferred = if cfg!(target_os = "windows") {
-                    lower.contains("windows")
-                } else {
-                    lower.contains("creblox") || lower.contains("macos")
-                };
+                let preferred =
+                    crate::release_links::prefers_zip_asset(name, cfg!(target_os = "windows"));
                 let size = a["size"].as_u64().unwrap_or(0);
                 let replace = match &chosen_zip {
                     None => true,
@@ -338,10 +301,15 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
             None => (None, None, 0),
         },
     };
-    let zip_sha256 = match (&zip_url, has_asset_zip) {
-        (Some(url), false) => find_sha256_for(&notes, url),
-        _ => None,
-    };
+    // A release-asset zip is verified against the checksum printed for its own URL; a body
+    // that lists several downloads would otherwise hand it another file's hash.
+    let zip_sha256 = zip_url.as_deref().and_then(|url| {
+        if has_asset_zip {
+            crate::release_links::find_sha256_near(&notes, url)
+        } else {
+            find_sha256_for(&notes, url)
+        }
+    });
 
     Some(CrebloxRelease {
         version: normalized_ver,
@@ -710,63 +678,6 @@ impl UpdateProgress {
     }
 }
 
-/// The largest `creblox.exe` an update may carry. Anything bigger is not our launcher, and
-/// must never reach the exe swap.
-#[cfg(windows)]
-const MAX_UPDATE_EXE_BYTES: u64 = 200 * 1024 * 1024;
-/// Below this a "creblox.exe" cannot be the real launcher, so a truncated download can do no
-/// harm to a working install.
-#[cfg(windows)]
-const MIN_UPDATE_EXE_BYTES: u64 = 64 * 1024;
-
-/// Pulls the single `creblox.exe` out of a release zip with the `zip` crate: no PowerShell,
-/// no external unzip, and no directory traversal, because only the file name is ever used.
-#[cfg(windows)]
-fn extract_exe_from_zip(zip: &Path, dest: &Path) -> Result<PathBuf, String> {
-    let file = fs::File::open(zip).map_err(|e| format!("Could not open the update zip: {e}"))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("The update zip could not be read: {e}"))?;
-
-    let mut found: Option<(usize, u64)> = None;
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .map_err(|e| format!("The update zip is damaged: {e}"))?;
-        if entry.is_dir() {
-            continue;
-        }
-        let name = entry.name().rsplit(['/', '\\']).next().unwrap_or_default();
-        if name.eq_ignore_ascii_case("creblox.exe") {
-            found = Some((index, entry.size()));
-            break;
-        }
-    }
-    let Some((index, size)) = found else {
-        return Err("The update zip does not contain creblox.exe.".to_string());
-    };
-    if size == 0 || size > MAX_UPDATE_EXE_BYTES {
-        return Err(format!(
-            "The update zip carries an unusable creblox.exe ({size} bytes)."
-        ));
-    }
-
-    let target = dest.join("creblox.exe");
-    let mut entry = archive
-        .by_index(index)
-        .map_err(|e| format!("The update zip is damaged: {e}"))?;
-    let mut out = fs::File::create(&target)
-        .map_err(|e| format!("Could not write the new executable: {e}"))?;
-    let copied = std::io::copy(&mut entry, &mut out)
-        .map_err(|e| format!("Could not extract the new executable: {e}"))?;
-    out.flush()
-        .map_err(|e| format!("Could not finish the new executable: {e}"))?;
-    if copied != size {
-        let _ = fs::remove_file(&target);
-        return Err("The update zip ended in the middle of creblox.exe.".to_string());
-    }
-    Ok(target)
-}
-
 /// Starts the freshly swapped build. `--updated` tells it to skip the "focus the copy that is
 /// already running" check, because that copy is this process, still on its way out.
 #[cfg(windows)]
@@ -797,20 +708,16 @@ fn install_windows_exe_update(
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("Could not create the update folder: {e}"))?;
     progress.push("Extracting the new creblox.exe.".to_string(), ctx);
-    let staged = extract_exe_from_zip(zip, &staging)?;
-
-    let size = fs::metadata(&staged)
-        .map_err(|e| format!("Could not read the new executable: {e}"))?
-        .len();
-    let mut magic = [0u8; 2];
-    let looks_like_exe = size >= MIN_UPDATE_EXE_BYTES
-        && fs::File::open(&staged)
-            .and_then(|mut f| f.read_exact(&mut magic))
-            .is_ok()
-        && &magic == b"MZ";
-    if !looks_like_exe {
+    let staged = match crate::zip_update::extract_launcher(zip, &staging) {
+        Ok(path) => path,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if let Err(e) = crate::zip_update::verify_launcher(&staged) {
         let _ = fs::remove_dir_all(&staging);
-        return Err("The update zip does not contain a Windows executable.".to_string());
+        return Err(e);
     }
 
     progress.set_stage(UpdateStage::Installing, ctx);
