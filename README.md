@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.19
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.20
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -113,8 +113,30 @@ Everything listed here exists in the code today. File references point at the im
 | **Server panel** (`game_overlay.rs`) | Corner-selectable panel showing server region, IP and job id, with auto-hide duration. |
 | **Stats panel** | Live CPU, RAM, ping (ICMP to the game server), session timer, clock and the active FPS cap. |
 | **FastFlags panel** | Read-only view of the flags currently applied to the client. |
-| **Crosshair** | Style, size, gap, thickness, colour and opacity, drawn with a dark outline for visibility on bright scenes. |
-| **Driver** | `game_overlay.rs` writes a JSON spec roughly once a second from a background thread and keeps the overlay process alive, restarting it if it dies mid-session. Works identically from the launcher or from `--companion`. |
+| **Crosshair** | Style, size, gap, thickness, colour and opacity. Endpoints are snapped to device-pixel centres and the dark backing is exactly one physical pixel, so it stays sharp on both Retina and 1x Catalina displays. See *HUD design system*. |
+| **Driver** | `game_overlay.rs` writes a JSON spec roughly once a second from a background thread and keeps the overlay process alive, restarting it if it dies mid-session. A config change sets a wake flag that cuts the tick short, so a tray toggle lands within 100 ms. Works identically from the launcher or from `--companion`. |
+
+#### HUD design system (`overlay_window.rs`)
+
+Understated native utility, not gamer UI: one surface, one hairline, two text weights, and
+colour only where it carries meaning.
+
+| Element | Spec | Where |
+|---|---|---|
+| Surface | `rgba(14, 15, 18, 0.82)`, 8 pt radius, scaled by the overlay opacity setting | `SURFACE_RGB` / `SURFACE_ALPHA` (`overlay_window.rs:255`) |
+| Edge | 1 device-pixel **inner** stroke at `rgba(255, 255, 255, 0.09)`, so the panel reads against both a bright skybox and a dark interior | `paint_panels` (`:810`) |
+| Micro-label | 10 pt uppercase, tracked with U+2009 (egui has no letter-spacing), `#8E939E` | `tracked()` (`:292`), `LABEL_RGB` |
+| Value | 12.5 pt **monospace**, right-aligned, so digits never shift width as ping or FPS change | `value_font` in `paint_panels` |
+| Rhythm | 16 pt margin, 12 pt padding, 8 pt gaps, 17 pt rows, hairline separators between rows | `paint_panels` |
+| Status dot | 5 px, semantic only: ping under 60 ms emerald, under 120 ms amber, above that coral; server/region rows neutral grey | `tone_rgba()` (`:317`) |
+| Crosshair | Pixel-snapped endpoints, `thickness` floored at one physical pixel, exactly 1 px of dark backing (the old 2 pt halo blurred at 1x) | `paint_crosshair()` (`:1034`) |
+| Parsing | `"Label: value"` is split once per spec change into `Row`s, so the render loop never re-parses or allocates strings per frame | `reload_spec()` (`:550`) |
+| Snapping | Panel rects snap to the physical pixel grid, strokes to pixel centres — correct at both 2x Retina and 1x 1080p | `snap_px()` (`:306`), `snap_half_px()` (`:312`) |
+
+No glows, gradients, pulsing borders or per-metric accent colours: the only chromatic
+elements are the crosshair (user-chosen) and those 5 px dots. Every setting in Settings →
+Overlay still drives it live — opacity, corner, crosshair style/size/gap/thickness/colour/
+opacity/offset, the custom image overlay, and the per-metric panel toggles.
 
 ### 2.6 Shell, menu bar and integrations
 

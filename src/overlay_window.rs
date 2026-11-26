@@ -244,13 +244,98 @@ fn tweak_overlay_window() -> bool {
 // The overlay app
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// HUD design tokens
+// ---------------------------------------------------------------------------
+//
+// Deliberately plain: one obsidian surface, one hairline, two text weights. No glows, no
+// gradients, no accent colour per metric - the only colour on screen is a 5 px dot whose
+// hue carries meaning (ping health) and the crosshair the user chose.
+
+/// `rgba(14, 15, 18, 0.82)` at full opacity; scaled by the user's overlay opacity at draw time.
+const SURFACE_RGB: (u8, u8, u8) = (14, 15, 18);
+const SURFACE_ALPHA: f32 = 0.82;
+/// The 1 px inner stroke that separates the panel from bright or dark scenes.
+const HAIRLINE_ALPHA: f32 = 0.09;
+/// Row separators sit below the panel hairline so the edge always reads first.
+const DIVIDER_ALPHA: f32 = 0.06;
+const LABEL_RGB: (u8, u8, u8) = (0x8E, 0x93, 0x9E);
+const VALUE_RGB: (u8, u8, u8) = (0xF3, 0xF4, 0xF6);
+const DOT_OK_RGB: (u8, u8, u8) = (0x34, 0xD3, 0x99);
+const DOT_WARN_RGB: (u8, u8, u8) = (0xF5, 0xB0, 0x4B);
+const DOT_BAD_RGB: (u8, u8, u8) = (0xF8, 0x71, 0x71);
+const DOT_NEUTRAL_RGB: (u8, u8, u8) = (0x6B, 0x72, 0x80);
+
+/// One telemetry line split into a muted micro-label and a tabular value.
+#[derive(Clone, Default)]
+struct Row {
+    label: String,
+    value: String,
+}
+
 #[derive(Clone, Default)]
 #[allow(dead_code)]
 struct Panel {
     id: String,
     corner: u8,
     title: String,
+    /// `title` uppercased with thin-space tracking, built once per spec change.
+    title_display: String,
     lines: Vec<String>,
+    /// `lines` parsed into label/value pairs, also built once per spec change so the
+    /// render loop never splits or allocates strings per frame.
+    rows: Vec<Row>,
+}
+
+/// Uppercase with U+2009 between characters: egui has no letter-spacing, and this is the
+/// cheapest way to get the tracked micro-label look without a custom font.
+fn tracked(raw: &str) -> String {
+    let upper = raw.trim().to_uppercase();
+    let mut out = String::with_capacity(upper.len() * 2);
+    for (i, ch) in upper.chars().enumerate() {
+        if i > 0 {
+            out.push('\u{2009}');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Rounds a coordinate down to the physical pixel grid, so a filled rect and its 1 px inner
+/// stroke land on whole device pixels on both Retina (2x) and 1080p 1x Catalina displays.
+fn snap_px(v: f32, ppp: f32) -> f32 {
+    (v * ppp).round() / ppp
+}
+
+/// Snaps a stroked coordinate to the centre of a device pixel: a 1 px line drawn on a pixel
+/// boundary straddles two pixels and blurs, one drawn on the centre stays razor sharp.
+fn snap_half_px(v: f32, ppp: f32) -> f32 {
+    ((v * ppp - 0.5).round() + 0.5) / ppp
+}
+
+/// Semantic dot colour for a row, or `None` when the row carries no health meaning.
+fn tone_rgba(label: &str, value: &str, alpha: u8) -> Option<Color32> {
+    let label = label.to_ascii_lowercase();
+    let rgb = if label.contains("ping") || label.contains("latency") {
+        let digits: String = value
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(5)
+            .collect();
+        let ms = digits.parse::<u32>().ok()?;
+        if ms < 60 {
+            DOT_OK_RGB
+        } else if ms < 120 {
+            DOT_WARN_RGB
+        } else {
+            DOT_BAD_RGB
+        }
+    } else if label.contains("server") || label.contains("region") {
+        DOT_NEUTRAL_RGB
+    } else {
+        return None;
+    };
+    Some(Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, alpha))
 }
 
 #[derive(Clone)]
@@ -486,18 +571,40 @@ impl OverlayWindowApp {
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .map(|p| Panel {
-                        id: p["id"].as_str().unwrap_or("").to_string(),
-                        corner: p["corner"].as_u64().unwrap_or(3).min(3) as u8,
-                        title: p["title"].as_str().unwrap_or("").to_string(),
-                        lines: p["lines"]
+                    .map(|p| {
+                        let title = p["title"].as_str().unwrap_or("").to_string();
+                        let lines: Vec<String> = p["lines"]
                             .as_array()
                             .map(|l| {
                                 l.iter()
                                     .filter_map(|s| s.as_str().map(str::to_string))
                                     .collect()
                             })
-                            .unwrap_or_default(),
+                            .unwrap_or_default();
+                        // Split once, here, not in `paint`: "Server: Dallas, US" becomes a
+                        // muted SERVER label with a tabular value, which is what makes the
+                        // numbers line up and stop jittering.
+                        let rows = lines
+                            .iter()
+                            .map(|line| match line.split_once(':') {
+                                Some((label, value)) if !label.trim().is_empty() => Row {
+                                    label: tracked(label),
+                                    value: value.trim().to_string(),
+                                },
+                                _ => Row {
+                                    label: String::new(),
+                                    value: line.trim().to_string(),
+                                },
+                            })
+                            .collect();
+                        Panel {
+                            id: p["id"].as_str().unwrap_or("").to_string(),
+                            corner: p["corner"].as_u64().unwrap_or(3).min(3) as u8,
+                            title_display: tracked(&title),
+                            title,
+                            rows,
+                            lines,
+                        }
                     })
                     .collect()
             })
@@ -691,39 +798,83 @@ impl OverlayWindowApp {
             }
         }
 
+        self.paint_panels(painter, area, title_bar);
+    }
+
+    /// Draws the telemetry panels.
+    ///
+    /// Surface, one hairline, two text weights: a tracked 10 pt micro-label on the left, a
+    /// tabular 12.5 pt value right-aligned on the same line, hairline row separators, and a
+    /// 5 px dot only where a row has health meaning. Everything is snapped to the physical
+    /// pixel grid so the 1 px edges stay crisp at 1x and 2x.
+    fn paint_panels(&self, painter: &egui::Painter, area: Rect, title_bar: f32) {
+        let ppp = painter.ctx().pixels_per_point().max(0.5);
+        let px = 1.0 / ppp;
         let margin = 16.0;
         let gap = 8.0;
+        let pad = 12.0;
+        let row_h = 17.0;
+        let label_font = FontId::proportional(10.0);
+        let value_font = FontId::monospace(12.5);
+        let alpha = |a: f32| (a * self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+        let label_color =
+            Color32::from_rgba_unmultiplied(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2, alpha(1.0));
+        let value_color =
+            Color32::from_rgba_unmultiplied(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2, alpha(1.0));
+        let surface = Color32::from_rgba_unmultiplied(
+            SURFACE_RGB.0,
+            SURFACE_RGB.1,
+            SURFACE_RGB.2,
+            alpha(SURFACE_ALPHA),
+        );
+        let hairline = Color32::from_rgba_unmultiplied(255, 255, 255, alpha(HAIRLINE_ALPHA));
+        let divider = Color32::from_rgba_unmultiplied(255, 255, 255, alpha(DIVIDER_ALPHA));
         let mut used = [0.0_f32; 4];
+
         for panel in &self.panels {
-            if panel.title.is_empty() && panel.lines.is_empty() {
+            if panel.title_display.is_empty() && panel.rows.is_empty() {
                 continue;
             }
-            let title_font = FontId::proportional(13.0);
-            let line_font = FontId::monospace(11.5);
-            let alpha = |a: f32| (a * self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-            let title_color = Color32::from_white_alpha(alpha(1.0));
-            let line_color = Color32::from_white_alpha(alpha(0.78));
+            let title_galley = (!panel.title_display.is_empty()).then(|| {
+                painter.layout_no_wrap(
+                    panel.title_display.clone(),
+                    label_font.clone(),
+                    label_color,
+                )
+            });
 
-            let title_galley = (!panel.title.is_empty())
-                .then(|| painter.layout_no_wrap(panel.title.clone(), title_font, title_color));
-            let line_galleys: Vec<_> = panel
-                .lines
-                .iter()
-                .map(|l| painter.layout_no_wrap(l.clone(), line_font.clone(), line_color))
-                .collect();
+            let mut label_w = 0.0_f32;
+            let mut value_w = 0.0_f32;
+            let mut has_dot = false;
+            let mut rows = Vec::with_capacity(panel.rows.len());
+            for row in &panel.rows {
+                let label = (!row.label.is_empty()).then(|| {
+                    painter.layout_no_wrap(row.label.clone(), label_font.clone(), label_color)
+                });
+                let value =
+                    painter.layout_no_wrap(row.value.clone(), value_font.clone(), value_color);
+                label_w = label_w.max(label.as_ref().map_or(0.0, |g| g.size().x));
+                value_w = value_w.max(value.size().x);
+                let tone = tone_rgba(&row.label, &row.value, alpha(1.0));
+                has_dot |= tone.is_some();
+                rows.push((label, value, tone));
+            }
+            let dot_w = if has_dot { 11.0 } else { 0.0 };
 
-            let pad = 12.0;
-            let mut width = 0.0_f32;
+            let mut width = label_w
+                + if label_w > 0.0 { 14.0 } else { 0.0 }
+                + dot_w
+                + value_w
+                + pad * 2.0;
             let mut height = pad * 2.0;
-            if let Some(g) = &title_galley {
-                width = width.max(g.size().x);
-                height += g.size().y + 4.0;
+            if let Some(t) = &title_galley {
+                width = width.max(t.size().x + pad * 2.0);
+                height += t.size().y + gap;
             }
-            for g in &line_galleys {
-                width = width.max(g.size().x);
-                height += g.size().y + 2.0;
+            if !rows.is_empty() {
+                height += px + gap + row_h * rows.len() as f32;
             }
-            let size = vec2(width + pad * 2.0, height);
+            let size = vec2(width, height);
 
             let corner = panel.corner.min(3) as usize;
             let x = if corner % 2 == 1 {
@@ -738,22 +889,55 @@ impl OverlayWindowApp {
             };
             used[corner] += size.y + gap;
 
-            let rect = Rect::from_min_size(pos2(x, y), size);
-            painter.rect_filled(
+            let rect = Rect::from_min_size(pos2(snap_px(x, ppp), snap_px(y, ppp)), size);
+            let radius = CornerRadius::same(8);
+            painter.rect_filled(rect, radius, surface);
+            painter.rect_stroke(
                 rect,
-                CornerRadius::same(10),
-                Color32::from_rgba_unmultiplied(18, 23, 31, alpha(0.92)),
+                radius,
+                Stroke::new(px, hairline),
+                egui::StrokeKind::Inside,
             );
-            let mut cursor = rect.min + vec2(pad, pad);
+
+            let mut cursor_y = rect.top() + pad;
             if let Some(g) = title_galley {
-                let h = g.size().y;
-                painter.galley(cursor, g, title_color);
-                cursor.y += h + 4.0;
+                painter.galley(pos2(rect.left() + pad, cursor_y), g.clone(), label_color);
+                cursor_y += g.size().y + gap;
             }
-            for g in line_galleys {
-                let h = g.size().y;
-                painter.galley(cursor, g, line_color);
-                cursor.y += h + 2.0;
+            if !rows.is_empty() {
+                let rule = snap_half_px(cursor_y, ppp);
+                painter.line_segment(
+                    [
+                        pos2(rect.left() + pad, rule),
+                        pos2(rect.right() - pad, rule),
+                    ],
+                    Stroke::new(px, divider),
+                );
+                cursor_y += px + gap;
+                for (i, (label, value, tone)) in rows.iter().enumerate() {
+                    if let Some(l) = label {
+                        let ly = cursor_y + (row_h - l.size().y) / 2.0;
+                        painter.galley(pos2(rect.left() + pad, ly), l.clone(), label_color);
+                    }
+                    let vx = rect.right() - pad - value.size().x;
+                    let vy = cursor_y + (row_h - value.size().y) / 2.0;
+                    if let Some(color) = tone {
+                        // 5 px diameter, no glow: colour is the whole signal.
+                        painter.circle_filled(pos2(vx - 8.0, cursor_y + row_h / 2.0), 2.5, *color);
+                    }
+                    painter.galley(pos2(vx, vy), value.clone(), value_color);
+                    cursor_y += row_h;
+                    if i + 1 < rows.len() {
+                        let rule = snap_half_px(cursor_y, ppp);
+                        painter.line_segment(
+                            [
+                                pos2(rect.left() + pad, rule),
+                                pos2(rect.right() - pad, rule),
+                            ],
+                            Stroke::new(px, divider),
+                        );
+                    }
+                }
             }
         }
     }
@@ -848,39 +1032,52 @@ fn paint_crosshair_image(
 }
 
 fn paint_crosshair(painter: &egui::Painter, center: Pos2, ch: &Crosshair) {
+    let ppp = painter.ctx().pixels_per_point().max(0.5);
+    let px = 1.0 / ppp;
     let color = Color32::from_rgba_unmultiplied(
         ch.color[0],
         ch.color[1],
         ch.color[2],
         (ch.opacity * 255.0).round() as u8,
     );
-    // A thin dark outline keeps it visible on bright backgrounds.
+    // Exactly one device pixel of dark backing. The old `thickness + 2` was two points, which
+    // on a 1x Catalina display smeared into a soft halo around every arm.
     let outline = Color32::from_black_alpha((ch.opacity * 160.0).round() as u8);
-    let t = ch.thickness;
+    let t = ch.thickness.max(px);
+    let outline_t = t + px;
+    // Centre the whole shape on a device-pixel centre, then snap each endpoint: a segment
+    // that starts on a pixel boundary straddles two rows of pixels and blurs.
+    let center = pos2(snap_half_px(center.x, ppp), snap_half_px(center.y, ppp));
     let arm = ch.size / 2.0;
     let gap = ch.gap;
     let draw_cross = |painter: &egui::Painter| {
         for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-            let a = pos2(center.x + dx * gap, center.y + dy * gap);
-            let b = pos2(center.x + dx * (gap + arm), center.y + dy * (gap + arm));
-            painter.line_segment([a, b], Stroke::new(t + 2.0, outline));
+            let a = pos2(
+                snap_half_px(center.x + dx * gap, ppp),
+                snap_half_px(center.y + dy * gap, ppp),
+            );
+            let b = pos2(
+                snap_half_px(center.x + dx * (gap + arm), ppp),
+                snap_half_px(center.y + dy * (gap + arm), ppp),
+            );
+            painter.line_segment([a, b], Stroke::new(outline_t, outline));
             painter.line_segment([a, b], Stroke::new(t, color));
         }
     };
     match ch.style {
         0 => {
-            painter.circle_filled(center, t * 1.5 + 1.0, outline);
-            painter.circle_filled(center, t * 1.5, color);
+            painter.circle_filled(center, snap_px(t * 1.5 + px, ppp), outline);
+            painter.circle_filled(center, snap_px(t * 1.5, ppp), color);
         }
         1 => draw_cross(painter),
         2 => {
-            painter.circle_stroke(center, arm, Stroke::new(t + 2.0, outline));
+            painter.circle_stroke(center, arm, Stroke::new(outline_t, outline));
             painter.circle_stroke(center, arm, Stroke::new(t, color));
         }
         _ => {
             draw_cross(painter);
-            painter.circle_filled(center, t * 1.2 + 1.0, outline);
-            painter.circle_filled(center, t * 1.2, color);
+            painter.circle_filled(center, snap_px(t * 1.2 + px, ppp), outline);
+            painter.circle_filled(center, snap_px(t * 1.2, ppp), color);
         }
     }
 }
