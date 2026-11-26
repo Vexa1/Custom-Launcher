@@ -240,7 +240,7 @@ pub struct Creblox {
     pub party_join_code: String,
     pub party_error: Option<String>,
     pub party_invite_open: bool,
-    /// Last presence sent to the relay, so no repaint can spam the socket with frames.
+    /// Last presence sent to the party, so no repaint can spam the socket with frames.
     pub party_presence: Option<(crate::party::PartyStatus, u64, String)>,
     pub server_locations: HashMap<String, String>,
     pub server_location_pending: HashSet<String>,
@@ -3482,10 +3482,6 @@ impl Creblox {
         })
     }
 
-    fn party_relay(&self) -> String {
-        crate::party::relay_url(&self.settings.party_relay_url)
-    }
-
     /// Host of a party with somebody else in it: Play coordinates a server for everybody.
     fn party_coordinates_launch(&self) -> bool {
         self.party_state.as_ref().is_some_and(|p| {
@@ -3501,7 +3497,7 @@ impl Creblox {
         self.party_error = None;
         self.status = "Creating a party...".to_string();
         self.party
-            .create(me, crate::party::MAX_PARTY_SIZE, self.party_relay());
+            .create(me, crate::party::MAX_PARTY_SIZE, self.cookie.clone());
     }
 
     pub fn party_join(&mut self, raw: String) {
@@ -3509,13 +3505,13 @@ impl Creblox {
             self.party_error = Some("Sign in to join a party".to_string());
             return;
         };
-        let Some(code) = crate::party::parse_invite(&raw) else {
+        let Some(invite) = crate::party::parse_invite(&raw) else {
             self.party_error = Some("That invite code does not look right".to_string());
             return;
         };
         self.party_error = None;
-        self.status = format!("Joining party {code}...");
-        self.party.join(code, me, self.party_relay());
+        self.status = format!("Joining party {}...", invite.short_code());
+        self.party.join(invite, me, self.cookie.clone());
         self.party_join_code.clear();
     }
 
@@ -3527,11 +3523,15 @@ impl Creblox {
         let Some(party) = &self.party_state else {
             return;
         };
-        let text = format!(
-            "Join my CREBLOX party: creblox://party/{} (code {})",
-            party.code, party.code
-        );
-        self.ctx.copy_text(text);
+        // The full invite carries the host's endpoint and token; the short code is only a
+        // label, so never copy that in its place.
+        let invite = if party.invite.is_empty() {
+            party.code.clone()
+        } else {
+            party.invite.clone()
+        };
+        self.ctx
+            .copy_text(format!("Join my CREBLOX party: creblox://party/{invite}"));
         self.status = format!("Party invite copied - {}", party.code);
     }
 

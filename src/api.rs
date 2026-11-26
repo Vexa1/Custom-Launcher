@@ -1767,6 +1767,82 @@ fn enrich_presence(user: &mut User, cookie: Option<&str>) {
         .or_else(|| item["rootPlaceId"].as_u64());
 }
 
+/// Where one user is playing right now, for the party's presence fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartyPresence {
+    pub in_game: bool,
+    pub place_id: u64,
+    pub job_id: String,
+    pub universe_id: u64,
+    pub game_name: String,
+}
+
+/// One presence poll for a single user id. The party uses this when a direct peer-to-peer
+/// socket cannot be opened; the cookie stays here, and nothing about it reaches another user.
+pub fn party_presence(user_id: u64, cookie: &str) -> Option<PartyPresence> {
+    let resp = post_csrf(
+        "https://presence.roblox.com/v1/presence/users",
+        serde_json::json!({ "userIds": [user_id] }),
+        Some(cookie),
+        None,
+    )
+    .ok()?;
+    let value: Value = resp.into_json().ok()?;
+    presence_of(&value)
+}
+
+/// Pure half of [`party_presence`]: maps Roblox's presence JSON, no network.
+fn presence_of(value: &Value) -> Option<PartyPresence> {
+    let item = value["userPresences"].as_array()?.first()?;
+    let place_id = item["placeId"]
+        .as_u64()
+        .or_else(|| item["rootPlaceId"].as_u64())
+        .unwrap_or(0);
+    Some(PartyPresence {
+        in_game: item["userPresenceType"].as_u64().unwrap_or(0) == 2,
+        place_id,
+        job_id: str_of(&item["gameId"]),
+        universe_id: item["universeId"].as_u64().unwrap_or(0),
+        game_name: str_of(&item["lastLocation"]),
+    })
+}
+
+#[cfg(test)]
+mod party_presence_tests {
+    use super::*;
+
+    #[test]
+    fn a_game_session_carries_the_server_id() {
+        let v = serde_json::json!({
+            "userPresences": [{
+                "userPresenceType": 2,
+                "placeId": 920587237,
+                "rootPlaceId": 920587237,
+                "gameId": "job-abc",
+                "universeId": 4242,
+                "lastLocation": "Adopt Me!"
+            }]
+        });
+        let spot = presence_of(&v).expect("a presence row");
+        assert!(spot.in_game);
+        assert_eq!(spot.place_id, 920_587_237);
+        assert_eq!(spot.job_id, "job-abc");
+        assert_eq!(spot.universe_id, 4242);
+        assert_eq!(spot.game_name, "Adopt Me!");
+    }
+
+    #[test]
+    fn being_online_is_not_being_in_a_game() {
+        let v = serde_json::json!({
+            "userPresences": [{ "userPresenceType": 1, "placeId": 0 }]
+        });
+        let spot = presence_of(&v).expect("a presence row");
+        assert!(!spot.in_game);
+        assert!(spot.job_id.is_empty());
+        assert!(presence_of(&serde_json::json!({ "userPresences": [] })).is_none());
+    }
+}
+
 pub fn fetch_users_by_ids(ids: &[u64], cookie: Option<&str>) -> Result<Vec<User>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());

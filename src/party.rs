@@ -2,43 +2,66 @@
 //!
 //! Design constraints, in order of importance:
 //!
+//! * **Nothing to deploy.** The host *is* the server: Create Party binds a TCP listener
+//!   inside this process, Join dials the host directly, and the whole feature ships inside
+//!   the compiled binary. No account, no relay, no URL in settings.
 //! * **Nothing runs when you are not in a party.** One dedicated worker thread blocks on its
-//!   command channel; it only opens a socket after a Create/Join and closes it on Leave.
-//! * **One socket, one thread.** No async runtime, no tokio, no polling loop of the app: the
-//!   socket thread blocks in `read()` with a short timeout so commands still go out promptly.
+//!   command channel while idle; no listener, no socket, no timer.
+//! * **One thread, blocking sockets.** No async runtime and no tokio. While a party is open
+//!   the worker wakes on a 25 ms tick and reads each socket with a 1 ms timeout, so it costs
+//!   a handful of syscalls a second and nothing at all once the party closes.
 //! * **No Roblox credentials on the wire.** Members are identified by public user id, name,
 //!   display name and headshot URL. Launch tickets and `.ROBLOSECURITY` never leave the
-//!   machine: each member's client fetches its own ticket and joins the same job id.
-//! * **Ephemeral.** The relay keeps a room only while someone is connected, and the client
-//!   drops its state on Leave. Rooms carry no history.
+//!   machine: each member's own client joins the same (place id, job id).
+//! * **A party survives a closed port.** When the host cannot be dialled (CGNAT, strict
+//!   router, port mapping refused) members keep the party alive by watching the host's public
+//!   Roblox presence and launch into the server the host enters.
+//! * **Ephemeral.** A room exists only while its members are listening; leaving drops it.
 
-use std::net::TcpStream;
-use std::sync::Once;
+use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use tungstenite::stream::MaybeTlsStream;
+use tungstenite::client::IntoClientRequest;
+use tungstenite::handshake::server::{
+    ErrorResponse, Request as ServerRequest, Response as ServerResponse,
+};
+use tungstenite::http::header::{HeaderName, HeaderValue};
+use tungstenite::http::StatusCode;
+use tungstenite::protocol::frame::coding::CloseCode;
+use tungstenite::protocol::CloseFrame;
 use tungstenite::{Message, WebSocket};
 
 use crate::types::Msg;
 
-/// Point this at your own deployment of `relay/` (see `relay/README.md`). It is only used
-/// when `settings.json` has no `party_relay_url`, so an existing install keeps working.
-pub const DEFAULT_RELAY_URL: &str = "wss://creblox-party.workers.dev/party";
-
-/// The host's room size. The relay enforces the same ceiling.
+/// The host's room size. Friends beyond this are refused rather than silently dropped.
 pub const MAX_PARTY_SIZE: usize = 8;
 
-/// Heartbeat interval while connected. The relay answers `pong`; the read timeout notices a
-/// dead socket within a few seconds of the first missed beat.
-const HEARTBEAT: Duration = Duration::from_secs(20);
-/// How long `read()` blocks before the thread checks its command channel. Only while a party
-/// is open, so an idle CREBLOX never wakes for it.
-const READ_POLL: Duration = Duration::from_millis(400);
+/// Keepalive to every peer. Also how a vanished host is noticed while connected.
+const HEARTBEAT: Duration = Duration::from_secs(15);
+/// Worker wake-up while a party is open. Small enough that a click feels instant, large
+/// enough that an idle party is free.
+const TICK: Duration = Duration::from_millis(25);
+/// One socket read per peer per tick.
+const READ_TIMEOUT: Duration = Duration::from_millis(1);
+/// Dialling a host has to fail fast: a CGNAT host must fall back to presence, not hang.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+/// A peer that connects and then says nothing is dropped after this.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 const BACKOFF_MAX: Duration = Duration::from_secs(16);
+/// Presence fallback poll: one user id, while in a party.
+const PRESENCE_POLL: Duration = Duration::from_secs(4);
+/// How long Create waits for a router to accept a port mapping before falling back to LAN.
+const MAPPING_WAIT: Duration = Duration::from_secs(5);
+
+/// CREBLOX-only handshake: a host refuses anything without these.
+const MAGIC_HEADER: &str = "x-creblox-party";
+const TOKEN_HEADER: &str = "x-creblox-token";
+const MAGIC_VALUE: &str = "1";
 
 /// Whether this client is in a party right now. Read by the UI without touching a lock.
 static IN_PARTY: AtomicBool = AtomicBool::new(false);
@@ -111,11 +134,16 @@ pub struct PartyMember {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PartySnapshot {
+    /// Short room label, e.g. `CRB-8X2K0M`. Safe to read out loud.
     pub code: String,
+    /// The full invite the host shares: endpoint, token and host user id, `CRB-…`. Empty for
+    /// the second or two the host spends asking its router for a port.
+    pub invite: String,
     pub host: u64,
     pub max: usize,
     pub members: Vec<PartyMember>,
-    /// The socket is up right now (false while reconnecting).
+    /// The socket is up right now (false while the direct connection is down and the party is
+    /// running on the presence fallback).
     pub connected: bool,
 }
 
@@ -156,16 +184,276 @@ pub enum PartyEvent {
     Left(String),
 }
 
+// ---------------------------------------------------------------------------------------
+// Invite codes
+// ---------------------------------------------------------------------------------------
+
+const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+/// 22 payload bytes = 176 bits; 62^30 > 2^176, so 30 digits always fit and never overflow.
+const INVITE_DIGITS: usize = 30;
+const INVITE_PREFIX: &str = "CRB-";
+const INVITE_VERSION: u8 = 1;
+
+/// Everything a friend needs to reach this host's party, carried in the invite code: the
+/// public endpoint, the host's Roblox user id (for the presence fallback) and the room token
+/// that authenticates the socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartyInvite {
+    pub address: Ipv4Addr,
+    pub port: u16,
+    pub host_id: u64,
+    pub token: [u8; 6],
+}
+
+impl PartyInvite {
+    fn payload(&self) -> [u8; 22] {
+        let mut out = [0u8; 22];
+        out[0] = INVITE_VERSION;
+        out[1..5].copy_from_slice(&self.address.octets());
+        out[5..7].copy_from_slice(&self.port.to_be_bytes());
+        out[7..15].copy_from_slice(&self.host_id.to_be_bytes());
+        out[15..21].copy_from_slice(&self.token);
+        out[21] = crc8(&out[..21]);
+        out
+    }
+
+    fn from_payload(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 22 || bytes[0] != INVITE_VERSION || crc8(&bytes[..21]) != bytes[21] {
+            return None;
+        }
+        let mut token = [0u8; 6];
+        token.copy_from_slice(&bytes[15..21]);
+        Some(PartyInvite {
+            address: Ipv4Addr::new(bytes[1], bytes[2], bytes[3], bytes[4]),
+            port: u16::from_be_bytes([bytes[5], bytes[6]]),
+            host_id: u64::from_be_bytes([
+                bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+            ]),
+            token,
+        })
+    }
+
+    /// The full, copyable invite.
+    pub fn code(&self) -> String {
+        format!(
+            "{INVITE_PREFIX}{}",
+            base62_encode(&self.payload(), INVITE_DIGITS)
+        )
+    }
+
+    /// Short label for the party pill: derived from the token, so it changes per room.
+    pub fn short_code(&self) -> String {
+        format!("{INVITE_PREFIX}{}", base62_encode(&self.token[..3], 6))
+    }
+
+    pub fn endpoint(&self) -> SocketAddr {
+        SocketAddr::from((self.address, self.port))
+    }
+}
+
+fn crc8(bytes: &[u8]) -> u8 {
+    let mut crc = 0u8;
+    for &byte in bytes {
+        crc ^= byte;
+        for _ in 0..8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ 0x07
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// Base62 of a big-endian byte string, fixed width. The invite is 22 bytes (176 bits), which
+/// does not fit a u128, so the digits are produced by repeated in-place division.
+fn base62_encode(bytes: &[u8], width: usize) -> String {
+    let mut number = bytes.to_vec();
+    let mut out = vec![b'0'; width];
+    for slot in out.iter_mut().rev() {
+        let mut remainder: u32 = 0;
+        for byte in number.iter_mut() {
+            let current = (remainder << 8) | u32::from(*byte);
+            *byte = (current / 62) as u8;
+            remainder = current % 62;
+        }
+        *slot = BASE62[remainder as usize];
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Inverse of [`base62_encode`]. `None` for a non-base62 character or a value too wide for
+/// `width` bytes (which is also how a code that was over-typed past the alphabet is rejected).
+fn base62_decode(text: &str, width: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; width];
+    for byte in text.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'A'..=b'Z' => byte - b'A' + 10,
+            b'a'..=b'z' => byte - b'a' + 36,
+            _ => return None,
+        } as u32;
+        let mut carry = digit;
+        for slot in out.iter_mut().rev() {
+            let current = u32::from(*slot) * 62 + carry;
+            *slot = (current & 0xff) as u8;
+            carry = current >> 8;
+        }
+        if carry != 0 {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Accepts a bare `CRB-…` code, one with stray spaces, `creblox://party/<code>` or a pasted
+/// invite URL. The body is case-sensitive (base62), so it is never upper-cased.
+pub fn parse_invite(raw: &str) -> Option<PartyInvite> {
+    let tail = raw.trim().rsplit('/').next()?.trim();
+    let body = if tail.len() >= 4 && tail[..4].eq_ignore_ascii_case("CRB-") {
+        tail[4..].trim()
+    } else {
+        tail
+    };
+    if body.len() != INVITE_DIGITS {
+        return None;
+    }
+    PartyInvite::from_payload(&base62_decode(body, 22)?)
+}
+
+// ---------------------------------------------------------------------------------------
+// Wire protocol
+// ---------------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(tag = "t", rename_all = "lowercase")]
+enum WireOut {
+    Join {
+        code: String,
+        user: PartyUser,
+        max: usize,
+    },
+    Leave,
+    Status {
+        status: String,
+        place_id: u64,
+        job_id: String,
+    },
+    Launch {
+        place_id: u64,
+        job_id: String,
+        universe_id: u64,
+        game_name: String,
+    },
+    Ping,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "lowercase")]
+enum WireIn {
+    Welcome {
+        code: String,
+        host: u64,
+        max: usize,
+    },
+    Members {
+        host: u64,
+        max: usize,
+        members: Vec<WireMember>,
+    },
+    Launch {
+        place_id: u64,
+        job_id: String,
+        #[serde(default)]
+        universe_id: u64,
+        #[serde(default)]
+        game_name: String,
+        #[serde(default)]
+        by: u64,
+    },
+    Error {
+        message: String,
+    },
+    Pong,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WireMember {
+    user: PartyUser,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    place_id: u64,
+    #[serde(default)]
+    job_id: String,
+}
+
+impl WireMember {
+    fn into_member(self) -> PartyMember {
+        PartyMember {
+            status: PartyStatus::from_wire(&self.status),
+            user: self.user,
+            place_id: self.place_id,
+            job_id: self.job_id,
+        }
+    }
+}
+
+/// A member's first frame, and every later frame it sends the host.
+#[derive(Deserialize)]
+#[serde(tag = "t", rename_all = "lowercase")]
+enum PeerFrame {
+    Join {
+        #[serde(default)]
+        user: Option<PartyUser>,
+    },
+    Status {
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        place_id: u64,
+        #[serde(default)]
+        job_id: String,
+    },
+    Launch {
+        #[serde(default)]
+        place_id: u64,
+        #[serde(default)]
+        job_id: String,
+        #[serde(default)]
+        universe_id: u64,
+        #[serde(default)]
+        game_name: String,
+    },
+    Kick {
+        #[serde(default)]
+        user_id: u64,
+    },
+    Promote {
+        #[serde(default)]
+        user_id: u64,
+    },
+    Leave,
+    Ping,
+    #[serde(other)]
+    Other,
+}
+
+// ---------------------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------------------
+
 enum Command {
     Create {
         me: PartyUser,
         max: usize,
-        url: String,
+        cookie: Option<String>,
     },
     Join {
-        code: String,
+        invite: PartyInvite,
         me: PartyUser,
-        url: String,
+        cookie: Option<String>,
     },
     Leave,
     Kick(u64),
@@ -193,12 +481,14 @@ impl PartyHandle {
         Self { tx: cmd_tx }
     }
 
-    pub fn create(&self, me: PartyUser, max: usize, url: String) {
-        let _ = self.tx.send(Command::Create { me, max, url });
+    /// `cookie` is the signed-in session the presence fallback borrows; it stays inside this
+    /// process and is never sent to another member.
+    pub fn create(&self, me: PartyUser, max: usize, cookie: Option<String>) {
+        let _ = self.tx.send(Command::Create { me, max, cookie });
     }
 
-    pub fn join(&self, code: String, me: PartyUser, url: String) {
-        let _ = self.tx.send(Command::Join { code, me, url });
+    pub fn join(&self, invite: PartyInvite, me: PartyUser, cookie: Option<String>) {
+        let _ = self.tx.send(Command::Join { invite, me, cookie });
     }
 
     pub fn leave(&self) {
@@ -232,453 +522,921 @@ impl Drop for PartyHandle {
     }
 }
 
-/// Accepts `CRB-8X2K`, `8x2k`, `creblox://party/CRB-8X2K` or a pasted invite URL.
-pub fn parse_invite(raw: &str) -> Option<String> {
-    let tail = raw.trim().rsplit('/').next()?.trim();
-    if tail.is_empty() {
-        return None;
-    }
-    let upper = tail.to_ascii_uppercase();
-    let body = upper.strip_prefix("CRB-").unwrap_or(&upper);
-    let code: String = body.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if !(4..=8).contains(&code.len()) {
-        return None;
-    }
-    Some(format!("CRB-{code}"))
-}
+// ---------------------------------------------------------------------------------------
+// Worker state
+// ---------------------------------------------------------------------------------------
 
-/// Resolve the relay endpoint: the setting when set, otherwise the built-in default.
-pub fn relay_url(configured: &str) -> String {
-    let trimmed = configured.trim();
-    if trimmed.is_empty() {
-        DEFAULT_RELAY_URL.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "t", rename_all = "lowercase")]
-enum WireOut {
-    Create {
-        user: PartyUser,
-        max: usize,
-    },
-    Join {
-        code: String,
-        user: PartyUser,
-        max: usize,
-    },
-    Leave,
-    Kick {
-        user_id: u64,
-    },
-    Promote {
-        user_id: u64,
-    },
-    Status {
-        status: String,
-        place_id: u64,
-        job_id: String,
-    },
-    Launch {
-        place_id: u64,
-        job_id: String,
-        universe_id: u64,
-        game_name: String,
-    },
-    Ping,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "t")]
-enum WireIn {
-    #[serde(rename = "welcome")]
-    Welcome { code: String, host: u64, max: usize },
-    #[serde(rename = "members")]
-    Members {
-        host: u64,
-        max: usize,
-        members: Vec<WireMember>,
-    },
-    #[serde(rename = "launch")]
-    Launch {
-        place_id: u64,
-        job_id: String,
-        #[serde(default)]
-        universe_id: u64,
-        #[serde(default)]
-        game_name: String,
-        #[serde(default)]
-        by: u64,
-    },
-    #[serde(rename = "error")]
-    Error { message: String },
-    #[serde(rename = "pong")]
-    Pong,
-}
-
-#[derive(Deserialize)]
-struct WireMember {
-    user: PartyUser,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    place_id: u64,
-    #[serde(default)]
-    job_id: String,
-}
-
-impl WireMember {
-    fn into_member(self) -> PartyMember {
-        PartyMember {
-            status: PartyStatus::from_wire(&self.status),
-            user: self.user,
-            place_id: self.place_id,
-            job_id: self.job_id,
-        }
-    }
-}
-
-/// What the worker wants to be connected to. Kept while reconnecting, cleared on Leave.
-struct Session {
-    url: String,
-    /// `None` until the relay has answered `welcome` for a newly created room.
-    code: Option<String>,
+/// The local member: who we are, what we are playing, and the cookie the presence fallback
+/// borrows. The cookie never leaves this process.
+struct Local {
     me: PartyUser,
-    max: usize,
     status: PartyStatus,
     place_id: u64,
     job_id: String,
+    cookie: Option<String>,
 }
 
-impl Session {
-    fn endpoint(&self) -> String {
-        match &self.code {
-            None => join_url(&self.url, "create=1"),
-            Some(code) => join_url(&self.url, &format!("code={code}")),
-        }
+struct Peer {
+    user: PartyUser,
+    ws: WebSocket<TcpStream>,
+    status: PartyStatus,
+    place_id: u64,
+    job_id: String,
+    dead: bool,
+}
+
+enum Role {
+    Idle,
+    Host(Box<Host>),
+    Guest(Box<Guest>),
+}
+
+struct Host {
+    listener: TcpListener,
+    invite: PartyInvite,
+    max: usize,
+    peers: Vec<Peer>,
+    handshake_tx: Sender<Result<(PartyUser, WebSocket<TcpStream>), String>>,
+    handshake_rx: Receiver<Result<(PartyUser, WebSocket<TcpStream>), String>>,
+    mapping: Option<Receiver<Option<Ipv4Addr>>>,
+    mapping_deadline: Instant,
+    mapping_done: bool,
+    last_heartbeat: Instant,
+    announce: bool,
+    force_snapshot: bool,
+}
+
+struct Guest {
+    invite: PartyInvite,
+    ws: Option<WebSocket<TcpStream>>,
+    /// Who to follow. Starts as the invite's host and moves when the host promotes somebody.
+    host: u64,
+    max: usize,
+    code: String,
+    attempts: u32,
+    retry_at: Option<Instant>,
+    ever_connected: bool,
+    presence_at: Instant,
+    last_followed: Option<(u64, String)>,
+    last_ping: Instant,
+    degraded: bool,
+}
+
+struct Out {
+    tx: Sender<Msg>,
+    ctx: egui::Context,
+}
+
+impl Out {
+    fn emit(&self, event: PartyEvent) {
+        let _ = self.tx.send(Msg::Party(event));
+        self.ctx.request_repaint();
     }
 }
 
-fn join_url(base: &str, query: &str) -> String {
-    let sep = if base.contains('?') { '&' } else { '?' };
-    format!("{}{}{}", base.trim_end_matches('?'), sep, query)
-}
+// ---------------------------------------------------------------------------------------
+// Worker
+// ---------------------------------------------------------------------------------------
 
-/// Single blocking thread that owns the socket. It sleeps on the command channel while not
-/// in a party, so an idle launcher spends nothing on this feature.
 fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
-    let mut session: Option<Session> = None;
-    let mut socket: Option<WebSocket<MaybeTlsStream<TcpStream>>> = None;
-    let mut retry_at: Option<Instant> = None;
-    let mut attempts: u32 = 0;
-    let mut last_ping = Instant::now();
-    let mut known_code: Option<String> = None;
-    let mut connected = false;
-
-    let emit = |event: PartyEvent| {
-        let _ = tx.send(Msg::Party(event));
-        ctx.request_repaint();
-    };
+    let out = Out { tx, ctx };
+    let mut role = Role::Idle;
+    let mut local: Option<Local> = None;
 
     loop {
-        // --- 1. Take a command. Without a session this blocks forever (no polling at all);
-        //        with one it is a non-blocking drain before reading the socket.
-        let command = if socket.is_some() {
-            match rx.try_recv() {
+        // Idle blocks here forever: no timer, no socket, no wake-up at all.
+        let command = match &role {
+            Role::Idle => match rx.recv() {
                 Ok(cmd) => Some(cmd),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        } else if let Some(at) = retry_at {
-            let wait = at.saturating_duration_since(Instant::now());
-            match rx.recv_timeout(wait.max(Duration::from_millis(1))) {
+                Err(_) => break,
+            },
+            _ => match rx.recv_timeout(TICK) {
                 Ok(cmd) => Some(cmd),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            match rx.recv() {
-                Ok(cmd) => Some(cmd),
-                Err(_) => break,
-            }
+            },
         };
 
         if let Some(cmd) = command {
             match cmd {
                 Command::Shutdown => {
-                    if let Some(ws) = socket.as_mut() {
-                        let _ = ws.close(None);
-                    }
-                    let _ = send(&mut socket, WireOut::Leave);
+                    shutdown(&mut role, &mut local);
                     break;
                 }
-                Command::Create { me, max, url } => {
-                    if let Some(ws) = socket.as_mut() {
-                        let _ = ws.close(None);
+                Command::Create { me, max, cookie } => {
+                    shutdown(&mut role, &mut local);
+                    match open_host(me.clone(), max, &out) {
+                        Ok(host) => {
+                            let short = host.invite.short_code();
+                            local = Some(Local {
+                                me,
+                                status: PartyStatus::Ready,
+                                place_id: 0,
+                                job_id: String::new(),
+                                cookie,
+                            });
+                            role = Role::Host(Box::new(host));
+                            IN_PARTY.store(true, Ordering::Relaxed);
+                            if let Role::Host(host) = &role {
+                                out.emit(PartyEvent::Snapshot(host_snapshot(host, local.as_ref())));
+                            }
+                            out.emit(PartyEvent::Notice(format!(
+                                "Party open ({short}) - copy the invite from the party bar"
+                            )));
+                        }
+                        Err(e) => {
+                            IN_PARTY.store(false, Ordering::Relaxed);
+                            out.emit(PartyEvent::Left(format!(
+                                "Could not open a party on this machine: {e}"
+                            )));
+                        }
                     }
-                    socket = None;
-                    known_code = None;
-                    connected = false;
-                    attempts = 0;
-                    retry_at = Some(Instant::now());
-                    session = Some(Session {
-                        url,
-                        code: None,
-                        me,
-                        max,
-                        status: PartyStatus::Ready,
-                        place_id: 0,
-                        job_id: String::new(),
-                    });
                 }
-                Command::Join { code, me, url } => {
-                    if let Some(ws) = socket.as_mut() {
-                        let _ = ws.close(None);
-                    }
-                    socket = None;
-                    known_code = Some(code.clone());
-                    connected = false;
-                    attempts = 0;
-                    retry_at = Some(Instant::now());
-                    session = Some(Session {
-                        url,
-                        code: Some(code),
-                        me,
+                Command::Join { invite, me, cookie } => {
+                    shutdown(&mut role, &mut local);
+                    let guest = Guest {
+                        invite,
+                        ws: None,
+                        host: invite.host_id,
                         max: MAX_PARTY_SIZE,
+                        code: invite.short_code(),
+                        attempts: 0,
+                        retry_at: Some(Instant::now()),
+                        ever_connected: false,
+                        presence_at: Instant::now() + PRESENCE_POLL,
+                        last_followed: None,
+                        last_ping: Instant::now(),
+                        degraded: false,
+                    };
+                    local = Some(Local {
+                        me,
                         status: PartyStatus::Ready,
                         place_id: 0,
                         job_id: String::new(),
+                        cookie,
                     });
+                    out.emit(PartyEvent::Snapshot(guest_snapshot(&guest, local.as_ref())));
+                    role = Role::Guest(Box::new(guest));
+                    IN_PARTY.store(true, Ordering::Relaxed);
                 }
                 Command::Leave => {
-                    let _ = send(&mut socket, WireOut::Leave);
-                    if let Some(ws) = socket.as_mut() {
-                        let _ = ws.close(None);
-                    }
-                    socket = None;
-                    session = None;
-                    known_code = None;
-                    connected = false;
-                    retry_at = None;
+                    shutdown(&mut role, &mut local);
                     IN_PARTY.store(false, Ordering::Relaxed);
-                    emit(PartyEvent::Left("Left the party".to_string()));
+                    out.emit(PartyEvent::Left("Left the party".to_string()));
                 }
                 Command::Kick(user_id) => {
-                    let _ = send(&mut socket, WireOut::Kick { user_id });
+                    if let Role::Host(host) = &mut role {
+                        kick(host, user_id, &out);
+                    }
                 }
                 Command::Promote(user_id) => {
-                    let _ = send(&mut socket, WireOut::Promote { user_id });
+                    if let Role::Host(host) = &mut role {
+                        promote(host, user_id, &out);
+                    }
                 }
                 Command::Status {
                     status,
                     place_id,
                     job_id,
                 } => {
-                    if let Some(s) = session.as_mut() {
-                        s.status = status;
-                        s.place_id = place_id;
-                        s.job_id = job_id.clone();
+                    if let Some(local) = local.as_mut() {
+                        local.status = status;
+                        local.place_id = place_id;
+                        local.job_id = job_id.clone();
                     }
-                    let _ = send(
-                        &mut socket,
-                        WireOut::Status {
-                            status: status.wire().to_string(),
-                            place_id,
-                            job_id,
-                        },
-                    );
-                }
-                Command::Launch(launch) => {
-                    let _ = send(
-                        &mut socket,
-                        WireOut::Launch {
-                            place_id: launch.place_id,
-                            job_id: launch.job_id,
-                            universe_id: launch.universe_id,
-                            game_name: launch.game_name,
-                        },
-                    );
-                }
-            }
-        }
-
-        // --- 2. Connect when a session wants a socket and the backoff has elapsed.
-        if socket.is_none() {
-            let Some(want) = session.as_ref() else {
-                continue;
-            };
-            if let Some(at) = retry_at {
-                if Instant::now() < at {
-                    continue;
-                }
-            }
-            match connect(&want.endpoint()) {
-                Ok(mut ws) => {
-                    attempts = 0;
-                    retry_at = None;
-                    last_ping = Instant::now();
-                    set_read_timeout(&mut ws, Some(READ_POLL));
-                    // First frame identifies us: a room we allocated (`create`) or one we
-                    // are rejoining with the code we already know (`join`).
-                    let hello = match &known_code {
-                        None => WireOut::Create {
-                            user: want.me.clone(),
-                            max: want.max,
-                        },
-                        Some(code) => WireOut::Join {
-                            code: code.clone(),
-                            user: want.me.clone(),
-                            max: want.max,
-                        },
-                    };
-                    let _ = write(&mut ws, &hello);
-                    socket = Some(ws);
-                }
-                Err(e) => {
-                    attempts = attempts.saturating_add(1);
-                    let backoff = backoff(attempts);
-                    retry_at = Some(Instant::now() + backoff);
-                    if attempts == 1 {
-                        emit(PartyEvent::Notice(format!(
-                            "Party relay unreachable ({e}); retrying"
-                        )));
-                    }
-                }
-            }
-            continue;
-        }
-
-        // --- 3. Read. A short timeout keeps commands responsive; a dead socket is noticed
-        //        by the heartbeat, not by a busy loop.
-        let Some(ws) = socket.as_mut() else {
-            continue;
-        };
-        if last_ping.elapsed() >= HEARTBEAT {
-            last_ping = Instant::now();
-            let _ = write(ws, &WireOut::Ping);
-        }
-        match ws.read() {
-            Ok(Message::Text(text)) => {
-                if let Ok(frame) = serde_json::from_str::<WireIn>(&text) {
-                    match frame {
-                        WireIn::Welcome { code, host, max } => {
-                            known_code = Some(code.clone());
-                            connected = true;
-                            IN_PARTY.store(true, Ordering::Relaxed);
-                            if let Some(s) = session.as_mut() {
-                                s.code = Some(code.clone());
-                                s.max = max;
-                            }
-                            emit(PartyEvent::Snapshot(PartySnapshot {
-                                code,
-                                host,
-                                max,
-                                members: Vec::new(),
-                                connected: true,
-                            }));
-                            // Announce the state we already have, so a reconnect does not
-                            // leave the others looking at a stale "Launching" dot.
-                            if let Some(s) = session.as_ref() {
+                    match &mut role {
+                        Role::Host(host) => {
+                            host.announce = true;
+                        }
+                        Role::Guest(guest) => {
+                            if let Some(ws) = guest.ws.as_mut() {
                                 let _ = write(
                                     ws,
                                     &WireOut::Status {
-                                        status: s.status.wire().to_string(),
-                                        place_id: s.place_id,
-                                        job_id: s.job_id.clone(),
+                                        status: status.wire().to_string(),
+                                        place_id,
+                                        job_id,
                                     },
                                 );
                             }
                         }
-                        WireIn::Members { host, max, members } => {
-                            connected = true;
-                            emit(PartyEvent::Snapshot(PartySnapshot {
-                                code: known_code.clone().unwrap_or_default(),
-                                host,
-                                max,
-                                members: members.into_iter().map(WireMember::into_member).collect(),
-                                connected: true,
-                            }));
-                        }
-                        WireIn::Launch {
-                            place_id,
-                            job_id,
-                            universe_id,
-                            game_name,
-                            by,
-                        } => emit(PartyEvent::Launch(PartyLaunch {
-                            place_id,
-                            job_id,
-                            universe_id,
-                            game_name,
-                            by,
-                        })),
-                        WireIn::Error { message } => {
-                            // "full" / "no such party" are terminal: retrying would loop.
-                            let fatal = message.contains("full")
-                                || message.contains("No such")
-                                || message.contains("required");
-                            if fatal {
-                                session = None;
-                                known_code = None;
-                                connected = false;
-                                IN_PARTY.store(false, Ordering::Relaxed);
-                                let _ = ws.close(None);
-                                socket = None;
-                                emit(PartyEvent::Left(message));
-                            } else {
-                                emit(PartyEvent::Notice(message));
-                            }
-                        }
-                        WireIn::Pong => {}
+                        Role::Idle => {}
                     }
                 }
+                Command::Launch(launch) => match &mut role {
+                    Role::Host(host) => {
+                        if let Some(local) = local.as_mut() {
+                            local.status = PartyStatus::Launching;
+                            local.place_id = launch.place_id;
+                            local.job_id = launch.job_id.clone();
+                        }
+                        let frame = WireIn::Launch {
+                            place_id: launch.place_id,
+                            job_id: launch.job_id,
+                            universe_id: launch.universe_id,
+                            game_name: launch.game_name,
+                            by: host.invite.host_id,
+                        };
+                        broadcast(host, &frame);
+                        host.force_snapshot = true;
+                        host.announce = true;
+                    }
+                    Role::Guest(guest) => {
+                        if let Some(ws) = guest.ws.as_mut() {
+                            let _ = write(
+                                ws,
+                                &WireOut::Launch {
+                                    place_id: launch.place_id,
+                                    job_id: launch.job_id,
+                                    universe_id: launch.universe_id,
+                                    game_name: launch.game_name,
+                                },
+                            );
+                        }
+                    }
+                    Role::Idle => {}
+                },
             }
-            Ok(Message::Close(frame)) => {
-                // 4001 is the relay saying "you were removed". Reconnecting would walk
-                // straight back in: without accounts, a kicked member's next connection
-                // looks exactly like a legitimate rejoin, so the party would silently
-                // un-kick them a second after the host removed them.
-                let removed = frame
-                    .as_ref()
-                    .map(|f| u16::from(f.code) == 4001)
-                    .unwrap_or(false);
-                socket = None;
-                connected = false;
-                if removed {
-                    session = None;
-                    known_code = None;
-                    retry_at = None;
-                    IN_PARTY.store(false, Ordering::Relaxed);
-                    emit(PartyEvent::Left("Removed from the party".to_string()));
-                } else {
-                    attempts = attempts.saturating_add(1);
-                    retry_at = Some(Instant::now() + backoff(attempts));
-                    if session.is_none() {
-                        IN_PARTY.store(false, Ordering::Relaxed);
+        }
+
+        // Take the role out so the tick helpers can borrow the local member and the output.
+        let mut current = std::mem::replace(&mut role, Role::Idle);
+        match &mut current {
+            Role::Idle => {}
+            Role::Host(host) => host_tick(host, local.as_ref(), &out),
+            Role::Guest(guest) => guest_tick(guest, local.as_ref(), &out),
+        }
+        role = current;
+    }
+
+    shutdown(&mut role, &mut local);
+    IN_PARTY.store(false, Ordering::Relaxed);
+}
+
+fn shutdown(role: &mut Role, local: &mut Option<Local>) {
+    match std::mem::replace(role, Role::Idle) {
+        Role::Idle => {}
+        Role::Host(host) => {
+            for mut peer in host.peers {
+                let _ = peer.ws.send(Message::Text(
+                    r#"{"t":"error","message":"The host left the party"}"#.into(),
+                ));
+                let _ = peer.ws.close(None);
+            }
+            close_port_mapping(host.invite.port);
+        }
+        Role::Guest(mut guest) => {
+            if let Some(ws) = guest.ws.as_mut() {
+                let _ = write(ws, &WireOut::Leave);
+                let _ = ws.close(None);
+            }
+        }
+    }
+    *local = None;
+}
+
+// ---------------------------------------------------------------------------------------
+// Host
+// ---------------------------------------------------------------------------------------
+
+fn open_host(me: PartyUser, max: usize, out: &Out) -> Result<Host, String> {
+    let listener = TcpListener::bind(("0.0.0.0", 0)).map_err(|e| format!("no free port: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("listener: {e}"))?;
+
+    let invite = PartyInvite {
+        address: local_ipv4(),
+        port,
+        host_id: me.id,
+        token: random_token(),
+    };
+
+    let (handshake_tx, handshake_rx) = mpsc::channel();
+    let (map_tx, map_rx) = mpsc::channel();
+    let local_ip = local_ipv4();
+    std::thread::Builder::new()
+        .name("creblox-party-map".to_string())
+        .spawn(move || {
+            let _ = map_tx.send(map_port(port, local_ip));
+        })
+        .map_err(|e| format!("no thread for port mapping: {e}"))?;
+
+    out.emit(PartyEvent::Notice(
+        "Asking your router for a port so friends can join directly...".to_string(),
+    ));
+
+    Ok(Host {
+        listener,
+        invite,
+        max,
+        peers: Vec::new(),
+        handshake_tx,
+        handshake_rx,
+        mapping: Some(map_rx),
+        mapping_deadline: Instant::now() + MAPPING_WAIT,
+        mapping_done: false,
+        last_heartbeat: Instant::now(),
+        announce: true,
+        force_snapshot: true,
+    })
+}
+
+fn host_tick(host: &mut Host, local: Option<&Local>, out: &Out) {
+    accept_peers(host);
+    drain_handshakes(host, out);
+    read_peers(host, out);
+    resolve_mapping(host, out);
+
+    if host.announce || host.force_snapshot {
+        host.announce = false;
+        host.force_snapshot = false;
+        announce(host, local);
+        out.emit(PartyEvent::Snapshot(host_snapshot(host, local)));
+    }
+
+    if host.last_heartbeat.elapsed() >= HEARTBEAT {
+        host.last_heartbeat = Instant::now();
+        host.peers
+            .retain_mut(|peer| !peer.dead && write(&mut peer.ws, &WireOut::Ping));
+    }
+}
+
+fn accept_peers(host: &mut Host) {
+    loop {
+        match host.listener.accept() {
+            Ok((stream, _addr)) => {
+                let token = host.invite.token;
+                let tx = host.handshake_tx.clone();
+                let _ = std::thread::Builder::new()
+                    .name("creblox-party-join".to_string())
+                    .spawn(move || {
+                        let _ = tx.send(accept_one(stream, token));
+                    });
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+}
+
+/// Runs on its own thread: one slow or hostile handshake can never stall the party.
+fn accept_one(
+    stream: TcpStream,
+    token: [u8; 6],
+) -> Result<(PartyUser, WebSocket<TcpStream>), String> {
+    stream
+        .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    let _ = stream.set_nodelay(true);
+    let expected = hex(&token);
+    let callback =
+        move |req: &ServerRequest, resp: ServerResponse| -> Result<ServerResponse, ErrorResponse> {
+            let magic_ok = req
+                .headers()
+                .get(MAGIC_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == MAGIC_VALUE)
+                .unwrap_or(false);
+            let token_ok = req
+                .headers()
+                .get(TOKEN_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == expected)
+                .unwrap_or(false);
+            if magic_ok && token_ok {
+                Ok(resp)
+            } else {
+                Err(tungstenite::http::Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(Some("CREBLOX party: bad room token".to_string()))
+                    .expect("a static response"))
+            }
+        };
+    let mut ws = tungstenite::accept_hdr(stream, callback).map_err(|e| e.to_string())?;
+    set_read_timeout(&mut ws);
+    // The first frame identifies the member; anything else is not a CREBLOX client.
+    match ws.read() {
+        Ok(Message::Text(text)) => match serde_json::from_str::<PeerFrame>(&text) {
+            Ok(PeerFrame::Join {
+                user: Some(user), ..
+            }) => Ok((user, ws)),
+            _ => Err("unexpected first frame".to_string()),
+        },
+        _ => Err("no hello".to_string()),
+    }
+}
+
+fn drain_handshakes(host: &mut Host, out: &Out) {
+    loop {
+        match host.handshake_rx.try_recv() {
+            Ok(Ok((user, ws))) => {
+                if host.max.saturating_sub(host.peers.len() + 1) == 0 {
+                    let mut ws = ws;
+                    let _ = write(
+                        &mut ws,
+                        &WireIn::Error {
+                            message: "Party is full".to_string(),
+                        },
+                    );
+                    let _ = ws.close(None);
+                    continue;
+                }
+                // A member who reconnects replaces their stale socket instead of doubling up.
+                host.peers.retain_mut(|peer| {
+                    if peer.user.id == user.id {
+                        let _ = peer.ws.close(None);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                host.peers.push(Peer {
+                    user,
+                    ws,
+                    status: PartyStatus::Ready,
+                    place_id: 0,
+                    job_id: String::new(),
+                    dead: false,
+                });
+                host.announce = true;
+                out.emit(PartyEvent::Notice("Someone joined the party".to_string()));
+            }
+            Ok(Err(_)) => {}
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn read_peers(host: &mut Host, out: &Out) {
+    let mut inbox: Vec<(usize, PeerFrame)> = Vec::new();
+    for (index, peer) in host.peers.iter_mut().enumerate() {
+        loop {
+            match peer.ws.read() {
+                Ok(Message::Text(text)) => {
+                    if let Ok(frame) = serde_json::from_str::<PeerFrame>(&text) {
+                        inbox.push((index, frame));
                     }
                 }
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e))
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => {
-                socket = None;
-                if connected {
-                    connected = false;
-                    emit(PartyEvent::Notice(format!(
-                        "Party connection lost ({e}); reconnecting"
-                    )));
+                Ok(Message::Close(_)) => {
+                    peer.dead = true;
+                    break;
                 }
-                attempts = attempts.saturating_add(1);
-                retry_at = Some(Instant::now() + backoff(attempts));
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if is_idle(&e) => break,
+                Err(_) => {
+                    peer.dead = true;
+                    break;
+                }
             }
         }
     }
 
-    IN_PARTY.store(false, Ordering::Relaxed);
+    let host_id = host.invite.host_id;
+    let mut launches: Vec<PartyLaunch> = Vec::new();
+    let mut kicks: Vec<u64> = Vec::new();
+    let mut promotes: Vec<u64> = Vec::new();
+    let mut refuse: Vec<usize> = Vec::new();
+    let mut pong: Vec<usize> = Vec::new();
+
+    for (index, frame) in inbox {
+        let Some(peer) = host.peers.get_mut(index) else {
+            continue;
+        };
+        if peer.dead {
+            continue;
+        }
+        match frame {
+            PeerFrame::Status {
+                status,
+                place_id,
+                job_id,
+            } => {
+                peer.status = PartyStatus::from_wire(&status);
+                peer.place_id = place_id;
+                peer.job_id = job_id;
+                host.announce = true;
+            }
+            PeerFrame::Launch {
+                place_id,
+                job_id,
+                universe_id,
+                game_name,
+            } => {
+                if peer.user.id != host_id {
+                    refuse.push(index);
+                } else {
+                    launches.push(PartyLaunch {
+                        place_id,
+                        job_id,
+                        universe_id,
+                        game_name,
+                        by: host_id,
+                    });
+                }
+            }
+            PeerFrame::Kick { user_id } => {
+                if peer.user.id == host_id {
+                    kicks.push(user_id);
+                } else {
+                    refuse.push(index);
+                }
+            }
+            PeerFrame::Promote { user_id } => {
+                if peer.user.id == host_id {
+                    promotes.push(user_id);
+                } else {
+                    refuse.push(index);
+                }
+            }
+            PeerFrame::Ping => pong.push(index),
+            PeerFrame::Leave => {
+                peer.dead = true;
+                host.announce = true;
+            }
+            PeerFrame::Join { .. } | PeerFrame::Other => {}
+        }
+    }
+
+    for index in pong {
+        if let Some(peer) = host.peers.get_mut(index) {
+            let _ = write(&mut peer.ws, &WireIn::Pong);
+        }
+    }
+    for index in refuse {
+        if let Some(peer) = host.peers.get_mut(index) {
+            let _ = write(
+                &mut peer.ws,
+                &WireIn::Error {
+                    message: "Only the host can do that".to_string(),
+                },
+            );
+        }
+    }
+    for launch in launches {
+        // This process may be hosting for a host who was promoted after the party opened:
+        // the launch then belongs to somebody else, so relay it *and* follow it here.
+        broadcast(
+            host,
+            &WireIn::Launch {
+                place_id: launch.place_id,
+                job_id: launch.job_id.clone(),
+                universe_id: launch.universe_id,
+                game_name: launch.game_name.clone(),
+                by: launch.by,
+            },
+        );
+        out.emit(PartyEvent::Launch(launch));
+    }
+    for user_id in kicks {
+        kick(host, user_id, out);
+    }
+    for user_id in promotes {
+        promote(host, user_id, out);
+    }
+
+    host.peers.retain(|peer| !peer.dead);
+}
+
+fn kick(host: &mut Host, user_id: u64, out: &Out) {
+    if user_id == host.invite.host_id {
+        out.emit(PartyEvent::Notice("The host cannot be removed".to_string()));
+        return;
+    }
+    if let Some(peer) = host.peers.iter_mut().find(|p| p.user.id == user_id) {
+        let _ = peer.ws.close(Some(CloseFrame {
+            code: CloseCode::from(4001u16),
+            reason: "Removed from the party".into(),
+        }));
+    }
+    host.peers.retain(|p| p.user.id != user_id);
+    host.announce = true;
+}
+
+fn promote(host: &mut Host, user_id: u64, out: &Out) {
+    let known = host.peers.iter().any(|p| p.user.id == user_id) || user_id == host.invite.host_id;
+    if !known {
+        out.emit(PartyEvent::Notice("That member already left".to_string()));
+        return;
+    }
+    host.invite.host_id = user_id;
+    host.announce = true;
+    host.force_snapshot = true;
+    out.emit(PartyEvent::Notice("The party has a new host".to_string()));
+}
+
+fn announce(host: &mut Host, local: Option<&Local>) {
+    let members: Vec<WireMember> = local
+        .map(|l| WireMember {
+            user: l.me.clone(),
+            status: l.status.wire().to_string(),
+            place_id: l.place_id,
+            job_id: l.job_id.clone(),
+        })
+        .into_iter()
+        .chain(host.peers.iter().map(|p| WireMember {
+            user: p.user.clone(),
+            status: p.status.wire().to_string(),
+            place_id: p.place_id,
+            job_id: p.job_id.clone(),
+        }))
+        .collect();
+    broadcast(
+        host,
+        &WireIn::Members {
+            host: host.invite.host_id,
+            max: host.max,
+            members,
+        },
+    );
+}
+
+fn broadcast(host: &mut Host, frame: &WireIn) {
+    let Ok(text) = serde_json::to_string(frame) else {
+        return;
+    };
+    host.peers
+        .retain_mut(|peer| !peer.dead && peer.ws.send(Message::Text(text.clone().into())).is_ok());
+}
+
+fn resolve_mapping(host: &mut Host, out: &Out) {
+    if host.mapping_done {
+        return;
+    }
+    let resolved = match host.mapping.as_ref().map(|rx| rx.try_recv()) {
+        Some(Ok(Some(external))) => Some(Some(external)),
+        Some(Ok(None)) => Some(None),
+        Some(Err(TryRecvError::Empty)) => {
+            if Instant::now() >= host.mapping_deadline {
+                Some(None)
+            } else {
+                None
+            }
+        }
+        _ => Some(None),
+    };
+    let Some(resolved) = resolved else {
+        return;
+    };
+    host.mapping_done = true;
+    host.mapping = None;
+    host.force_snapshot = true;
+    match resolved {
+        Some(external) => {
+            host.invite.address = external;
+            out.emit(PartyEvent::Notice(
+                "Party is reachable over the internet - share the invite".to_string(),
+            ));
+        }
+        None => out.emit(PartyEvent::Notice(
+            "No port forwarding on this network - friends will follow your game instead"
+                .to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Guest
+// ---------------------------------------------------------------------------------------
+
+fn guest_tick(guest: &mut Guest, local: Option<&Local>, out: &Out) {
+    if guest.ws.is_none() {
+        let due = guest
+            .retry_at
+            .map(|at| Instant::now() >= at)
+            .unwrap_or(true);
+        if due {
+            let me = local.map(|l| l.me.clone()).unwrap_or_default();
+            match dial(&guest.invite) {
+                Ok(mut ws) => {
+                    guest.attempts = 0;
+                    guest.ever_connected = true;
+                    guest.retry_at = None;
+                    guest.last_ping = Instant::now();
+                    guest.degraded = false;
+                    let hello = WireOut::Join {
+                        code: guest.code.clone(),
+                        user: me,
+                        max: guest.max,
+                    };
+                    let _ = write(&mut ws, &hello);
+                    guest.ws = Some(ws);
+                }
+                Err(e) => {
+                    guest.attempts = guest.attempts.saturating_add(1);
+                    guest.retry_at = Some(Instant::now() + backoff(guest.attempts));
+                    if !guest.degraded {
+                        guest.degraded = true;
+                        out.emit(PartyEvent::Notice(format!(
+                            "Direct connection to the host did not open ({e}); following their \
+                             Roblox presence instead"
+                        )));
+                        out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local)));
+                    }
+                }
+            }
+        }
+    }
+
+    read_guest(guest, local, out);
+    poll_presence(guest, local, out);
+
+    if guest.last_ping.elapsed() >= HEARTBEAT {
+        guest.last_ping = Instant::now();
+        let lost = match guest.ws.as_mut() {
+            Some(ws) => !write(ws, &WireOut::Ping),
+            None => false,
+        };
+        if lost {
+            guest.ws = None;
+            guest.attempts = guest.attempts.saturating_add(1);
+            guest.retry_at = Some(Instant::now() + backoff(guest.attempts));
+        }
+    }
+}
+
+fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
+    let mut frames: Vec<WireIn> = Vec::new();
+    let mut closed = false;
+    {
+        let Some(ws) = guest.ws.as_mut() else {
+            return;
+        };
+        loop {
+            match ws.read() {
+                Ok(Message::Text(text)) => {
+                    if let Ok(frame) = serde_json::from_str::<WireIn>(&text) {
+                        frames.push(frame);
+                    }
+                }
+                Ok(Message::Close(frame)) => {
+                    // 4001 is the host saying "you were removed". Reconnecting would walk
+                    // straight back in, so a kicked member stays kicked.
+                    closed = true;
+                    if frame
+                        .as_ref()
+                        .map(|f| u16::from(f.code) == 4001)
+                        .unwrap_or(false)
+                    {
+                        guest.ws = None;
+                        guest.retry_at = None;
+                        IN_PARTY.store(false, Ordering::Relaxed);
+                        out.emit(PartyEvent::Left("Removed from the party".to_string()));
+                        return;
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if is_idle(&e) => break,
+                Err(_) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    for frame in frames {
+        match frame {
+            WireIn::Welcome { code, host, max } => {
+                guest.code = code;
+                guest.host = host;
+                guest.max = max;
+                guest.ever_connected = true;
+                IN_PARTY.store(true, Ordering::Relaxed);
+                out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local)));
+                // Announce the state we already have, so a reconnect does not leave the
+                // other members looking at a stale dot.
+                if let (Some(local), Some(ws)) = (local, guest.ws.as_mut()) {
+                    let _ = write(
+                        ws,
+                        &WireOut::Status {
+                            status: local.status.wire().to_string(),
+                            place_id: local.place_id,
+                            job_id: local.job_id.clone(),
+                        },
+                    );
+                }
+            }
+            WireIn::Members { host, max, members } => {
+                guest.host = host;
+                guest.max = max;
+                out.emit(PartyEvent::Snapshot(PartySnapshot {
+                    code: guest.code.clone(),
+                    invite: guest.invite.code(),
+                    host,
+                    max,
+                    members: members.into_iter().map(WireMember::into_member).collect(),
+                    connected: true,
+                }));
+            }
+            WireIn::Launch {
+                place_id,
+                job_id,
+                universe_id,
+                game_name,
+                by,
+            } => {
+                let key = (place_id, job_id.clone());
+                if guest.last_followed.as_ref() == Some(&key) {
+                    continue;
+                }
+                guest.last_followed = Some(key);
+                out.emit(PartyEvent::Launch(PartyLaunch {
+                    place_id,
+                    job_id,
+                    universe_id,
+                    game_name,
+                    by,
+                }));
+            }
+            WireIn::Error { message } => {
+                // "full" / "no such party" are terminal: retrying would loop.
+                let fatal = message.contains("full")
+                    || message.contains("No such")
+                    || message.contains("required");
+                if fatal {
+                    guest.ws = None;
+                    guest.retry_at = None;
+                    IN_PARTY.store(false, Ordering::Relaxed);
+                    out.emit(PartyEvent::Left(message));
+                } else {
+                    out.emit(PartyEvent::Notice(message));
+                }
+            }
+            WireIn::Pong => {}
+        }
+    }
+
+    if closed && guest.ws.is_some() {
+        guest.ws = None;
+        guest.attempts = guest.attempts.saturating_add(1);
+        guest.retry_at = Some(Instant::now() + backoff(guest.attempts));
+        guest.degraded = false;
+        out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local)));
+    }
+}
+
+/// The fallback that makes a party work through CGNAT: watch one public user id and join
+/// whatever server the host enters. One small request every four seconds, and nothing at all
+/// outside a party.
+fn poll_presence(guest: &mut Guest, local: Option<&Local>, out: &Out) {
+    if Instant::now() < guest.presence_at {
+        return;
+    }
+    guest.presence_at = Instant::now() + PRESENCE_POLL;
+    let Some(cookie) = local.and_then(|l| l.cookie.as_deref()) else {
+        return;
+    };
+    let Some(spot) = crate::api::party_presence(guest.host, cookie) else {
+        return;
+    };
+    if !spot.in_game || spot.place_id == 0 || spot.job_id.is_empty() {
+        return;
+    }
+    let key = (spot.place_id, spot.job_id.clone());
+    if guest.last_followed.as_ref() == Some(&key) {
+        return;
+    }
+    guest.last_followed = Some(key);
+    out.emit(PartyEvent::Launch(PartyLaunch {
+        place_id: spot.place_id,
+        job_id: spot.job_id,
+        universe_id: spot.universe_id,
+        game_name: spot.game_name,
+        by: guest.host,
+    }));
+}
+
+fn dial(invite: &PartyInvite) -> Result<WebSocket<TcpStream>, String> {
+    let addr = invite.endpoint();
+    let stream =
+        TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| format!("{addr}: {e}"))?;
+    let _ = stream.set_nodelay(true);
+    stream
+        .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    // `into_client_request` fills in Host, Upgrade, Connection, Sec-WebSocket-Version and a
+    // fresh Sec-WebSocket-Key; a hand-built request without them is refused by the host.
+    let uri = format!("ws://{addr}/party");
+    let mut request = uri
+        .as_str()
+        .into_client_request()
+        .map_err(|e| e.to_string())?;
+    request.headers_mut().insert(
+        HeaderName::from_static(MAGIC_HEADER),
+        HeaderValue::from_static(MAGIC_VALUE),
+    );
+    request.headers_mut().insert(
+        HeaderName::from_static(TOKEN_HEADER),
+        HeaderValue::from_str(&hex(&invite.token)).map_err(|e| e.to_string())?,
+    );
+    let (mut ws, _response) = tungstenite::client(request, stream)
+        .map_err(|e| format!("the host refused this invite ({e})"))?;
+    set_read_timeout(&mut ws);
+    Ok(ws)
 }
 
 fn backoff(attempts: u32) -> Duration {
@@ -686,95 +1444,264 @@ fn backoff(attempts: u32) -> Duration {
     Duration::from_secs(secs.min(BACKOFF_MAX.as_secs()))
 }
 
-fn install_crypto_provider() {
-    // rustls 0.23 needs a process-wide provider; ureq installs one, but the party thread may
-    // be the first to use TLS on a fresh install, so claim it explicitly (idempotent).
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
+// ---------------------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------------------
 
-fn connect(url: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, tungstenite::Error> {
-    install_crypto_provider();
-    let (ws, _response) = tungstenite::connect(url)?;
-    Ok(ws)
-}
-
-fn set_read_timeout(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, timeout: Option<Duration>) {
-    match ws.get_ref() {
-        MaybeTlsStream::Plain(stream) => {
-            let _ = stream.set_read_timeout(timeout);
-        }
-        MaybeTlsStream::Rustls(stream) => {
-            let _ = stream.sock.set_read_timeout(timeout);
-        }
-        _ => {}
+fn host_snapshot(host: &Host, local: Option<&Local>) -> PartySnapshot {
+    let mut members: Vec<PartyMember> = local
+        .map(|l| PartyMember {
+            user: l.me.clone(),
+            status: l.status,
+            place_id: l.place_id,
+            job_id: l.job_id.clone(),
+        })
+        .into_iter()
+        .collect();
+    members.extend(host.peers.iter().map(|p| PartyMember {
+        user: p.user.clone(),
+        status: p.status,
+        place_id: p.place_id,
+        job_id: p.job_id.clone(),
+    }));
+    PartySnapshot {
+        code: host.invite.short_code(),
+        invite: if host.mapping_done {
+            host.invite.code()
+        } else {
+            String::new()
+        },
+        host: host.invite.host_id,
+        max: host.max,
+        members,
+        connected: true,
     }
 }
 
-fn write(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, frame: &WireOut) -> bool {
+fn guest_snapshot(guest: &Guest, local: Option<&Local>) -> PartySnapshot {
+    let mut members: Vec<PartyMember> = local
+        .map(|l| PartyMember {
+            user: l.me.clone(),
+            status: l.status,
+            place_id: l.place_id,
+            job_id: l.job_id.clone(),
+        })
+        .into_iter()
+        .collect();
+    if guest.ws.is_some() {
+        // Connected: the real roster arrives in its own frame, so do not show a roster of
+        // one next to a live socket.
+        members.clear();
+    }
+    PartySnapshot {
+        code: guest.code.clone(),
+        invite: guest.invite.code(),
+        host: guest.host,
+        max: guest.max,
+        members,
+        connected: guest.ws.is_some(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Sockets, ports and network helpers
+// ---------------------------------------------------------------------------------------
+
+fn set_read_timeout(ws: &mut WebSocket<TcpStream>) {
+    let _ = ws.get_ref().set_read_timeout(Some(READ_TIMEOUT));
+}
+
+fn is_idle(e: &std::io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+}
+
+fn write(ws: &mut WebSocket<TcpStream>, frame: &impl Serialize) -> bool {
     let Ok(text) = serde_json::to_string(frame) else {
         return false;
     };
     ws.send(Message::Text(text.into())).is_ok()
 }
 
-/// Best-effort send when the socket may not exist (Leave arrives before a connect finishes).
-fn send(socket: &mut Option<WebSocket<MaybeTlsStream<TcpStream>>>, frame: WireOut) -> bool {
-    match socket.as_mut() {
-        Some(ws) => write(ws, &frame),
-        None => false,
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
     }
+    out
+}
+
+/// Six bytes of room secret from the OS. `getrandom` is already a macOS dependency; other
+/// builds mix the clock and a stack address so the token still differs per room.
+fn random_token() -> [u8; 6] {
+    #[allow(unused_mut)]
+    let mut token = [0u8; 6];
+    #[cfg(target_os = "macos")]
+    {
+        if getrandom::getrandom(&mut token).is_ok() {
+            return token;
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stack = &token as *const _ as u128;
+    let mix = nanos.rotate_left(17) ^ stack;
+    for (index, slot) in token.iter_mut().enumerate() {
+        *slot = (mix >> (index * 8)) as u8;
+    }
+    token
+}
+
+/// The address friends on the same network can reach. A UDP `connect` only asks the routing
+/// table which interface would be used - it sends no packet.
+fn local_ipv4() -> Ipv4Addr {
+    if let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) {
+        if socket.connect(("1.1.1.1", 53)).is_ok() {
+            if let Ok(SocketAddr::V4(addr)) = socket.local_addr() {
+                return *addr.ip();
+            }
+        }
+    }
+    Ipv4Addr::LOCALHOST
+}
+
+/// Ask the router to forward `port` to this machine. Returns the public address to put in
+/// the invite, or `None` when the network will not allow it (CGNAT, UPnP off, no router).
+fn map_port(port: u16, local: Ipv4Addr) -> Option<Ipv4Addr> {
+    let gateway = igd_next::search_gateway(igd_next::SearchOptions::default()).ok()?;
+    let external = gateway.get_external_ip().ok()?;
+    // `add_port` keeps the external and local port identical, which is what the invite
+    // carries; `add_any_port` would hand back a different one.
+    gateway
+        .add_port(
+            igd_next::PortMappingProtocol::TCP,
+            port,
+            SocketAddr::from((local, port)),
+            0,
+            "CREBLOX Party",
+        )
+        .ok()?;
+    match external {
+        IpAddr::V4(address) => Some(address),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// Best-effort tidy-up so the mapping does not outlive the party.
+fn close_port_mapping(port: u16) {
+    let _ = std::thread::Builder::new()
+        .name("creblox-party-unmap".to_string())
+        .spawn(move || {
+            if let Ok(gateway) = igd_next::search_gateway(igd_next::SearchOptions::default()) {
+                let _ = gateway.remove_port(igd_next::PortMappingProtocol::TCP, port);
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn invite() -> PartyInvite {
+        PartyInvite {
+            address: Ipv4Addr::new(203, 0, 113, 9),
+            port: 51_234,
+            host_id: 8_123_456_789,
+            token: [1, 2, 3, 4, 5, 6],
+        }
+    }
+
     #[test]
-    fn invites_accept_codes_and_links() {
-        assert_eq!(parse_invite("CRB-8X2K"), Some("CRB-8X2K".to_string()));
-        assert_eq!(parse_invite(" 8x2k "), Some("CRB-8X2K".to_string()));
+    fn an_invite_code_round_trips() {
+        let original = invite();
+        let code = original.code();
+        assert!(code.starts_with("CRB-"));
+        assert_eq!(code.len(), 4 + INVITE_DIGITS);
+        assert_eq!(parse_invite(&code), Some(original));
+    }
+
+    #[test]
+    fn invites_accept_links_and_surrounding_space() {
+        let original = invite();
+        let code = original.code();
+        assert_eq!(parse_invite(&format!("  {code}  ")), Some(original));
         assert_eq!(
-            parse_invite("creblox://party/CRB-8X2K"),
-            Some("CRB-8X2K".to_string())
+            parse_invite(&format!("creblox://party/{code}")),
+            Some(original)
         );
         assert_eq!(
-            parse_invite("https://creblox.app/p/ab12cd"),
-            Some("CRB-AB12CD".to_string())
+            parse_invite(&format!("https://example.test/p/{code}")),
+            Some(original)
         );
         assert_eq!(parse_invite(""), None);
-        assert_eq!(parse_invite("ab"), None);
-        assert_eq!(parse_invite("CRB-"), None);
+        assert_eq!(parse_invite("CRB-8X2K"), None);
     }
 
     #[test]
-    fn relay_url_falls_back_to_default() {
-        assert_eq!(relay_url(""), DEFAULT_RELAY_URL);
-        assert_eq!(relay_url("  "), DEFAULT_RELAY_URL);
-        assert_eq!(
-            relay_url("ws://127.0.0.1:8787/party"),
-            "ws://127.0.0.1:8787/party"
-        );
+    fn a_corrupted_invite_is_rejected() {
+        let code = invite().code();
+        let bytes = code.as_bytes();
+        for index in 4..bytes.len() {
+            let mut broken = bytes.to_vec();
+            broken[index] = if broken[index] == b'0' { b'1' } else { b'0' };
+            let broken = String::from_utf8(broken).unwrap();
+            assert!(
+                parse_invite(&broken).is_none(),
+                "a typo at {index} slipped through: {broken}"
+            );
+        }
     }
 
     #[test]
-    fn endpoint_keeps_existing_query_strings() {
-        assert_eq!(
-            join_url("wss://x/party", "create=1"),
-            "wss://x/party?create=1"
-        );
-        assert_eq!(
-            join_url("ws://127.0.0.1:8787/party?room=1", "code=CRB-AB12CD"),
-            "ws://127.0.0.1:8787/party?room=1&code=CRB-AB12CD"
-        );
+    fn every_field_of_the_invite_survives_encoding() {
+        for (address, port, host_id) in [
+            (Ipv4Addr::LOCALHOST, 1, 1),
+            (Ipv4Addr::new(255, 255, 255, 255), 65_535, u64::MAX),
+            (Ipv4Addr::new(10, 0, 0, 7), 8787, 4_294_967_297),
+        ] {
+            let original = PartyInvite {
+                address,
+                port,
+                host_id,
+                token: [9, 8, 7, 6, 5, 4],
+            };
+            assert_eq!(parse_invite(&original.code()), Some(original));
+        }
+    }
+
+    #[test]
+    fn the_short_code_follows_the_room_token() {
+        let mut first = invite();
+        let mut second = first;
+        second.token = [7, 7, 7, 7, 7, 7];
+        assert_ne!(first.short_code(), second.short_code());
+        assert!(first.short_code().starts_with("CRB-"));
+        assert_eq!(first.short_code().len(), 10);
+        first.token = second.token;
+        assert_eq!(first.short_code(), second.short_code());
+    }
+
+    #[test]
+    fn base62_is_fixed_width_and_never_overflows() {
+        assert_eq!(base62_encode(&[0], 1), "0");
+        assert_eq!(base62_encode(&[61], 1), "z");
+        assert_eq!(base62_encode(&[62], 2), "10");
+        assert_eq!(base62_encode(&[0], 6), "000000");
+        let payload = invite().payload();
+        let text = base62_encode(&payload, INVITE_DIGITS);
+        assert_eq!(text.len(), INVITE_DIGITS);
+        assert_eq!(base62_decode(&text, 22).as_deref(), Some(&payload[..]));
+        // Wider than the payload: not one of our codes.
+        assert_eq!(base62_decode(&"z".repeat(INVITE_DIGITS), 22), None);
+        assert_eq!(base62_decode("not base62!", 22), None);
     }
 
     #[test]
     fn host_target_needs_a_place_and_a_job() {
         let mut snap = PartySnapshot {
             code: "CRB-AB12CD".to_string(),
+            invite: "CRB-AB12CD".to_string(),
             host: 7,
             max: 8,
             members: Vec::new(),
@@ -809,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_use_the_relay_wire_format() {
+    fn frames_use_the_party_wire_format() {
         let json = serde_json::to_string(&WireOut::Launch {
             place_id: 1818,
             job_id: "abc".to_string(),
@@ -825,5 +1752,19 @@ mod tests {
             serde_json::from_str(r#"{"t":"welcome","code":"CRB-AB12CD","host":7,"max":8}"#)
                 .unwrap();
         assert!(matches!(parsed, WireIn::Welcome { host: 7, .. }));
+        let hello: PeerFrame = serde_json::from_str(
+            r#"{"t":"join","code":"CRB-AB12CD","user":{"id":7,"name":"a"},"max":8}"#,
+        )
+        .unwrap();
+        assert!(matches!(hello, PeerFrame::Join { user: Some(user), .. } if user.id == 7));
+    }
+
+    #[test]
+    fn the_backoff_never_grows_past_the_cap() {
+        assert_eq!(backoff(0), Duration::from_secs(1));
+        assert_eq!(backoff(1), Duration::from_secs(2));
+        assert_eq!(backoff(2), Duration::from_secs(4));
+        assert_eq!(backoff(9), BACKOFF_MAX);
+        assert_eq!(backoff(99), BACKOFF_MAX);
     }
 }

@@ -33,8 +33,8 @@ impl Creblox {
             }
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.party_join_code)
-                    .hint_text("CRB-XXXXXX")
-                    .desired_width(110.0),
+                    .hint_text("CRB-...")
+                    .desired_width(170.0),
             );
             let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let joinable = !self.party_join_code.trim().is_empty();
@@ -163,13 +163,20 @@ impl Creblox {
         if !self.party_invite_open {
             return;
         }
-        let Some(code) = self.party_state.as_ref().map(|p| p.code.clone()) else {
+        let Some((short, full)) = self
+            .party_state
+            .as_ref()
+            .map(|p| (p.code.clone(), p.invite.clone()))
+        else {
             self.party_invite_open = false;
             return;
         };
         let mut open = true;
         let mut copy = false;
-        let link = format!("creblox://party/{code}");
+        // While the host is still asking its router for a port there is no reachable
+        // endpoint yet, so the window shows the room label and waits.
+        let invite = if full.is_empty() { short.clone() } else { full };
+        let link = format!("creblox://party/{invite}");
         egui::Window::new("Invite to party")
             .open(&mut open)
             .collapsible(false)
@@ -177,7 +184,13 @@ impl Creblox {
             .show(ctx, |ui| {
                 ui.label("Send this code, or the link below, to a friend who uses CREBLOX.");
                 ui.add_space(SPACE_2);
-                ui.label(RichText::new(&code).monospace().strong().size(20.0));
+                ui.label(
+                    RichText::new(&short)
+                        .monospace()
+                        .strong()
+                        .size(20.0),
+                );
+                ui.label(RichText::new(&invite).monospace().size(12.0));
                 ui.label(RichText::new(&link).monospace().size(12.0));
                 ui.add_space(SPACE_2);
                 if ui.button("Copy invite").clicked() {

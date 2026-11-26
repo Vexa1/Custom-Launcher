@@ -1,6 +1,6 @@
 [package]
 name = "creblox"
-version = "0.4.31"
+version = "0.5.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "CREBLOX — a fast native Roblox launcher with an in-game HUD overlay for macOS"
@@ -25,15 +25,17 @@ flate2 = "1.0"
 image = { version = "0.25.10", features = ["png"] }
 open = "5.4.5"
 serde_json = "1.0.154"
-# Party: one blocking WebSocket per active party, on its own thread. rustls / ring /
-# webpki-roots are already in the tree via ureq, so this adds a WebSocket codec and no
-# second TLS implementation. No async runtime is pulled in (tungstenite is blocking).
+# Party: the host is a WebSocket server and every member a client, all on one blocking
+# thread. Plain TCP only (peers are on the local network or a forwarded port), so this adds
+# a WebSocket codec and no TLS stack, and no async runtime.
 serde = { version = "1", features = ["derive"] }
 tungstenite = { version = "0.24", default-features = false, features = [
     "handshake",
-    "rustls-tls-webpki-roots",
 ] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Party host: ask the router for a port so friends can dial in. Synchronous UPnP client
+# (`io_sync`, attohttpc) - deliberately not the tokio flavour, which would drag an async
+# runtime into a blocking app.
+igd-next = { version = "0.18", default-features = false, features = ["io_sync"] }
 # gzip: Roblox JSON responses are highly compressible; this cuts transfer size and
 # therefore latency on every API call (profiles, servers, feeds) with no API change.
 ureq = { version = "2", features = ["json", "gzip"] }

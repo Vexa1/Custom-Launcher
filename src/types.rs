@@ -133,9 +133,6 @@ pub struct Settings {
     pub server_max_ping: Option<u32>,
     /// Show the people in each server (fetched on demand, never for every server at once).
     pub server_show_players: bool,
-    /// Party relay endpoint (`wss://…/party`). Empty means the built-in default in
-    /// `party::DEFAULT_RELAY_URL`, so an older settings.json keeps working unchanged.
-    pub party_relay_url: String,
 }
 
 impl Default for Settings {
@@ -226,7 +223,6 @@ impl Default for Settings {
             server_max_players: None,
             server_max_ping: None,
             server_show_players: true,
-            party_relay_url: String::new(),
         }
     }
 }
