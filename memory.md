@@ -325,9 +325,11 @@ The repository was audited end to end; it came back clean and must stay that way
 - History is clean: no credential or personal path was ever committed on the available history, so
   **no `git filter-repo`/BFG run is needed**. The clone used for the audit had 27 commits; if you
   need a full-history claim, clone the real thing with full depth first.
-- Two tracked files are **not** product code and are candidates for untracking if the owner agrees:
-  `freebuff-saved-files.zip` (3.7 MB snapshot of the predecessor project — verified to contain no
-  sessions, settings, accounts, cookies or user paths) and the four `creblox-*.patch` files.
+`freebuff-saved-files.zip` and `creblox-0.4.18.patch` were untracked on purpose and are now
+  ignored local files: still on disk for whoever has the checkout, still reachable in history,
+  but no longer part of the tree. The zip is a 3.6 MB snapshot of the predecessor project with
+  no sessions, settings, accounts, cookies or user paths; the other three `creblox-*.patch`
+  files were never tracked. Never `git add -f` any of them back.
 
 ---
 
