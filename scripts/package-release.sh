@@ -17,6 +17,12 @@ cd "$(dirname "$0")/.."
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [[ -n "$VERSION" ]] || { echo "Could not read version from Cargo.toml" >&2; exit 1; }
 
+# --- Release link gate ----------------------------------------------------
+# These archives are what users download. Never write them from a tree that was
+# only `cargo check`ed: prove the real Catalina link runs cc/ld first and abort
+# here if it fails (0.4.25 shipped an undefined symbol this way).
+scripts/verify-release-link.sh
+
 FULL_ZIP="creblox-${VERSION}-macos-full.zip"
 QUICK_ZIP="creblox-update-${VERSION}-macos.zip"
 STAGE="$(mktemp -d)"

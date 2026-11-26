@@ -252,7 +252,7 @@ one, which is why 0.4.25 shipped and 0.4.26 fixed it.
 | **Never declare `dispatch_get_main_queue` as an `extern "C"` function.** It is a C *macro* in `<dispatch/queue.h>` that expands to `&_dispatch_main_q`; there is no such symbol to link against | Declaring it compiles, then `ld` fails with `Undefined symbols: "_dispatch_get_main_queue", referenced from creblox::tray::platform::dispatch_main`. Use the real exported global: `static _dispatch_main_q: c_void;` and pass `&_dispatch_main_q` as the queue (`tray_macos.rs::dispatch_main`) |
 | `dispatch_async_f` is an ordinary function and may be declared normally | It has been exported since 10.6, so it is safe on 10.15 |
 | Every framework symbol must come from a framework actually linked | CoreGraphics, CoreFoundation and `objc` are declared with `#[link(name = ...)]`; anything from AppKit is reached through `objc_msgSend` with a runtime selector, so no 11.0+ symbol can leak in |
-| Verify with `cargo build --release --target x86_64-apple-darwin`, not `cargo check` | Only the release build runs `cc`/`ld`; a check-only workflow cannot see a missing symbol |
+| Verify with `cargo build --release --target x86_64-apple-darwin`, not `cargo check` | Only the release build runs `cc`/`ld`; a check-only workflow cannot see a missing symbol. Enforced: `scripts/package-release.sh` calls `scripts/verify-release-link.sh`, which runs that exact build and exits non-zero, so no archive is ever written from a check-only tree |
 
 ## The CREBLOX design system (0.4.26)
 
@@ -609,7 +609,13 @@ cargo build --release            # -> target/release/creblox
 scripts/build-macos-app.sh       # NO_INSTALL=1 to skip the install step
 
 # package the release archives (quick update + full build)
+# runs scripts/verify-release-link.sh first: the real x86_64 Catalina link must
+# succeed, otherwise no archive is written
 scripts/package-release.sh
+
+# package the .app itself: same gate, then it refuses to zip an app whose
+# binary has no x86_64 slice
+scripts/package-release-macos.sh
 ```
 
 `MACOSX_DEPLOYMENT_TARGET` is pinned to `10.15` in `.cargo/config.toml`, so
@@ -638,7 +644,9 @@ cargo check --target x86_64-apple-darwin --all-targets
 
 where `zig-cc-darwin` forwards to `zig cc -target x86_64-macos "$@"` and drops the
 `--target=x86_64-apple-macosx` argument the `cc` crate injects. This **type-checks** only —
-it cannot link AppKit or sign a bundle, so it never replaces a real macOS build.
+it cannot link AppKit or sign a bundle, so it never replaces a real macOS build. For the same
+reason `scripts/verify-release-link.sh` refuses to run on a non-Darwin host instead of
+reporting a link it could not have performed.
 
 ---
 
