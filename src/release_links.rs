@@ -23,6 +23,22 @@ pub fn find_sha256_near(text: &str, url: &str) -> Option<String> {
     find_sha256(line).or_else(|| find_sha256(tail))
 }
 
+/// The checksum the updater should verify the zip at `zip_url` against.
+///
+/// `from_asset` says the zip came from a release asset rather than a link written into the
+/// notes. An asset is only ever checked against the hash printed for its own URL: the notes list
+/// several downloads, and a body-wide search would hand the Windows build the macOS overlay's
+/// checksum and reject a good update. A hand-written body link keeps the older fallback, because
+/// its hash may be printed anywhere in the notes.
+pub fn zip_checksum(notes: &str, zip_url: &str, from_asset: bool) -> Option<String> {
+    let near = find_sha256_near(notes, zip_url);
+    if from_asset {
+        near
+    } else {
+        near.or_else(|| find_sha256(notes))
+    }
+}
+
 /// Whether a `.zip` asset name is the one this platform's in-app updater should take. Windows
 /// looks for the x64 build; macOS takes the project archive.
 pub fn prefers_zip_asset(name: &str, windows: bool) -> bool {

@@ -59,11 +59,26 @@ fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
     zip.finish().expect("finish zip");
 }
 
-fn launcher_bytes(size: usize) -> Vec<u8> {
-    let mut data = vec![0u8; size];
+/// A minimal PE image: DOS stub, `PE\0\0`, the given machine and subsystem, PE32+ magic.
+/// `verify_launcher` reads exactly these fields, so a fixture that skips them is no launcher.
+fn pe_image(size: usize, machine: u16, subsystem: u16) -> Vec<u8> {
+    let mut data = vec![0u8; size.max(0x200)];
     data[0] = b'M';
     data[1] = b'Z';
+    data[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    let pe = 0x80;
+    data[pe..pe + 4].copy_from_slice(b"PE\0\0");
+    data[pe + 4..pe + 6].copy_from_slice(&machine.to_le_bytes());
+    data[pe + 20..pe + 22].copy_from_slice(&0xf0u16.to_le_bytes());
+    data[pe + 24..pe + 26].copy_from_slice(&0x20bu16.to_le_bytes());
+    data[pe + 24 + 0x44..pe + 24 + 0x46].copy_from_slice(&subsystem.to_le_bytes());
     data
+}
+
+const X64_GUI: (u16, u16) = (0x8664, 2);
+
+fn launcher_bytes(size: usize) -> Vec<u8> {
+    pe_image(size, X64_GUI.0, X64_GUI.1)
 }
 
 fn release_notes() -> String {
@@ -162,6 +177,41 @@ fn a_launcher_without_a_pe_header_is_rejected() {
 }
 
 #[test]
+fn a_console_build_is_rejected() {
+    let scratch = Scratch::new("console");
+    let file = scratch.path().join("creblox.exe");
+    fs::write(&file, pe_image(70 * 1024, 0x8664, 3)).expect("write console stub");
+
+    let err = zip_update::verify_launcher(&file).unwrap_err();
+
+    assert!(err.contains("GUI"), "unexpected error: {err}");
+}
+
+#[test]
+fn a_32_bit_build_is_rejected() {
+    let scratch = Scratch::new("x86");
+    let file = scratch.path().join("creblox.exe");
+    fs::write(&file, pe_image(70 * 1024, 0x014c, 2)).expect("write x86 stub");
+
+    let err = zip_update::verify_launcher(&file).unwrap_err();
+
+    assert!(err.contains("x64"), "unexpected error: {err}");
+}
+
+#[test]
+fn a_pe_header_pointing_outside_the_file_is_rejected() {
+    let scratch = Scratch::new("badpe");
+    let file = scratch.path().join("creblox.exe");
+    let mut data = launcher_bytes(70 * 1024);
+    data[0x3c..0x40].copy_from_slice(&0x00ff_ffffu32.to_le_bytes());
+    fs::write(&file, data).expect("write stub");
+
+    let err = zip_update::verify_launcher(&file).unwrap_err();
+
+    assert!(err.contains("Windows executable"), "unexpected error: {err}");
+}
+
+#[test]
 fn the_windows_zip_is_picked_on_windows_and_the_overlay_on_macos() {
     let notes = release_notes();
 
@@ -229,6 +279,32 @@ fn an_asset_zip_is_checked_against_its_own_checksum() {
     assert_eq!(
         release_links::find_sha256_near(&notes, "https://example.com/other.zip"),
         None
+    );
+}
+
+#[test]
+fn an_asset_zip_never_borrows_another_downloads_hash() {
+    let notes = release_notes();
+
+    assert_eq!(
+        release_links::zip_checksum(&notes, WINDOWS_URL, true).as_deref(),
+        Some(WIN_HASH)
+    );
+    // The notes' first checksum belongs to the macOS overlay; an asset URL that is absent from
+    // them must not inherit it, so the download stays unverified instead of failing wrongly.
+    assert_eq!(
+        release_links::zip_checksum(&notes, "https://example.com/unknown.zip", true),
+        None
+    );
+}
+
+#[test]
+fn a_body_linked_zip_may_print_its_hash_anywhere() {
+    let notes = format!("sha256 {MAC_HASH}\n\nIn-place update: {MAC_UPDATE_URL}");
+
+    assert_eq!(
+        release_links::zip_checksum(&notes, MAC_UPDATE_URL, false).as_deref(),
+        Some(MAC_HASH)
     );
 }
 

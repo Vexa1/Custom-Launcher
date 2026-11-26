@@ -188,19 +188,6 @@ fn find_zip_url(text: &str) -> Option<String> {
     crate::release_links::pick_zip_url(text, cfg!(target_os = "windows"))
 }
 
-/// The release body carries the SHA-256 of the update zip; accept any 64-hex token.
-fn find_sha256(text: &str) -> Option<String> {
-    crate::release_links::find_sha256(text)
-}
-
-/// The SHA-256 printed for the archive at `url`: the token on the same line,
-/// otherwise the first one after the link. The body lists several downloads, so
-/// taking the first hash in the body would verify the overlay against the full
-/// zip's checksum once the overlay is preferred.
-fn find_sha256_for(text: &str, url: &str) -> Option<String> {
-    crate::release_links::find_sha256_near(text, url).or_else(|| find_sha256(text))
-}
-
 pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<CrebloxRelease> {
     if v["draft"].as_bool().unwrap_or(false) {
         return None;
@@ -301,15 +288,9 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
             None => (None, None, 0),
         },
     };
-    // A release-asset zip is verified against the checksum printed for its own URL; a body
-    // that lists several downloads would otherwise hand it another file's hash.
-    let zip_sha256 = zip_url.as_deref().and_then(|url| {
-        if has_asset_zip {
-            crate::release_links::find_sha256_near(&notes, url)
-        } else {
-            find_sha256_for(&notes, url)
-        }
-    });
+    let zip_sha256 = zip_url
+        .as_deref()
+        .and_then(|url| crate::release_links::zip_checksum(&notes, url, has_asset_zip));
 
     Some(CrebloxRelease {
         version: normalized_ver,

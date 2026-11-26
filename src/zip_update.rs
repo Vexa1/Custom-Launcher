@@ -69,7 +69,18 @@ pub fn extract_launcher(zip: &Path, dest: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// Checks that `path` is plausible before it replaces a working launcher, and returns its size.
+/// How much of the file is read to reach the PE headers. The DOS stub points at the PE header,
+/// and every real launcher keeps it well inside this window.
+const HEADER_PROBE: usize = 64 * 1024;
+const PE32_PLUS_MAGIC: u16 = 0x20b;
+const X64_MACHINE: u16 = 0x8664;
+const GUI_SUBSYSTEM: u16 = 2;
+
+/// Checks that `path` could be this launcher before it replaces a working install, and returns
+/// its size.
+///
+/// Beyond the size sanity check, the PE header has to say x64 GUI: the release only ships an
+/// x64 build, and a console-subsystem image would pop a terminal window open on every start.
 pub fn verify_launcher(path: &Path) -> Result<u64, String> {
     let size = fs::metadata(path)
         .map_err(|e| format!("Could not read the new executable: {e}"))?
@@ -84,12 +95,41 @@ pub fn verify_launcher(path: &Path) -> Result<u64, String> {
             "The new executable is implausibly large ({size} bytes)."
         ));
     }
-    let mut magic = [0u8; 2];
+    let mut head = vec![0u8; (size as usize).min(HEADER_PROBE)];
     fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
+        .and_then(|mut f| f.read_exact(&mut head))
         .map_err(|e| format!("Could not read the new executable: {e}"))?;
-    if &magic != b"MZ" {
-        return Err("The update zip does not contain a Windows executable.".to_string());
-    }
+    check_pe_header(&head)?;
     Ok(size)
+}
+
+/// Rejects anything that is not a 64-bit GUI image: DOS magic, `PE\0\0`, machine, optional
+/// header magic and subsystem, in that order, each with the reason a user can act on.
+fn check_pe_header(head: &[u8]) -> Result<(), String> {
+    let not_exe = "The update zip does not contain a Windows executable.";
+    if head.len() < 0x40 || &head[..2] != b"MZ" {
+        return Err(not_exe.to_string());
+    }
+    let pe = u32::from_le_bytes(head[0x3c..0x40].try_into().unwrap()) as usize;
+    let optional = pe + 24;
+    if pe < 0x40 || optional + 0x44 + 2 > head.len() || &head[pe..pe + 4] != b"PE\0\0" {
+        return Err(not_exe.to_string());
+    }
+    let machine = u16::from_le_bytes(head[pe + 4..pe + 6].try_into().unwrap());
+    if machine != X64_MACHINE {
+        return Err(format!(
+            "The new executable is not an x64 Windows build (machine 0x{machine:04x})."
+        ));
+    }
+    let magic = u16::from_le_bytes(head[optional..optional + 2].try_into().unwrap());
+    if magic != PE32_PLUS_MAGIC {
+        return Err("The new executable is not a 64-bit Windows build.".to_string());
+    }
+    let subsystem = u16::from_le_bytes(head[optional + 0x44..optional + 0x46].try_into().unwrap());
+    if subsystem != GUI_SUBSYSTEM {
+        return Err(format!(
+            "The new executable is not a Windows GUI build (subsystem {subsystem}), so it would open a console window."
+        ));
+    }
+    Ok(())
 }
