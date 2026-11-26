@@ -63,6 +63,10 @@ const MAGIC_HEADER: &str = "x-creblox-party";
 const TOKEN_HEADER: &str = "x-creblox-token";
 const MAGIC_VALUE: &str = "1";
 
+/// Close code the host sends when it leaves. `4001` already means "you were removed";
+/// this one means "the party is over", which is terminal for every member too.
+const PARTY_CLOSED_CODE: u16 = 4000;
+
 /// Whether this client is in a party right now. Read by the UI without touching a lock.
 static IN_PARTY: AtomicBool = AtomicBool::new(false);
 
@@ -580,6 +584,8 @@ struct Guest {
     last_followed: Option<(u64, String)>,
     last_ping: Instant,
     degraded: bool,
+    /// Terminal: kicked, the host left, or the room refused us. Nothing is retried.
+    stopped: bool,
 }
 
 struct Out {
@@ -667,6 +673,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         last_followed: None,
                         last_ping: Instant::now(),
                         degraded: false,
+                        stopped: false,
                     };
                     local = Some(Local {
                         me,
@@ -778,10 +785,10 @@ fn shutdown(role: &mut Role, local: &mut Option<Local>) {
         Role::Idle => {}
         Role::Host(host) => {
             for mut peer in host.peers {
-                let _ = peer.ws.send(Message::Text(
-                    r#"{"t":"error","message":"The host left the party"}"#.into(),
-                ));
-                let _ = peer.ws.close(None);
+                let _ = peer.ws.close(Some(CloseFrame {
+                    code: CloseCode::from(PARTY_CLOSED_CODE),
+                    reason: "The host left the party".into(),
+                }));
             }
             close_port_mapping(host.invite.port);
         }
@@ -915,9 +922,10 @@ fn accept_one(
             }
         };
     let mut ws = tungstenite::accept_hdr(stream, callback).map_err(|e| e.to_string())?;
-    set_read_timeout(&mut ws);
-    // The first frame identifies the member; anything else is not a CREBLOX client.
-    match ws.read() {
+    // The first frame identifies the member; anything else is not a CREBLOX client. Read it
+    // under the handshake timeout: a client that is slow to send its hello is not hostile,
+    // and the 1 ms tick timeout used later would drop it for losing a scheduling race.
+    let mut joined = match ws.read() {
         Ok(Message::Text(text)) => match serde_json::from_str::<PeerFrame>(&text) {
             Ok(PeerFrame::Join {
                 user: Some(user), ..
@@ -925,7 +933,10 @@ fn accept_one(
             _ => Err("unexpected first frame".to_string()),
         },
         _ => Err("no hello".to_string()),
-    }
+    }?;
+    // Only now drop to the 1 ms timeout the steady state uses.
+    set_read_timeout(&mut joined.1);
+    Ok(joined)
 }
 
 fn drain_handshakes(host: &mut Host, out: &Out) {
@@ -1202,6 +1213,10 @@ fn resolve_mapping(host: &mut Host, out: &Out) {
 // ---------------------------------------------------------------------------------------
 
 fn guest_tick(guest: &mut Guest, local: Option<&Local>, out: &Out) {
+    if guest.stopped {
+        // The party ended for this member: no dial, no presence poll, no heartbeat.
+        return;
+    }
     if guest.ws.is_none() {
         let due = guest
             .retry_at
@@ -1272,18 +1287,25 @@ fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
                     }
                 }
                 Ok(Message::Close(frame)) => {
-                    // 4001 is the host saying "you were removed". Reconnecting would walk
-                    // straight back in, so a kicked member stays kicked.
+                    // 4001 is the host saying "you were removed" and 4000 that the room is
+                    // closing. Both are terminal: retrying would either walk straight back
+                    // into the room we were removed from or hammer a dead port forever.
                     closed = true;
-                    if frame
+                    let code = frame
                         .as_ref()
-                        .map(|f| u16::from(f.code) == 4001)
-                        .unwrap_or(false)
-                    {
+                        .map(|f| u16::from(f.code))
+                        .unwrap_or_default();
+                    if code == 4001 || code == PARTY_CLOSED_CODE {
                         guest.ws = None;
                         guest.retry_at = None;
+                        guest.stopped = true;
                         IN_PARTY.store(false, Ordering::Relaxed);
-                        out.emit(PartyEvent::Left("Removed from the party".to_string()));
+                        let reason = if code == PARTY_CLOSED_CODE {
+                            "The host ended the party"
+                        } else {
+                            "Removed from the party"
+                        };
+                        out.emit(PartyEvent::Left(reason.to_string()));
                         return;
                     }
                     break;
@@ -1360,6 +1382,7 @@ fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
                 if fatal {
                     guest.ws = None;
                     guest.retry_at = None;
+                    guest.stopped = true;
                     IN_PARTY.store(false, Ordering::Relaxed);
                     out.emit(PartyEvent::Left(message));
                 } else {

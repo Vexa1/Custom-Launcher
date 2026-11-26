@@ -11,6 +11,7 @@ mod fastflags;
 mod game_overlay;
 mod overlay_window;
 mod party;
+mod party_server;
 mod platform;
 mod playtime;
 mod roblox_process;

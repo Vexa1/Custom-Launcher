@@ -16,7 +16,19 @@ pub struct PartyPresence {
 /// What the next poll should report as the host's session.
 pub fn set_next(place_id: u64, job_id: &str, universe_id: u64, game_name: &str) {
     if let Ok(mut next) = NEXT.lock() {
-        *next = Some((place_id, job_id.to_string(), universe_id, game_name.to_string()));
+        *next = Some((
+            place_id,
+            job_id.to_string(),
+            universe_id,
+            game_name.to_string(),
+        ));
+    }
+}
+
+/// Forgets the scripted session, so the next test starts from "not in a game".
+pub fn clear_next() {
+    if let Ok(mut next) = NEXT.lock() {
+        *next = None;
     }
 }
 
