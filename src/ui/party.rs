@@ -144,6 +144,8 @@ impl Creblox {
             }
         });
 
+        self.party_board_row(ui, party, me, is_host, muted, text);
+
         if let Some(err) = self.party_error.clone() {
             ui.label(RichText::new(err).size(11.5).color(crate::theme::RED));
         }
@@ -156,6 +158,121 @@ impl Creblox {
         }
         if let Some((place, job)) = join_target {
             self.launch_server(place, job);
+        }
+    }
+
+    /// Ready Check and Game Vote: one wrapped row under the member strip. Everything is
+    /// inert when the host never uses it, so the bar keeps its old height in the common case.
+    fn party_board_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        party: &crate::party::PartySnapshot,
+        me: u64,
+        is_host: bool,
+        muted: egui::Color32,
+        text: egui::Color32,
+    ) {
+        let board = party.board.clone();
+        let open_game = match &self.page {
+            crate::types::Page::Game(g) => Some(g.clone()),
+            _ => None,
+        };
+        let mut start = false;
+        let mut answer: Option<bool> = None;
+        let mut vote: Option<u64> = None;
+        let mut launch: Option<(u64, u64, String)> = None;
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if is_host {
+                if ui
+                    .add_enabled(
+                        !board.ready_check_active(),
+                        egui::Button::new("Ready Check"),
+                    )
+                    .on_hover_text("Ask everyone to confirm they are ready (10 s)")
+                    .clicked()
+                {
+                    start = true;
+                }
+            }
+            if board.ready_check_active() {
+                let (ready, answered) = board.ready_count();
+                let secs = board.ready_seconds_left(now_ms());
+                ui.label(
+                    RichText::new(format!("{ready}/{answered} ready - {secs}s"))
+                        .size(11.5)
+                        .color(text),
+                );
+                let mine = board.is_ready(me).unwrap_or(false);
+                if ui.selectable_label(mine, "Ready").clicked() {
+                    answer = Some(true);
+                }
+                if ui.selectable_label(!mine, "Not Ready").clicked() {
+                    answer = Some(false);
+                }
+            } else if board.ready.iter().any(|(_, ready)| *ready) {
+                // Nothing running: keep the last answers visible, without a countdown.
+                let (ready, answered) = board.ready_count();
+                ui.label(
+                    RichText::new(format!("last check: {ready}/{answered} ready"))
+                        .size(11.5)
+                        .color(muted),
+                );
+            }
+
+            if !board.suggestions.is_empty() {
+                ui.separator();
+                for suggestion in &board.suggestions {
+                    let votes = board.votes_for(suggestion.place_id);
+                    let mine = board.my_vote(me) == Some(suggestion.place_id);
+                    if ui
+                        .selectable_label(mine, format!("{} - {votes}", suggestion.name))
+                        .on_hover_text("Vote to play this with the party")
+                        .clicked()
+                    {
+                        vote = Some(suggestion.place_id);
+                    }
+                }
+                if is_host {
+                    if let Some(winner) = board.winner() {
+                        if ui.button(format!("Launch {}", winner.name)).clicked() {
+                            launch = Some((
+                                winner.place_id,
+                                winner.universe_id,
+                                winner.name.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Any member can put the game they are looking at on the poll.
+            if let Some(game) = open_game {
+                let already = board
+                    .suggestions
+                    .iter()
+                    .any(|s| s.place_id == game.place_id);
+                let room =
+                    board.suggestions.len() < crate::party::PartyBoard::MAX_SUGGESTIONS;
+                if !already && room && ui.small_button("Suggest this game").clicked() {
+                    self.party
+                        .suggest_game(game.place_id, game.universe_id, game.name.clone());
+                }
+            }
+        });
+
+        if start {
+            self.party.start_ready_check();
+        }
+        if let Some(ready) = answer {
+            self.party.set_ready(ready);
+        }
+        if let Some(place_id) = vote {
+            self.party.vote(place_id);
+        }
+        if let Some((place_id, universe_id, name)) = launch {
+            self.party_launch(place_id, universe_id, name);
         }
     }
 
@@ -202,6 +319,14 @@ impl Creblox {
         }
         self.party_invite_open = open;
     }
+}
+
+/// Wall-clock milliseconds, matching the deadline the host puts in the board.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn status_dot(status: PartyStatus, muted: egui::Color32, text: egui::Color32) -> RichText {

@@ -164,6 +164,8 @@ pub struct PartySnapshot {
     /// The socket is up right now (false while the direct connection is down and the party is
     /// running on the presence fallback).
     pub connected: bool,
+    /// Ready Check and Game Vote. Empty when nobody uses them.
+    pub board: PartyBoard,
 }
 
 impl PartySnapshot {
@@ -191,6 +193,168 @@ pub struct PartyLaunch {
     pub universe_id: u64,
     pub game_name: String,
     pub by: u64,
+}
+
+/// One game a member suggested for the party to play next.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartySuggestion {
+    pub place_id: u64,
+    #[serde(default)]
+    pub universe_id: u64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub by: u64,
+}
+
+/// Ready Check and Game Vote state.
+///
+/// The host owns this; guests mirror the last `Members` frame. It travels as an *optional
+/// field on existing frames*, never as a new frame type: a 0.5.5 client in the room ignores
+/// the key, and a 0.5.5 host ignores the optional guest fields, so neither side disconnects.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartyBoard {
+    /// Wall-clock ms when the running ready check expires; 0 when none is running.
+    #[serde(default)]
+    pub ready_until_ms: u64,
+    /// Who started the check.
+    #[serde(default)]
+    pub ready_by: u64,
+    /// `(user id, ready)` for everybody who answered the running check.
+    #[serde(default)]
+    pub ready: Vec<(u64, bool)>,
+    #[serde(default)]
+    pub suggestions: Vec<PartySuggestion>,
+    /// `(user id, place id)`: one vote per member.
+    #[serde(default)]
+    pub votes: Vec<(u64, u64)>,
+}
+
+impl PartyBoard {
+    pub const READY_SECONDS: u64 = 10;
+    pub const MAX_SUGGESTIONS: usize = 3;
+
+    pub fn ready_check_active(&self) -> bool {
+        self.ready_until_ms > 0
+    }
+
+    /// Whole seconds left, rounded up, for the countdown in the party bar and the HUD.
+    pub fn ready_seconds_left(&self, now_ms: u64) -> u64 {
+        self.ready_until_ms
+            .saturating_sub(now_ms)
+            .div_ceil(1000)
+    }
+
+    pub fn start_ready_check(&mut self, by: u64, now_ms: u64) {
+        self.ready_until_ms = now_ms.saturating_add(Self::READY_SECONDS * 1000);
+        self.ready_by = by;
+        self.ready.clear();
+    }
+
+    /// Clears an expired check. Returns whether anything changed, so the host only announces
+    /// on the transition.
+    pub fn expire(&mut self, now_ms: u64) -> bool {
+        if self.ready_until_ms > 0 && now_ms >= self.ready_until_ms {
+            self.ready_until_ms = 0;
+            self.ready_by = 0;
+            self.ready.clear();
+            return true;
+        }
+        false
+    }
+
+    pub fn is_ready(&self, user: u64) -> Option<bool> {
+        self.ready
+            .iter()
+            .find(|(id, _)| *id == user)
+            .map(|(_, ready)| *ready)
+    }
+
+    /// `(ready, answered)` for the running check.
+    pub fn ready_count(&self) -> (usize, usize) {
+        (
+            self.ready.iter().filter(|(_, ready)| *ready).count(),
+            self.ready.len(),
+        )
+    }
+
+    pub fn set_ready(&mut self, user: u64, ready: bool) -> bool {
+        if let Some(entry) = self.ready.iter_mut().find(|(id, _)| *id == user) {
+            if entry.1 == ready {
+                return false;
+            }
+            entry.1 = ready;
+            return true;
+        }
+        self.ready.push((user, ready));
+        true
+    }
+
+    /// Adds a suggestion: at most three, one per place, and never a duplicate.
+    pub fn suggest(&mut self, suggestion: PartySuggestion) -> bool {
+        if suggestion.place_id == 0
+            || self.suggestions.len() >= Self::MAX_SUGGESTIONS
+            || self
+                .suggestions
+                .iter()
+                .any(|s| s.place_id == suggestion.place_id)
+        {
+            return false;
+        }
+        self.suggestions.push(suggestion);
+        true
+    }
+
+    /// One vote per member, and only for a game that is actually on the poll.
+    pub fn vote(&mut self, user: u64, place_id: u64) -> bool {
+        if !self.suggestions.iter().any(|s| s.place_id == place_id) {
+            return false;
+        }
+        if let Some(vote) = self.votes.iter_mut().find(|(id, _)| *id == user) {
+            if vote.1 == place_id {
+                return false;
+            }
+            vote.1 = place_id;
+            return true;
+        }
+        self.votes.push((user, place_id));
+        true
+    }
+
+    pub fn votes_for(&self, place_id: u64) -> usize {
+        self.votes
+            .iter()
+            .filter(|(_, place)| *place == place_id)
+            .count()
+    }
+
+    pub fn my_vote(&self, user: u64) -> Option<u64> {
+        self.votes
+            .iter()
+            .find(|(id, _)| *id == user)
+            .map(|(_, place)| *place)
+    }
+
+    /// Votes per suggestion, most votes first; ties keep the order the games were suggested
+    /// in, so the poll never reshuffles on a repaint.
+    pub fn tally(&self) -> Vec<(u64, usize)> {
+        let mut out: Vec<(u64, usize)> = self
+            .suggestions
+            .iter()
+            .map(|s| (s.place_id, self.votes_for(s.place_id)))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out
+    }
+
+    /// The game with the most votes, or `None` while nobody has voted.
+    pub fn winner(&self) -> Option<&PartySuggestion> {
+        let (place_id, votes) = *self.tally().first()?;
+        if votes == 0 {
+            return None;
+        }
+        self.suggestions.iter().find(|s| s.place_id == place_id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -358,6 +522,14 @@ enum WireOut {
         status: String,
         place_id: u64,
         job_id: String,
+        // Party actions ride on the existing status frame, omitted when unset: an older host
+        // reads exactly the frame it always did and never sees an unknown frame type.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ready: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        vote: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        suggest: Option<PartySuggestion>,
     },
     Launch {
         place_id: u64,
@@ -380,6 +552,9 @@ enum WireIn {
         host: u64,
         max: usize,
         members: Vec<WireMember>,
+        /// Ready Check and Game Vote. An unknown key for a 0.5.5 guest, which ignores it.
+        #[serde(default)]
+        board: PartyBoard,
     },
     Launch {
         place_id: u64,
@@ -434,6 +609,12 @@ enum PeerFrame {
         place_id: u64,
         #[serde(default)]
         job_id: String,
+        #[serde(default)]
+        ready: Option<bool>,
+        #[serde(default)]
+        vote: Option<u64>,
+        #[serde(default)]
+        suggest: Option<PartySuggestion>,
     },
     Launch {
         #[serde(default)]
@@ -483,6 +664,14 @@ enum Command {
         job_id: String,
     },
     Launch(PartyLaunch),
+    /// Host starts a 10-second Ready Check for everybody.
+    ReadyCheck,
+    /// This member answers the running check.
+    SetReady(bool),
+    /// Add a game to the poll (at most three).
+    Suggest(PartySuggestion),
+    /// Vote for a suggested game.
+    Vote(u64),
     Shutdown,
 }
 
@@ -532,6 +721,28 @@ impl PartyHandle {
 
     pub fn broadcast_launch(&self, launch: PartyLaunch) {
         let _ = self.tx.send(Command::Launch(launch));
+    }
+
+    /// Host only; ignored for guests.
+    pub fn start_ready_check(&self) {
+        let _ = self.tx.send(Command::ReadyCheck);
+    }
+
+    pub fn set_ready(&self, ready: bool) {
+        let _ = self.tx.send(Command::SetReady(ready));
+    }
+
+    pub fn suggest_game(&self, place_id: u64, universe_id: u64, name: String) {
+        let _ = self.tx.send(Command::Suggest(PartySuggestion {
+            place_id,
+            universe_id,
+            name,
+            by: 0,
+        }));
+    }
+
+    pub fn vote(&self, place_id: u64) {
+        let _ = self.tx.send(Command::Vote(place_id));
     }
 }
 
@@ -583,6 +794,7 @@ struct Host {
     last_heartbeat: Instant,
     announce: bool,
     force_snapshot: bool,
+    board: PartyBoard,
 }
 
 struct Guest {
@@ -601,6 +813,8 @@ struct Guest {
     degraded: bool,
     /// Terminal: kicked, the host left, or the room refused us. Nothing is retried.
     stopped: bool,
+    /// Mirror of the host's board, from the last `Members` frame.
+    board: PartyBoard,
 }
 
 struct Out {
@@ -689,6 +903,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         last_ping: Instant::now(),
                         degraded: false,
                         stopped: false,
+                        board: PartyBoard::default(),
                     };
                     local = Some(Local {
                         me,
@@ -738,6 +953,9 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                                         status: status.wire().to_string(),
                                         place_id,
                                         job_id,
+                                        ready: None,
+                                        vote: None,
+                                        suggest: None,
                                     },
                                 );
                             }
@@ -745,6 +963,92 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         Role::Idle => {}
                     }
                 }
+                Command::ReadyCheck => {
+                    if let Role::Host(host) = &mut role {
+                        let host_id = host.invite.host_id;
+                        host.board.start_ready_check(host_id, wall_ms());
+                        host.announce = true;
+                    }
+                }
+                Command::SetReady(ready) => match &mut role {
+                    Role::Host(host) => {
+                        let host_id = host.invite.host_id;
+                        if host.board.set_ready(host_id, ready) {
+                            host.announce = true;
+                        }
+                    }
+                    Role::Guest(guest) => {
+                        if let (Some(local), Some(ws)) = (local.as_ref(), guest.ws.as_mut()) {
+                            let _ = write(
+                                ws,
+                                &WireOut::Status {
+                                    status: local.status.wire().to_string(),
+                                    place_id: local.place_id,
+                                    job_id: local.job_id.clone(),
+                                    ready: Some(ready),
+                                    vote: None,
+                                    suggest: None,
+                                },
+                            );
+                        }
+                        let me = local.as_ref().map(|l| l.me.id).unwrap_or(0);
+                        guest.board.set_ready(me, ready);
+                        out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local.as_ref())));
+                    }
+                    Role::Idle => {}
+                },
+                Command::Suggest(suggestion) => match &mut role {
+                    Role::Host(host) => {
+                        let mut suggestion = suggestion;
+                        suggestion.by = host.invite.host_id;
+                        if host.board.suggest(suggestion) {
+                            host.announce = true;
+                        }
+                    }
+                    Role::Guest(guest) => {
+                        if let (Some(local), Some(ws)) = (local.as_ref(), guest.ws.as_mut()) {
+                            let _ = write(
+                                ws,
+                                &WireOut::Status {
+                                    status: local.status.wire().to_string(),
+                                    place_id: local.place_id,
+                                    job_id: local.job_id.clone(),
+                                    ready: None,
+                                    vote: None,
+                                    suggest: Some(suggestion),
+                                },
+                            );
+                        }
+                    }
+                    Role::Idle => {}
+                },
+                Command::Vote(place_id) => match &mut role {
+                    Role::Host(host) => {
+                        let host_id = host.invite.host_id;
+                        if host.board.vote(host_id, place_id) {
+                            host.announce = true;
+                        }
+                    }
+                    Role::Guest(guest) => {
+                        if let (Some(local), Some(ws)) = (local.as_ref(), guest.ws.as_mut()) {
+                            let _ = write(
+                                ws,
+                                &WireOut::Status {
+                                    status: local.status.wire().to_string(),
+                                    place_id: local.place_id,
+                                    job_id: local.job_id.clone(),
+                                    ready: None,
+                                    vote: Some(place_id),
+                                    suggest: None,
+                                },
+                            );
+                        }
+                        let me = local.as_ref().map(|l| l.me.id).unwrap_or(0);
+                        guest.board.vote(me, place_id);
+                        out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local.as_ref())));
+                    }
+                    Role::Idle => {}
+                },
                 Command::Launch(launch) => match &mut role {
                     Role::Host(host) => {
                         if let Some(local) = local.as_mut() {
@@ -862,10 +1166,24 @@ fn open_host(me: PartyUser, max: usize, out: &Out) -> Result<Host, String> {
         last_heartbeat: Instant::now(),
         announce: true,
         force_snapshot: true,
+        board: PartyBoard::default(),
     })
 }
 
+/// Wall-clock milliseconds, for the ready-check deadline members compare against.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 fn host_tick(host: &mut Host, local: Option<&Local>, out: &Out) {
+    // A ready check that ran out is cleared by the host, so a guest's clock cannot keep a
+    // stale countdown on screen.
+    if host.board.expire(wall_ms()) {
+        host.announce = true;
+    }
     accept_peers(host);
     drain_handshakes(host, out);
     read_peers(host, out);
@@ -1039,10 +1357,23 @@ fn read_peers(host: &mut Host, out: &Out) {
                 status,
                 place_id,
                 job_id,
+                ready,
+                vote,
+                suggest,
             } => {
                 peer.status = PartyStatus::from_wire(&status);
                 peer.place_id = place_id;
                 peer.job_id = job_id;
+                if let Some(ready) = ready {
+                    host.board.set_ready(peer.user.id, ready);
+                }
+                if let Some(vote) = vote {
+                    host.board.vote(peer.user.id, vote);
+                }
+                if let Some(mut suggestion) = suggest {
+                    suggestion.by = peer.user.id;
+                    host.board.suggest(suggestion);
+                }
                 host.announce = true;
             }
             PeerFrame::Launch {
@@ -1175,6 +1506,7 @@ fn announce(host: &mut Host, local: Option<&Local>) {
             host: host.invite.host_id,
             max: host.max,
             members,
+            board: host.board.clone(),
         },
     );
 }
@@ -1349,17 +1681,26 @@ fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
                 if let (Some(local), Some(ws)) = (local, guest.ws.as_mut()) {
                     let _ = write(
                         ws,
-                        &WireOut::Status {
-                            status: local.status.wire().to_string(),
-                            place_id: local.place_id,
-                            job_id: local.job_id.clone(),
-                        },
+                                                    &WireOut::Status {
+                                status: local.status.wire().to_string(),
+                                place_id: local.place_id,
+                                job_id: local.job_id.clone(),
+                                ready: None,
+                                vote: None,
+                                suggest: None,
+                            },
                     );
                 }
             }
-            WireIn::Members { host, max, members } => {
+            WireIn::Members {
+                host,
+                max,
+                members,
+                board,
+            } => {
                 guest.host = host;
                 guest.max = max;
+                guest.board = board.clone();
                 out.emit(PartyEvent::Snapshot(PartySnapshot {
                     code: guest.code.clone(),
                     invite: guest.invite.code(),
@@ -1367,6 +1708,7 @@ fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
                     max,
                     members: members.into_iter().map(WireMember::into_member).collect(),
                     connected: true,
+                    board,
                 }));
             }
             WireIn::Launch {
@@ -1513,6 +1855,7 @@ fn host_snapshot(host: &Host, local: Option<&Local>) -> PartySnapshot {
         max: host.max,
         members,
         connected: true,
+        board: host.board.clone(),
     }
 }
 
@@ -1538,6 +1881,7 @@ fn guest_snapshot(guest: &Guest, local: Option<&Local>) -> PartySnapshot {
         max: guest.max,
         members,
         connected: guest.ws.is_some(),
+        board: guest.board.clone(),
     }
 }
 
@@ -1736,6 +2080,34 @@ mod tests {
     }
 
     #[test]
+    fn a_status_frame_without_actions_is_unchanged_on_the_wire() {
+        let frame = WireOut::Status {
+            status: "ready".to_string(),
+            place_id: 7,
+            job_id: "job".to_string(),
+            ready: None,
+            vote: None,
+            suggest: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&frame).unwrap(),
+            r#"{"t":"status","status":"ready","place_id":7,"job_id":"job"}"#
+        );
+        let acted = WireOut::Status {
+            status: "ready".to_string(),
+            place_id: 7,
+            job_id: "job".to_string(),
+            ready: Some(true),
+            vote: None,
+            suggest: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&acted).unwrap(),
+            r#"{"t":"status","status":"ready","place_id":7,"job_id":"job","ready":true}"#
+        );
+    }
+
+    #[test]
     fn host_target_needs_a_place_and_a_job() {
         let mut snap = PartySnapshot {
             code: "CRB-AB12CD".to_string(),
@@ -1744,6 +2116,7 @@ mod tests {
             max: 8,
             members: Vec::new(),
             connected: true,
+            board: PartyBoard::default(),
         };
         assert!(snap.host_target().is_none());
         snap.members.push(PartyMember {
