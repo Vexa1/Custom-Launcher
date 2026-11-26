@@ -1,22 +1,22 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.17
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.18
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
 > ### Names and identifiers
 >
-> The product is **CREBLOX**. A few *machine* identifiers still use the pre-rebrand name
-> `aurora` — the crate/binary name, the bundle id `com.aurora.app`, the data folder
-> `~/Library/Application Support/Aurora`, and a handful of internal log/status strings.
+> The product is **CREBLOX**, and since 0.4.15 the machine identifiers say so too: crate and
+> binary `creblox`, bundle id `com.creblox.app`, app bundle `CREBLOX.app`, data folder
+> `~/Library/Application Support/CREBLOX` (Windows: `%LOCALAPPDATA%\creblox`).
 >
-> Those are **frozen on purpose**: the bundle id and data folder address every existing
-> user's settings, saved accounts, FastFlags and playtime. Renaming them without a migration
-> would look like "all my data disappeared". Treat `aurora` as a legacy identifier, not a
-> product name — user-facing text, docs and code comments say CREBLOX.
+> Installs from before that rename kept their data under `Aurora` / `aurora`.
+> `auth::data_dir` migrates those folders once, newest first, so saved sessions, accounts,
+> FastFlags and playtime survive. The migration is one-way — do not re-introduce the old
+> paths, and do not expect a second migration to run.
 >
-> A real (migrating) rebrand of those identifiers is tracked as a separate task; see
-> *§7 invariant 6*.
+> The *file* names inside the data folder (`settings.json`, `accounts.dat`, …) are still a
+> frozen contract; see *§7 invariant 6*.
 
 ---
 
@@ -146,7 +146,7 @@ src/
                      Renderer::Glow) and the App.
 
   app.rs             The application shell and all state. ~5k lines.
-                       * `Aurora` struct (legacy type name): settings, session,
+                       * `Creblox` struct: settings, session,
                          caches, page state, worker channels (Msg queue),
                          tray/overlay handles.
                        * `impl eframe::App::ui` — layout order: left nav rail,
@@ -241,8 +241,8 @@ hard-codes a colour for a themed surface.
 
 ## 4. Data and configuration paths (macOS)
 
-Everything CREBLOX owns lives in **`~/Library/Application Support/Aurora/`** (`auth::data_dir`;
-the folder name is a frozen legacy identifier):
+Everything CREBLOX owns lives in **`~/Library/Application Support/CREBLOX/`** (`auth::data_dir`;
+pre-0.4.15 `Aurora` folders are migrated into it on first run):
 
 | File | Contents |
 |---|---|
@@ -316,22 +316,23 @@ Source of truth: `types.rs::Settings`. All fields are optional on read.
 cargo check
 
 # build a release binary
-cargo build --release            # -> target/release/aurora
+cargo build --release            # -> target/release/creblox
 
-# build + assemble + ad-hoc sign + install dist/Aurora.app
+# build + assemble + ad-hoc sign + install dist/CREBLOX.app
 scripts/build-macos-app.sh       # NO_INSTALL=1 to skip the install step
 
-# produce the updater's macOS asset (dist/aurora-<version>-macos.zip)
-scripts/package-release-macos.sh
+# package the source archives the updater consumes
+scripts/package-release.sh
 ```
 
 `MACOSX_DEPLOYMENT_TARGET` is pinned to `10.15` in `.cargo/config.toml`, so
 `MACOSX_DEPLOYMENT_TARGET=10.15 cargo check` and a bare `cargo check` are equivalent (an
-externally set value still wins). On Apple Silicon, `scripts/build-macos-app.sh` builds both
-slices and `lipo`s them into a universal binary, because an arm64-only bundle cannot launch on
-Catalina.
+externally set value still wins). Note that `scripts/build-macos-app.sh` builds for the host
+CPU (`-C target-cpu=native`) unless `CREBLOX_PORTABLE=1` is set, and it does **not** `lipo`
+the slices: a release that must run on Catalina has to be built on an Intel Mac (or built
+portable), because an arm64-only bundle cannot launch there.
 
-Bundle fields that matter: `CFBundleIdentifier com.aurora.app` (frozen legacy id),
+Bundle fields that matter: `CFBundleIdentifier com.creblox.app`,
 `LSMinimumSystemVersion 10.15`, `NSHighResolutionCapable`,
 `NSSupportsAutomaticGraphicsSwitching`.
 
@@ -358,7 +359,7 @@ it cannot link AppKit or sign a bundle, so it never replaces a real macOS build.
 
 | Symptom | Cause / fix |
 |---|---|
-| "CREBLOX is damaged and can't be opened" | The `.app` is ad-hoc signed. Download through a browser so quarantine is applied normally, or `xattr -dr com.apple.quarantine /Applications/Aurora.app`. CREBLOX never modifies the Roblox bundle's signature itself, but FastFlags written inside `RobloxPlayer.app` can invalidate Roblox's own signature — delete that `ClientSettings` folder if Roblox refuses to start. |
+| "CREBLOX is damaged and can't be opened" | The `.app` is ad-hoc signed. Download through a browser so quarantine is applied normally, or `xattr -dr com.apple.quarantine /Applications/CREBLOX.app`. CREBLOX never modifies the Roblox bundle's signature itself, but FastFlags written inside `RobloxPlayer.app` can invalidate Roblox's own signature — delete that `ClientSettings` folder if Roblox refuses to start. |
 | Window opens then closes / `Error: ...` on launch | OpenGL context creation failed. eframe uses glow (OpenGL 3.3+); Catalina on any Metal-capable Mac provides OpenGL 4.1. Very old GPUs without 3.3 cannot run the UI. Check `log.txt` in the data folder. |
 | Blurry text or wrong hitboxes | HiDPI is handled by egui; if a scaling tool (e.g. a custom `NSHighResolutionCapable=NO` plist edit) forces 1x, restore the shipped plist. |
 | Roblox not detected | Re-scan in Settings → Roblox. Install locations supported: `/Applications`, `~/Applications`, versioned folders. |
@@ -366,7 +367,7 @@ it cannot link AppKit or sign a bundle, so it never replaces a real macOS build.
 | FastFlags don't apply | They are written on launch (`sync_saved_fastflags_before_launch`) and on save. Check both `~/Library/Preferences/com.roblox.Roblox/ClientAppSettings.json` and the bundle copy; Roblox updates wipe the bundle copy. |
 | TLS/certificate errors | Networking is `rustls` + bundled `webpki-roots` — it does not use Catalina's system root store, so expired system certificates cannot break it. A corporate MITM proxy will. |
 | Menu bar icon missing | `tray_enabled` is off, or another instance owns `.instance.lock`. |
-| Won't update | The release must follow `RELEASING.md`: normal (not draft/prerelease) release, tag `vX.Y.Z` equal to `Cargo.toml`, assets `aurora-<ver>-macos.zip` / `aurora-<ver>-windows-x64.exe` with a GitHub digest. |
+| Won't update | The release must be a normal (not draft, not prerelease) release whose tag parses newer than the installed version (e.g. `v0.4.18-update`), with the quick-update `.zip` link **first** in the body and a `SHA-256: <64 hex>` line for it — the updater takes the first of each, and a mismatch aborts the install. GitHub release assets are preferred when present, but this repo is private and the downloader sends no auth header, so a body link is the path that actually works. |
 
 ---
 
@@ -389,11 +390,12 @@ Read this before editing. These are not preferences; breaking them breaks Catali
 5. **One theme.** Colours, radii, spacing and type sizes come from `src/theme.rs`
    (`pal(ui)`, `TYPE`, `SPACE`, `on_accent`, `stat_colors`, `card_frame`). No new hard-coded
    hex value for a themed surface, no new magic font size.
-6. **Frozen identifiers.** `aurora` (crate/binary), `com.aurora.app`,
-   `~/Library/Application Support/Aurora`, `Aurora.app`, and the config file names are a data
-   contract: `settings.json`, `fastflags.json`, `playtime.json`, `favorites.txt`,
-   `accounts.dat`, `session.dat`/`session.key` and the FastFlags key names. Add fields with
-   defaults; never rename or move them without a migration. User-facing strings say CREBLOX.
+6. **Frozen identifiers.** The data-folder *file* names — `settings.json`, `fastflags.json`,
+   `playtime.json`, `favorites.txt`, `accounts.dat`, `session.dat`/`session.key` — and the
+   FastFlags key names are a data contract: add fields with defaults, never rename or move
+   them without a migration. The crate/binary (`creblox`), bundle id (`com.creblox.app`) and
+   data folder (`CREBLOX`) were renamed in 0.4.15 behind a one-way migration; do not move
+   them back. User-facing strings say CREBLOX.
 7. **Preserve launcher features.** FastFlags presets, custom flags, multi-account, overlay,
    tray, updates and deep links all ship. Fix them; don't delete them.
 8. **The release contract is `RELEASING.md`.** `Cargo.toml` version == tag, normal release,
