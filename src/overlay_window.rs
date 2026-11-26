@@ -790,10 +790,15 @@ impl OverlayWindowApp {
             (self.game_active || self.session_active) && self.roblox_running && (roblox_in_front || grace)
         };
         if want != self.visible {
-            eprintln!(
-                "overlay-window: show={want} (edit={}, game_active={}, session={}, roblox={}, in_front={roblox_in_front}, grace={grace}, front={front:?})",
+            let reason = format!(
+                "overlay: show={want} (edit={}, game_active={}, session={}, roblox={}, in_front={roblox_in_front}, grace={grace}, front={front:?})",
                 self.edit, self.game_active, self.session_active, self.roblox_running
             );
+            // The helper's stderr goes to overlay.log, but log.txt is the file people read
+            // when the HUD does not appear - so the one line that explains the decision goes
+            // to both.
+            eprintln!("overlay-window: {reason}");
+            crate::auth::log(&reason);
         }
         self.update_visibility(want);
         // Mouse input is enabled only for the editor, and taken back the moment it ends.

@@ -593,6 +593,18 @@ pub fn inspect_player_log_text(text: &str, total_len: u64) -> (LogSessionState, 
     ];
     let last_play = last_pattern_offset(text, &play_markers);
     let last_app = last_pattern_offset(text, &app_markers);
+    // A join banner that no explicit leave follows is a live session, whatever the app-stage
+    // markers say. On macOS the client writes the LuaApp stage while the loading screen is
+    // up, so an app marker can be newer than the last play marker *while playing*; the state
+    // then read "played, then left", and `left_game` threw away the server address that was
+    // sitting in the same log - which is what left the panel on "Server info unavailable"
+    // and the ping on `--` for a whole session.
+    let joined = text.rfind("Joining game '");
+    let left = last_pattern_offset(text, &["returnToLuaApp", "Entered app session."]);
+    if joined.is_some_and(|join| left.is_none_or(|leave| join > leave)) {
+        return (LogSessionState::Playing, is_handoff);
+    }
+
     let has_play = last_play.is_some()
         || text.contains("returnToLuaApp: (stage:UGCGame)")
         || total_len > 32_768;
@@ -696,6 +708,13 @@ pub fn session_banner_active() -> bool {
             continue;
         };
         let (state, _, _, server) = inspect_player_log_full(&path);
+        // A play state is a session even when no server address could be parsed. The join
+        // banner is in the log, but the only network line of that session can carry the
+        // private UDMUX relay, and `extract_server_info_from_log` drops private addresses -
+        // requiring a public IP hid the HUD for the whole session.
+        if matches!(state, LogSessionState::Playing) {
+            return true;
+        }
         // No banner, no session: sitting in the Roblox menu must not show the HUD.
         if server.is_none() {
             continue;
@@ -1276,6 +1295,19 @@ pub fn start_roblox_watcher(
             #[cfg(not(target_os = "macos"))]
             let _ = closed_any;
             if last_sent_server.as_ref() != Some(&active_server) {
+                // One line per change. With no server this is the only place that separates
+                // "the player log was read and had no address in it" from "CREBLOX never
+                // found the log", which is otherwise invisible from log.txt.
+                match &active_server {
+                    Some(s) => crate::auth::log(&format!(
+                        "watcher: server {} place {} (playing place {:?})",
+                        s.ip, s.place_id, active_playing_place
+                    )),
+                    None => crate::auth::log(&format!(
+                        "watcher: no server in the player log (playing place {:?})",
+                        active_playing_place
+                    )),
+                }
                 last_sent_server = Some(active_server.clone());
                 let _ = tx.send(Msg::RobloxServerUpdated(active_server));
                 ctx.request_repaint();

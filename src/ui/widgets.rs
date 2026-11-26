@@ -537,13 +537,24 @@ pub fn wide_row(
     acts: &mut Vec<Action>,
 ) {
     let w = grid_card_width(ui);
+    // Card height is deterministic (see `game_card`), so a card scrolled out of view can be
+    // reserved as a plain rectangle. Laying it out instead costs a title + stats text layout
+    // and a thumbnail request per off-screen card, on every frame - which is exactly what
+    // made these rows drag compared with the grid on the charts page.
+    let card_h = (w * 9.0 / 16.0).floor() + 52.0;
     egui::ScrollArea::horizontal()
         .id_salt(id)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
+                let clip = ui.clip_rect();
                 for g in games {
+                    let left = ui.cursor().min.x;
+                    if left >= clip.right() || left + w <= clip.left() {
+                        ui.allocate_exact_size(egui::vec2(w, card_h), Sense::hover());
+                        continue;
+                    }
                     wide_card(ui, g, wide, preview, playtime, w, acts);
                 }
             });
@@ -559,18 +570,32 @@ pub fn icon_row(
     playtime: &HashMap<u64, crate::playtime::GamePlay>,
     acts: &mut Vec<Action>,
 ) {
+    // Same rule as `wide_row`: 128 px square card plus the 52 px title/stats block.
+    let card_h = 128.0 + 52.0;
     egui::ScrollArea::horizontal()
         .id_salt(id)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
+                let clip = ui.clip_rect();
                 for g in games {
+                    let left = ui.cursor().min.x;
+                    if left >= clip.right() || left + 128.0 <= clip.left() {
+                        ui.allocate_exact_size(egui::vec2(128.0, card_h), Sense::hover());
+                        continue;
+                    }
                     icon_card(ui, g, icons, preview, playtime, 128.0, acts);
                 }
             });
         });
 }
+
+/// Friends strip cell: one presence avatar over two centred text lines.
+pub const BUBBLE_W: f32 = 108.0;
+pub const BUBBLE_H: f32 = 148.0;
+/// Avatar diameter inside a friends bubble.
+pub const BUBBLE_AVATAR: f32 = 96.0;
 
 // Round avatar with optional status dot and sub-label under it
 pub fn bubble(
@@ -586,25 +611,26 @@ pub fn bubble(
     let t = crate::theme::tokens(ui);
     let mut resp = None;
     ui.allocate_ui_with_layout(
-        egui::vec2(72.0, 108.0),
+        egui::vec2(BUBBLE_W, BUBBLE_H),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
-            ui.set_width(72.0);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            // 48 px presence avatar: compact enough for a strip, still a comfortable
-            // click target and big enough to recognise a face.
-            let r = thumb_styled(ui, url, egui::vec2(48.0, 48.0), 24, false);
+            ui.set_width(BUBBLE_W);
+            ui.spacing_mut().item_spacing.y = 3.0;
+            // 96 px presence avatar: a recognisable face and a comfortable click target.
+            // The 0.4.26 token pass halved this to 48, which read as a thumbnail, not a
+            // friend.
+            let r = thumb_styled(ui, url, egui::vec2(BUBBLE_AVATAR, BUBBLE_AVATAR), 48, false);
             let hover_t = ui
                 .ctx()
                 .animate_bool(r.id.with("bubble_hover"), r.hovered());
             if plus {
                 ui.painter()
-                    .circle_filled(r.rect.center(), 23.5, p.friends_card_bg);
+                    .circle_filled(r.rect.center(), 46.5, p.friends_card_bg);
             } else if hover_t > 0.01 {
                 ui.painter().circle_filled(
                     r.rect.center(),
-                    23.5,
-                    Color32::from_white_alpha((hover_t * 10.0).round() as u8),
+                    46.5,
+                    Color32::from_white_alpha((hover_t * 14.0).round() as u8),
                 );
             }
             let ring_col = lerp_color(
@@ -614,27 +640,31 @@ pub fn bubble(
             );
             ui.painter().rect_stroke(
                 r.rect,
-                CornerRadius::same(24),
-                egui::Stroke::new(1.0, ring_col),
+                CornerRadius::same(48),
+                egui::Stroke::new(1.5 + hover_t, ring_col),
                 egui::StrokeKind::Inside,
             );
             if plus {
                 let c = r.rect.center();
-                let st = egui::Stroke::new(1.8, t.muted);
+                let st = egui::Stroke::new(2.8, t.muted);
                 ui.painter()
-                    .line_segment([c - egui::vec2(7.0, 0.0), c + egui::vec2(7.0, 0.0)], st);
+                    .line_segment([c - egui::vec2(13.0, 0.0), c + egui::vec2(13.0, 0.0)], st);
                 ui.painter()
-                    .line_segment([c - egui::vec2(0.0, 7.0), c + egui::vec2(0.0, 7.0)], st);
+                    .line_segment([c - egui::vec2(0.0, 13.0), c + egui::vec2(0.0, 13.0)], st);
             } else if presence > 0 {
-                // 5 px semantic dot with a 1 px canvas ring, never a coloured border.
+                // 16 px semantic dot with a 2 px canvas ring, never a coloured border.
                 let dot_rgb = match presence {
                     2 => crate::theme::EMERALD_RGB,
                     3 => crate::theme::AMBER_RGB,
                     _ => (0x34, 0xD3, 0x99),
                 };
-                let center = r.rect.right_bottom() - egui::vec2(6.0, 6.0);
-                ui.painter().circle_filled(center, 5.5, p.bg);
-                crate::theme::paint_status_dot(ui.painter(), center, dot_rgb);
+                let center = r.rect.right_bottom() - egui::vec2(12.0, 12.0);
+                ui.painter().circle_filled(center, 11.0, p.bg);
+                ui.painter().circle_filled(
+                    center,
+                    8.0,
+                    Color32::from_rgb(dot_rgb.0, dot_rgb.1, dot_rgb.2),
+                );
             }
             ui.add_space(crate::theme::SPACE_1);
             // Names are centred under the avatar: a truncated `Label` inside a horizontal
@@ -648,9 +678,9 @@ pub fn bubble(
             if verified {
                 name.push_str(" ✓");
             }
-            bubble_line(ui, &name, 12.0, p.text);
+            bubble_line(ui, &name, 13.0, p.text);
             if !sub.is_empty() {
-                bubble_line(ui, sub, 10.5, p.muted);
+                bubble_line(ui, sub, 11.5, p.muted);
             }
             resp = Some(r);
         },
@@ -660,8 +690,8 @@ pub fn bubble(
 
 /// One centred, ellipsised line inside a friends/game bubble cell.
 pub fn bubble_line(ui: &mut egui::Ui, text: &str, size: f32, color: Color32) {
-    const MAX_W: f32 = 68.0;
-    const CELL_W: f32 = 72.0;
+    const MAX_W: f32 = BUBBLE_W - 4.0;
+    const CELL_W: f32 = BUBBLE_W;
     let font = egui::FontId::proportional(size);
     let mut galley = ui
         .painter()

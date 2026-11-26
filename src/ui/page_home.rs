@@ -31,12 +31,21 @@ impl Creblox {
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = crate::theme::SPACE_3;
+                    let clip = ui.clip_rect();
                     let add_bubble = bubble(ui, None, "Add Friend", "", 0, true, false)
                         .on_hover_text("Search and add friends on Roblox");
                     if add_bubble.clicked() {
                         acts.push(Action::OpenAddFriend);
                     }
                     for f in &self.friends {
+                        // A head that is scrolled out of the strip still costs a text layout
+                        // and an avatar texture request every frame. Reserve its cell and
+                        // skip it, the same way the game rows cull their cards.
+                        let left = ui.cursor().min.x;
+                        if left >= clip.right() || left + BUBBLE_W <= clip.left() {
+                            ui.allocate_exact_size(egui::vec2(BUBBLE_W, BUBBLE_H), Sense::hover());
+                            continue;
+                        }
                         let sub = if f.presence == 2 && !f.location.is_empty() {
                             f.location.as_str()
                         } else if f.presence == 1 {

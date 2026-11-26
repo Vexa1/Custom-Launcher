@@ -822,6 +822,9 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             )
         };
         if matches!(child.try_wait(), Ok(Some(_))) {
+            // Say so: "overlay window started" followed by silence is what a helper that
+            // dies on its first frame looks like from log.txt.
+            crate::auth::log("overlay: overlay window process exited");
             break; // overlay window exited (Roblox window gone)
         }
 

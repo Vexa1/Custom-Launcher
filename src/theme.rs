@@ -1027,15 +1027,6 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(SPACE_2);
 }
 
-/// A 5 px status dot. Semantic colour only - never part of the chrome.
-pub fn paint_status_dot(painter: &egui::Painter, center: egui::Pos2, rgb: (u8, u8, u8)) {
-    painter.circle_filled(
-        center,
-        2.5,
-        Color32::from_rgb(rgb.0, rgb.1, rgb.2),
-    );
-}
-
 /// An outlined pill for compact filters and value badges (`Any`, `75%+`, `1M+`).
 pub fn value_pill(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
     let t = tokens(ui);

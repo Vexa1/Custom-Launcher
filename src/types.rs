@@ -178,7 +178,9 @@ impl Default for Settings {
             return_to_launcher_on_leave: true,
             minimize_on_game_launch: false,
             close_launcher_during_game: false,
-            overlay_stats_enabled: false,
+            // On by default: the server panel already defaults on, and a default install
+            // that shows a region but no CPU/RAM/ping reads as "the stats are broken".
+            overlay_stats_enabled: true,
             overlay_stats_corner: 1,
             overlay_stats_cpu: true,
             overlay_stats_ram: true,

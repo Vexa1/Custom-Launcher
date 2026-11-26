@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.27
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.28
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -169,6 +169,8 @@ renderer winning; it was data never arriving. The broken links:
 | Network line parser | Fallback required the words "connected to" **and** "server" on one line; the client writes `Connection accepted from 1.2.3.4\|53640` and `UDMUX Address = …` | Explicit marker list, `ip\|port` aware |
 | GeoIP | `ipinfo.io` throttles anonymous traffic, `ip-api.com` rate-limits; both failed silently | Third endpoint (`ipapi.co`) plus a `geoip:` line in the log for every failure |
 | CPU / RAM | A single short `proc_pidinfo` read was treated as failure and left `--` for the session | Any write large enough for the four fields is accepted |
+| Session state vs. loading screen | `inspect_player_log_text` chose `AppAfterPlay` whenever an app-stage marker was newer than the last play marker, and `has_play` was true for **any** log over 32 KB. macOS writes `setStage: (stage:LuaApp)` while the loading screen is up, so a live session could be classified *played, then left* - and the `left_game` gate then threw away the server address sitting in the same file | A join banner that no `returnToLuaApp` / `Entered app session.` follows is `Playing` outright, whatever the app markers say (0.4.28) |
+| Stats panel default | `overlay_enabled` defaulted on while `overlay_stats_enabled` defaulted off, so a fresh install showed a region but no CPU/RAM/ping and read as broken | Both default on; the five sub-toggles were already `true` (0.4.28) |
 
 Ping still needs a real server address: with no IP it prints `—` rather than a number for a
 website, and the next 2 s tick picks it up as soon as the address is known.
