@@ -21,7 +21,16 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 # These archives are what users download. Never write them from a tree that was
 # only `cargo check`ed: prove the real Catalina link runs cc/ld first and abort
 # here if it fails (0.4.25 shipped an undefined symbol this way).
-scripts/verify-release-link.sh
+#
+# CREBLOX_SKIP_LINK_GATE=1 is the only way past it, for producing source
+# archives on a host that cannot link Mach-O at all (no macOS SDK). It says so
+# on stderr every time, so an unverified archive is never a silent one.
+if [[ "${CREBLOX_SKIP_LINK_GATE:-0}" == "1" ]]; then
+    printf '\nwarning: CREBLOX_SKIP_LINK_GATE=1 - the x86_64 Catalina link was NOT verified.\n' >&2
+    printf '         These archives must still be built once on macOS before publishing.\n\n' >&2
+else
+    scripts/verify-release-link.sh
+fi
 
 FULL_ZIP="creblox-${VERSION}-macos-full.zip"
 QUICK_ZIP="creblox-update-${VERSION}-macos.zip"
