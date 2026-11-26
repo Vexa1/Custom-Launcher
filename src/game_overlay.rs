@@ -28,7 +28,7 @@ use crate::types::Settings;
 pub const OVERLAY_WINDOW_FLAG: &str = "--overlay-window";
 const NO_PING: u32 = u32::MAX;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerPanelCfg {
     pub corner: u8,
     /// 0 keeps the panel until the game closes.
@@ -37,7 +37,7 @@ pub struct ServerPanelCfg {
     pub show_job_id: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StatsPanelCfg {
     pub corner: u8,
     pub cpu: bool,
@@ -48,7 +48,7 @@ pub struct StatsPanelCfg {
     pub fps_cap: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FlagsPanelCfg {
     pub corner: u8,
     pub max_lines: usize,
@@ -77,13 +77,13 @@ fn active_preset_name(ff: &FastFlagsConfig) -> &'static str {
     "Custom"
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GamePanelCfg {
     pub corner: u8,
 }
 
 /// A picture drawn inside the game (logo, watermark, map or reference image).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ImageOverlayCfg {
     pub path: String,
     pub corner: u8,
@@ -94,7 +94,7 @@ pub struct ImageOverlayCfg {
     pub offset_y: i16,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CrosshairCfg {
     pub style: u8,
     pub size: u8,
@@ -108,7 +108,7 @@ pub struct CrosshairCfg {
     pub image: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OverlayConfig {
     /// A game session is actually being played. When false the overlay window stays alive
     /// but hides itself, so sitting in the Roblox menu never shows panels over it.
@@ -248,6 +248,10 @@ struct Shared {
     /// A config or server change arrived: rebuild the spec now instead of sleeping out
     /// the rest of the tick. This is what makes a tray toggle land immediately.
     dirty: bool,
+    /// Bumped on every mutation. The loop snapshots it so it can tell whether the `dirty`
+    /// flag it is about to clear was consumed by the spec it just wrote, or arrived while
+    /// that spec was being built (in which case the wake must be kept).
+    rev: u64,
 }
 
 struct Running {
@@ -291,8 +295,14 @@ impl OverlayManager {
         }
         if let Some(r) = &self.running {
             if let Ok(mut g) = r.shared.lock() {
-                g.cfg = cfg;
-                g.dirty = true;
+                // Only wake the loop when something actually changed. This runs on every
+                // tray click, settings save and watcher tick, and waking unconditionally
+                // rebuilt the spec (and re-measured every label) each time for nothing.
+                if g.cfg != cfg {
+                    g.cfg = cfg;
+                    g.dirty = true;
+                    g.rev = g.rev.wrapping_add(1);
+                }
             }
             return;
         }
@@ -304,6 +314,7 @@ impl OverlayManager {
             game_info: None,
             stop: false,
             dirty: false,
+            rev: 0,
         }));
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -331,6 +342,7 @@ impl OverlayManager {
                 g.server_since = Instant::now();
                 g.game_info = None;
                 g.dirty = true;
+                g.rev = g.rev.wrapping_add(1);
             }
         }
     }
@@ -350,6 +362,7 @@ impl OverlayManager {
         if g.cfg.edit != edit {
             g.cfg.edit = edit;
             g.dirty = true;
+            g.rev = g.rev.wrapping_add(1);
         }
     }
 
@@ -642,6 +655,17 @@ impl Usage {
         }
     }
 
+    /// Forgets the previous sample, so re-enabling CPU/RAM does not compute a delta over
+    /// the whole disabled stretch (which reads as a flat 0 %) or reuse old values.
+    fn reset(&mut self) {
+        self.pid = None;
+        self.last_total_ns = 0;
+        self.last_at = Instant::now();
+        self.cpu = 0.0;
+        self.mem_mb = 0.0;
+        self.have = false;
+    }
+
     fn sample(&mut self, pid: Option<u32>) {
         let Some(pid) = pid else {
             self.pid = None;
@@ -779,10 +803,11 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     let mut usage = Usage::new();
     let mut pending_locations: Vec<String> = Vec::new();
     let mut last_game_fetch: Option<Instant> = None;
+    let mut last_place: Option<u64> = None;
     let mut last_text = String::new();
 
     loop {
-        let (cfg, server, since, locations, game_info) = {
+        let (cfg, server, since, locations, game_info, rev) = {
             let Ok(g) = shared.lock() else { break };
             if g.stop {
                 break;
@@ -793,6 +818,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 g.server_since,
                 g.locations.clone(),
                 g.game_info.clone(),
+                g.rev,
             )
         };
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -817,23 +843,40 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             }
         }
 
-        // Game name / player count (refreshed every 30 s).
+        // Game name / player count. Refreshed every 30 s, and at once when the place
+        // changes: `set_server` clears `game_info`, so a timer-only refresh left a new
+        // game labelled "Game" with no player count for up to half a minute.
         if cfg.game.is_some() {
-            if let Some(s) = &server {
-                let due = last_game_fetch.is_none_or(|t| t.elapsed() >= Duration::from_secs(30));
-                if due && s.place_id != 0 {
-                    last_game_fetch = Some(Instant::now());
-                    let place = s.place_id;
-                    let shared2 = Arc::clone(&shared);
-                    let _ = thread::Builder::new()
-                        .name("creblox-gameinfo".to_string())
-                        .spawn(move || {
-                            if let Some(game) = games_by_places(&[place]).into_iter().next() {
-                                if let Ok(mut g) = shared2.lock() {
-                                    g.game_info = Some((game.name, game.playing));
+            match &server {
+                Some(s) => {
+                    let stale =
+                        last_game_fetch.is_none_or(|t| t.elapsed() >= Duration::from_secs(30));
+                    let new_place = last_place != Some(s.place_id);
+                    if s.place_id != 0 && (stale || new_place) {
+                        last_game_fetch = Some(Instant::now());
+                        last_place = Some(s.place_id);
+                        let place = s.place_id;
+                        let shared2 = Arc::clone(&shared);
+                        let _ = thread::Builder::new()
+                            .name("creblox-gameinfo".to_string())
+                            .spawn(move || {
+                                if let Some(game) = games_by_places(&[place]).into_iter().next() {
+                                    if let Ok(mut g) = shared2.lock() {
+                                        // A slow answer for a server the player already
+                                        // left must not overwrite the current one.
+                                        if g.server.as_ref().is_some_and(|s| s.place_id == place) {
+                                            g.game_info = Some((game.name, game.playing));
+                                        }
+                                    }
                                 }
-                            }
-                        });
+                            });
+                    }
+                }
+                // Back in the Roblox menu: the next join is a fresh session, even when it
+                // returns to the same place, so the next fetch must not wait out the timer.
+                None => {
+                    last_place = None;
+                    last_game_fetch = None;
                 }
             }
         }
@@ -846,6 +889,9 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 roblox_pid = procs.iter().max_by_key(|p| p.start_ms).map(|p| p.pid);
             }
             usage.sample(roblox_pid);
+        } else {
+            // Nothing is being sampled: start clean if it is switched back on.
+            usage.reset();
         }
         // Ping: measured even before the server IP is known (Roblox's web edge is the
         // fallback), and reset while switching servers so no stale number is shown.
@@ -871,8 +917,20 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                         spawn_ping(target, Arc::clone(&ping_ms));
                     }
                 }
+            } else {
+                // Ping is off: drop the target so switching it back on shows `--` until
+                // the first real measurement instead of a number from minutes ago.
+                last_ping_target = None;
+                ping_ms.store(NO_PING, Ordering::Relaxed);
             }
         }
+
+        // The helper outlives a session (it is kept alive while Roblox runs), so the
+        // session timer has to start at this join, not when the helper process started.
+        let session_elapsed = match &server {
+            Some(_) => since.elapsed(),
+            None => session_start.elapsed(),
+        };
 
         let mut panels: Vec<Value> = Vec::new();
 
@@ -989,7 +1047,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 lines.push(format!("FPS cap  {fps}"));
             }
             if st.session {
-                lines.push(format!("Session  {}", fmt_session(session_start.elapsed())));
+                lines.push(format!("Session  {}", fmt_session(session_elapsed)));
             }
             if st.clock {
                 lines.push(format!("Time     {}", local_clock()));
@@ -1057,10 +1115,12 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             write_spec(&spec_path, &text);
             last_text = text;
         }
-        // Everything this tick is published; clear the wake flag so the sleep below is not
-        // interrupted by a change that has already been applied.
+        // Clear only the wake this tick consumed. A change that arrived while the spec
+        // above was being built bumped `rev`; keeping `dirty` set makes the sleep below
+        // return at once and apply it, instead of leaving it until the next one-second
+        // tick (which is what made a tray toggle occasionally feel one beat slow).
         if let Ok(mut g) = shared.lock() {
-            g.dirty = false;
+            g.dirty &= g.rev != rev;
         }
 
         if !sleep_unless_stopped(&shared, Duration::from_secs(1)) {

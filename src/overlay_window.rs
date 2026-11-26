@@ -333,6 +333,29 @@ fn tracked(raw: &str) -> String {
     out
 }
 
+/// Splits one HUD line into a muted label and a tabular value.
+///
+/// The label side must be digit-free: `Time     12:34` and `Session  1:23:45` carry their
+/// colons inside the value, and splitting on them turned the clock into `T I M E 1 2` /
+/// `34` and the session into `S E S S I O N 1` / `23:45`. HUD labels are words only, so a
+/// digit before the colon means the whole line is a value.
+fn split_row(line: &str) -> Row {
+    let line = line.trim();
+    if let Some((label, value)) = line.split_once(':') {
+        let label = label.trim();
+        if !label.is_empty() && !label.bytes().any(|b| b.is_ascii_digit()) {
+            return Row {
+                label: tracked(label),
+                value: value.trim().to_string(),
+            };
+        }
+    }
+    Row {
+        label: String::new(),
+        value: line.to_string(),
+    }
+}
+
 /// Rounds a coordinate down to the physical pixel grid, so a filled rect and its 1 px inner
 /// stroke land on whole device pixels on both Retina (2x) and 1080p 1x Catalina displays.
 fn snap_px(v: f32, ppp: f32) -> f32 {
@@ -657,16 +680,7 @@ impl OverlayWindowApp {
                         // numbers line up and stop jittering.
                         let rows = lines
                             .iter()
-                            .map(|line| match line.split_once(':') {
-                                Some((label, value)) if !label.trim().is_empty() => Row {
-                                    label: tracked(label),
-                                    value: value.trim().to_string(),
-                                },
-                                _ => Row {
-                                    label: String::new(),
-                                    value: line.trim().to_string(),
-                                },
-                            })
+                            .map(|line| split_row(line.as_str()))
                             .collect();
                         Panel {
                             id: p["id"].as_str().unwrap_or("").to_string(),
