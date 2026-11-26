@@ -48,6 +48,16 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # The updater's Windows half only ever runs on Windows, so exercise it here: the vm-tests
+      # compile the real `src/zip_update.rs` and `src/release_links.rs`, and
+      # `the_built_launcher_passes_its_own_check` reads CREBLOX_LAUNCHER, which is the exe this
+      # job just built. A PE change that would wedge an in-app update fails on the build, not on
+      # a user's machine.
+      - name: Test the update reader
+        env:
+          CREBLOX_LAUNCHER: ${{ github.workspace }}\target\release\creblox.exe
+        run: cargo test --locked --manifest-path vm-tests/Cargo.toml --test update_zip
+
       - name: Verify the executable
         shell: pwsh
         run: |

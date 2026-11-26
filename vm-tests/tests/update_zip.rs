@@ -176,6 +176,27 @@ fn a_launcher_without_a_pe_header_is_rejected() {
     assert!(err.contains("Windows executable"), "unexpected error: {err}");
 }
 
+/// The Windows CI job points this at the exe it has just built, so the swap checks run against a
+/// real link product instead of a fixture. A dev box has no Windows build, so the test is a no-op
+/// there - and CI fails loudly if it forgets to set the variable, rather than passing quietly.
+#[test]
+fn the_built_launcher_passes_its_own_check() {
+    let Some(path) = std::env::var_os("CREBLOX_LAUNCHER") else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must set CREBLOX_LAUNCHER to the creblox.exe it just built"
+        );
+        return;
+    };
+
+    let path = PathBuf::from(path);
+    let size = zip_update::verify_launcher(&path)
+        .unwrap_or_else(|e| panic!("the built launcher must pass the swap checks: {e}"));
+
+    assert_eq!(size, fs::metadata(&path).expect("launcher metadata").len());
+    assert!(size > zip_update::MIN_LAUNCHER_BYTES);
+}
+
 #[test]
 fn a_console_build_is_rejected() {
     let scratch = Scratch::new("console");
