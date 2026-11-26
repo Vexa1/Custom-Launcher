@@ -1,0 +1,7 @@
+# Catalina is the oldest supported macOS. Pinning this here (instead of only in
+# scripts/build-macos-app.sh) means a plain `cargo build --release` - including
+# the dependency build scripts, which never see the shell's environment - cannot
+# silently produce a binary that requires macOS 11 or newer. An explicit
+# MACOSX_DEPLOYMENT_TARGET in the environment still wins.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "10.15"

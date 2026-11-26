@@ -1,0 +1,3 @@
+Build Aurora.command
+Update Aurora.command
+aurora-update-remove.txt
