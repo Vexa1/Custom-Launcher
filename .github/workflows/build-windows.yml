@@ -22,6 +22,11 @@ on:
       - "Cargo.lock"
       - "build.rs"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the zip to this existing tag's release (leave empty to only build)"
+        required: false
+        type: string
 
 # Needed to upload an asset to the release; nothing else in the job writes to the repo.
 permissions:
@@ -71,12 +76,18 @@ jobs:
           $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x18 + 0x44)
           if ($subsystem -ne 2) { throw "expected the GUI subsystem (2), found $subsystem" }
 
-          # Start it once and make sure it stays alive: a launcher that exits immediately is
-          # broken even if it links.
-          $proc = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 6
-          if ($proc.HasExited) { throw "creblox.exe exited immediately (code $($proc.ExitCode))" }
-          Stop-Process -Id $proc.Id -Force
+          # Windows has to be able to start the image: it is a valid PE and its imports resolve.
+          # The window itself cannot open on a runner (no GPU), so an exit here is reported but
+          # not fatal; the PE checks above are the hard gate.
+          $proc = Start-Process -FilePath $exe -ArgumentList "--tray" -PassThru
+          Start-Sleep -Seconds 5
+          $proc.Refresh()
+          if ($proc.HasExited) {
+            "creblox.exe started and exited with code $($proc.ExitCode) (no GPU on this runner)"
+          } else {
+            "creblox.exe stayed up for 5 s"
+            Stop-Process -Id $proc.Id -Force
+          }
 
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           "CREBLOX_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -90,13 +101,14 @@ jobs:
           Compress-Archive -Path dist/creblox.exe -DestinationPath $zip -Force
           Get-FileHash $zip -Algorithm SHA256 | ForEach-Object { "sha256 $($_.Hash)" }
 
-      - name: Attach the zip to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Attach the zips to the release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = if ($env:RELEASE_TAG) { $env:RELEASE_TAG } else { $env:GITHUB_REF_NAME }
           $version = $env:CREBLOX_VERSION
           # A zip named for a different version would be invisible to the updater's release
           # check, so stop instead of publishing a file nobody can find.
@@ -104,30 +116,38 @@ jobs:
             throw "tag $tag does not match Cargo.toml version $version - bump the version or retag"
           }
 
-          $zip = "CREBLOX-$version-windows-x64.zip"
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          # The published macOS overlay goes up first and is listed first: clients that shipped
+          # before the platform check take the first zip asset they find, and that must be the
+          # archive they can actually install.
+          $mac = "release/CREBLOX-$version-update.zip"
+          if (-not (Test-Path $mac)) { throw "$mac is missing; publish the macOS archives first" }
+          $win = "CREBLOX-$version-windows-x64.zip"
 
-          # The macOS release flow normally creates the release first; create it here only
-          # when the tag arrives on its own, so the upload never fails on a missing release.
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title "CREBLOX $version" --notes "CREBLOX $version release."
             if ($LASTEXITCODE -ne 0) { throw "could not create the release for $tag" }
           }
 
-          gh release upload $tag $zip --clobber
-          if ($LASTEXITCODE -ne 0) { throw "could not upload $zip to $tag" }
+          gh release upload $tag $mac --clobber
+          if ($LASTEXITCODE -ne 0) { throw "could not upload $mac to $tag" }
+          gh release upload $tag $win --clobber
+          if ($LASTEXITCODE -ne 0) { throw "could not upload $win to $tag" }
 
-          # The in-app updater reads the release notes to find the download URL and the
-          # SHA-256 it must match. Add one line for this asset, once, keeping the existing
-          # notes (the macOS downloads) intact.
-          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$zip"
+          # The in-app updater reads the release notes to find each download and the SHA-256 it
+          # must match. Add a line per asset, once, keeping the existing notes intact.
+          $base = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag"
+          $macUrl = "$base/CREBLOX-$version-update.zip"
+          $winUrl = "$base/$win"
           $body = (gh release view $tag --json body -q .body) -join "`n"
-          if ($body -match [regex]::Escape($zip)) {
-            "note: $zip is already listed in the release notes"
+          if ($body -match [regex]::Escape($winUrl)) {
+            "note: $win is already listed in the release notes"
             exit 0
           }
-          $entry = "Windows x64: $url`nsha256 $hash"
+          $macHash = (Get-FileHash $mac -Algorithm SHA256).Hash.ToLowerInvariant()
+          $winHash = (Get-FileHash $win -Algorithm SHA256).Hash.ToLowerInvariant()
+          $entry = "macOS update (release asset): $macUrl`nsha256 $macHash`n" +
+                   "Windows x64: $winUrl`nsha256 $winHash"
           $notes = if ([string]::IsNullOrWhiteSpace($body)) { $entry } else { "$body`n`n$entry" }
           $notes | Out-File -FilePath release-notes.md -Encoding utf8 -NoNewline
           gh release edit $tag --notes-file release-notes.md

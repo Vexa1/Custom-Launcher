@@ -231,15 +231,15 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
                 continue;
             }
             if lower.ends_with(".zip") {
-                let preferred =
-                    crate::release_links::prefers_zip_asset(name, cfg!(target_os = "windows"));
-                let size = a["size"].as_u64().unwrap_or(0);
-                let replace = match &chosen_zip {
-                    None => true,
-                    Some((_, _, _, was_pref)) => !was_pref && preferred,
-                };
-                if replace {
-                    chosen_zip = Some((url.to_string(), name.to_string(), size, preferred));
+                // Only this platform's own build may be taken from the assets. A Windows zip
+                // sitting next to the macOS archive must not replace it: a Mac cannot run a
+                // .exe payload, and older clients take the first zip asset they see.
+                if !crate::release_links::prefers_zip_asset(name, cfg!(target_os = "windows")) {
+                    continue;
+                }
+                if chosen_zip.is_none() {
+                    let size = a["size"].as_u64().unwrap_or(0);
+                    chosen_zip = Some((url.to_string(), name.to_string(), size, true));
                 }
                 continue;
             }
