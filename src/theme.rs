@@ -77,56 +77,60 @@ fn harmonize_auto_border(bg_rgb: [u8; 3], dark: bool) -> Color32 {
 impl Palette {
     pub fn of(dark: bool) -> Self {
         if dark {
-            let border = Color32::from_rgba_unmultiplied(255, 255, 255, 22);
-            let card_bg = Color32::from_rgb(25, 28, 35);
+            // Precision Obsidian: canvas #0B0D11, surface #13161E, hover #191D27,
+            // hairline rgba(255,255,255,0.06).
+            let border = Color32::from_rgba_unmultiplied(255, 255, 255, 15);
+            let card_bg = Color32::from_rgb(0x13, 0x16, 0x1E);
             Self {
-                bg: Color32::from_rgb(17, 19, 24),
+                bg: Color32::from_rgb(0x0B, 0x0D, 0x11),
                 card_bg,
-                surface_bg: Color32::from_rgb(33, 37, 46),
+                surface_bg: Color32::from_rgb(0x19, 0x1D, 0x27),
                 border,
                 profile_border: border,
                 profile_card_bg: card_bg,
                 friends_border: border,
                 friends_card_bg: card_bg,
                 games_border: border,
-                text_border: Color32::from_rgba_unmultiplied(255, 255, 255, 36),
-                text: Color32::from_rgb(240, 242, 245),
-                muted: Color32::from_rgb(156, 163, 175),
-                placeholder: Color32::from_rgb(38, 42, 51),
-                selected_bg: Color32::from_rgb(44, 49, 60),
-                hover_bg: Color32::from_rgb(31, 35, 43),
-                extreme_bg: Color32::from_rgb(26, 29, 36),
-                widget_inactive: Color32::from_rgb(40, 45, 55),
-                widget_hovered: Color32::from_rgb(56, 62, 75),
+                text_border: Color32::from_rgba_unmultiplied(255, 255, 255, 33),
+                text: Color32::from_rgb(0xF1, 0xF3, 0xF6),
+                muted: Color32::from_rgb(0x8E, 0x93, 0x9E),
+                placeholder: Color32::from_rgb(0x10, 0x13, 0x1A),
+                selected_bg: Color32::from_rgb(0x1E, 0x22, 0x30),
+                hover_bg: Color32::from_rgb(0x19, 0x1D, 0x27),
+                extreme_bg: Color32::from_rgb(0x0E, 0x10, 0x15),
+                widget_inactive: Color32::from_rgb(0x19, 0x1D, 0x27),
+                widget_hovered: Color32::from_rgb(0x23, 0x28, 0x38),
                 glass_edition: false,
                 glass_highlight: 0.0,
-                corner_radius: 12,
+                corner_radius: 8,
             }
         } else {
-            let border = Color32::from_rgb(220, 224, 232);
-            let card_bg = Color32::from_rgb(248, 249, 250);
+            // Crisp Studio Alabaster: canvas #F6F7F9, surface #FFFFFF, hover #EAECEF,
+            // hairline rgba(0,0,0,0.07).
+            let border = Color32::from_rgba_unmultiplied(0, 0, 0, 18);
+            let card_bg = Color32::WHITE;
             Self {
-                bg: Color32::from_rgb(255, 255, 255),
+                bg: Color32::from_rgb(0xF6, 0xF7, 0xF9),
                 card_bg,
-                surface_bg: Color32::from_rgb(241, 243, 245),
+                surface_bg: Color32::from_rgb(0xEA, 0xEC, 0xEF),
                 border,
                 profile_border: border,
                 profile_card_bg: card_bg,
                 friends_border: border,
                 friends_card_bg: card_bg,
                 games_border: border,
-                text_border: Color32::from_rgb(204, 210, 222),
-                text: Color32::from_rgb(25, 25, 25),
-                muted: Color32::from_rgb(96, 97, 98),
-                placeholder: Color32::from_rgb(233, 236, 239),
-                selected_bg: Color32::from_rgb(232, 235, 239),
-                hover_bg: Color32::from_rgb(243, 245, 247),
-                extreme_bg: Color32::from_rgb(241, 243, 245),
-                widget_inactive: Color32::from_rgb(235, 238, 241),
-                widget_hovered: Color32::from_rgb(222, 226, 230),
+                text_border: Color32::from_rgba_unmultiplied(0, 0, 0, 38),
+                text: Color32::from_rgb(0x17, 0x19, 0x1D),
+                muted: Color32::from_rgb(0x6B, 0x72, 0x80),
+                placeholder: Color32::from_rgb(0xEE, 0xF0, 0xF3),
+                selected_bg: Color32::from_rgb(0xE3, 0xE6, 0xEA),
+                hover_bg: Color32::from_rgb(0xEA, 0xEC, 0xEF),
+                extreme_bg: Color32::from_rgb(0xEF, 0xF0, 0xF2),
+                widget_inactive: Color32::from_rgb(0xEF, 0xF0, 0xF2),
+                widget_hovered: Color32::from_rgb(0xE3, 0xE6, 0xEA),
                 glass_edition: false,
                 glass_highlight: 0.0,
-                corner_radius: 12,
+                corner_radius: 8,
             }
         }
     }
@@ -815,7 +819,12 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     v.text_options.font_hinting = true;
     // Subpixel binning snaps glyphs to the pixel grid: sharper text, no fuzzy stems.
     v.text_options.subpixel_binning = true;
-    v.window_corner_radius = CornerRadius::same(p.corner_radius);
+    // 6 px controls, 8 px cards, 10 px modals - the whole radius scale from one token.
+    v.window_corner_radius = CornerRadius::same(
+        p.corner_radius
+            .saturating_add(2)
+            .min(RADIUS_MODAL),
+    );
     v.window_stroke = egui::Stroke::new(1.0, p.border);
     if settings.glass_edition {
         v.window_shadow = egui::Shadow {
@@ -826,7 +835,11 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
         };
     }
 
-    let r8 = CornerRadius::same(p.corner_radius.saturating_sub(4).clamp(6, 16));
+    let r8 = CornerRadius::same(
+        p.corner_radius
+            .saturating_sub(2)
+            .clamp(RADIUS_CONTROL, RADIUS_MODAL),
+    );
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.noninteractive.corner_radius = r8;
     v.widgets.noninteractive.fg_stroke.color = text_color;
@@ -896,6 +909,149 @@ pub fn motion_enabled(ctx: &egui::Context) -> bool {
         d.get_temp::<bool>(egui::Id::new("creblox_motion_on"))
             .unwrap_or(true)
     })
+}
+
+// ---------------------------------------------------------------------------
+// CREBLOX design system
+// ---------------------------------------------------------------------------
+//
+// One vocabulary for the whole app: 4 px spacing rhythm, three radii, four type sizes, one
+// accent and three semantic status colours. Pages ask for a *role* (card, control, modal),
+// never a number, so a single change here moves every view together.
+
+/// Spacing rhythm. Everything is a multiple of 4 px; 16 and 24 separate sections.
+pub const SPACE_1: f32 = 4.0;
+pub const SPACE_2: f32 = 8.0;
+pub const SPACE_3: f32 = 12.0;
+pub const SPACE_4: f32 = 16.0;
+pub const SPACE_6: f32 = 24.0;
+
+/// Buttons, inputs and pills.
+pub const RADIUS_CONTROL: u8 = 6;
+/// Cards, thumbnails and panels.
+/// Modals and floating surfaces.
+pub const RADIUS_MODAL: u8 = 10;
+
+pub const TEXT_PAGE: f32 = 20.0;
+pub const TEXT_SECTION: f32 = 14.0;
+pub const TEXT_META: f32 = 11.0;
+
+/// Resolved roles for the current theme. A view of [`Palette`] in design-system terms.
+///
+/// Elevation lives in the palette (`p.bg` -> canvas, `p.card_bg` -> surface,
+/// `p.hover_bg` -> hover); these are the text, hairline and accent roles that cards,
+/// sections and controls share.
+#[derive(Clone, Copy, Debug)]
+pub struct Tokens {
+    /// 1 px resting border: `rgba(255,255,255,0.06)` dark, `rgba(0,0,0,0.07)` light.
+    pub hairline: Color32,
+    /// 1 px hover/focus border, roughly twice the resting contrast.
+    pub hairline_strong: Color32,
+    pub text: Color32,
+    pub muted: Color32,
+    /// The single signature accent (primary CTA, active nav, focused input).
+    pub accent: Color32,
+}
+
+/// Semantic status colours: only ever drawn as a 5 px dot.
+pub const EMERALD_RGB: (u8, u8, u8) = (0x34, 0xD3, 0x99);
+pub const AMBER_RGB: (u8, u8, u8) = (0xF5, 0xB0, 0x4B);
+
+/// Resolves the design tokens for this frame.
+pub fn tokens(ui: &egui::Ui) -> Tokens {
+    let p = pal(ui);
+    let dark = ui.visuals().dark_mode;
+    Tokens {
+        hairline: p.border,
+        hairline_strong: if dark {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 33)
+        } else {
+            Color32::from_rgba_unmultiplied(0, 0, 0, 38)
+        },
+        text: p.text,
+        muted: p.muted,
+        accent: accent_color(ui),
+    }
+}
+
+/// Page header: 20 px semibold.
+pub fn font_page() -> egui::FontId {
+    egui::FontId::new(
+        TEXT_PAGE,
+        egui::FontFamily::Name("Bold".into()),
+    )
+}
+
+/// Section title: 14 px semibold.
+pub fn font_section() -> egui::FontId {
+    egui::FontId::new(
+        TEXT_SECTION,
+        egui::FontFamily::Name("Bold".into()),
+    )
+}
+
+/// Metadata and micro-labels: 11 px.
+pub fn font_meta() -> egui::FontId {
+    egui::FontId::proportional(TEXT_META)
+}
+
+/// Numbers that must not jitter between frames: monospaced digits.
+pub fn font_tabular(size: f32) -> egui::FontId {
+    egui::FontId::monospace(size)
+}
+
+pub fn page_header(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let t = tokens(ui);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(font_page())
+                .color(t.text),
+        )
+        .truncate(),
+    )
+}
+
+/// Section header with the 24 px block rhythm the pages share.
+pub fn section_header(ui: &mut egui::Ui, text: &str) {
+    let t = tokens(ui);
+    ui.add_space(SPACE_6);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .font(font_section())
+                .color(t.text),
+        )
+        .truncate(),
+    );
+    ui.add_space(SPACE_2);
+}
+
+/// A 5 px status dot. Semantic colour only - never part of the chrome.
+pub fn paint_status_dot(painter: &egui::Painter, center: egui::Pos2, rgb: (u8, u8, u8)) {
+    painter.circle_filled(
+        center,
+        2.5,
+        Color32::from_rgb(rgb.0, rgb.1, rgb.2),
+    );
+}
+
+/// An outlined pill for compact filters and value badges (`Any`, `75%+`, `1M+`).
+pub fn value_pill(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
+    let t = tokens(ui);
+    let label = egui::RichText::new(text)
+        .font(font_tabular(TEXT_META))
+        .color(if active { t.text } else { t.muted });
+    ui.add(
+        egui::Button::new(label)
+            .fill(if active { pal(ui).hover_bg } else { Color32::TRANSPARENT })
+            .stroke(egui::Stroke::new(
+                1.0,
+                if active { t.hairline_strong } else { t.hairline },
+            ))
+            .corner_radius(RADIUS_CONTROL)
+            .min_size(egui::vec2(0.0, 22.0)),
+    )
 }
 
 pub fn card_frame_colored(margin: i8, fill: Color32, border: Color32) -> egui::Frame {

@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.25
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.26
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -241,6 +241,49 @@ dock: reopen requested while the app had no visible window
 | Restore path | Nothing on the main thread ever ran the AppKit sequence | `tray_macos.rs::show_launcher_window` logs `window: restoring the launcher` and performs the full sequence - `setActivationPolicy:Regular`, `unhide:`, `deminiaturize:` + `makeKeyAndOrderFront:` per window, `activateIgnoringOtherApps:YES`. The watcher calls it through `dispatch_main`, and `restore_from_tray` calls it directly (`app.rs`), so restoration no longer depends on a frame ever running |
 | Hidden vs. invisible | `[NSApp hide:]` keeps windows *ordered in*, so `isVisible` stays true and "no visible window" alone can no longer detect the hidden state | The watcher also checks `[NSApp isHidden]` (`app_is_hidden`), so both the Dock click and the post-game restore fire in either state |
 | Server panel | `Server: …` / `ROBLOX STATS` sat on `Server info unavailable` and `Ping --` for the whole session: the parser never matched a line | `ip_from_network_lines` matched only `UDMUX Address` / `Connection accepted from` / `Connected to`. It now matches **`serverId:`**, the line a normal join writes, plus `raknet`; it scans the whole 512 KB chunk instead of the last 600 lines (a long session pushes the connect line far back); it skips loopback/private/link-local candidates so a local UDMUX relay can never be GeoIP'd into `Unknown location`; and `placeId:` / `PlaceId:` is parsed when the `! Joining game … place N` banner is missing |
+
+## The CREBLOX design system (0.4.26)
+
+One token module drives every view. Pages ask for a role - card, control, modal, section,
+metadata - and never hard-code a radius, a size or a border colour, so a change here moves
+the whole app at once.
+
+| Token | Where | Value |
+|---|---|---|
+| Spacing rhythm | `theme.rs:923` | `SPACE_1..SPACE_6` = 4 / 8 / 12 / 16 / 24 px |
+| Radii | `theme.rs:930`, `theme.rs:933` | controls `6 px`, cards `8 px`, modals `10 px` - `apply_theme` derives the widget and window radii from one `corner_radius` token, so a custom roundness setting still wins |
+| Type scale | `theme.rs:935` | page header `20 px` semibold, section `14 px` semibold, body `13 px`, metadata `11 px`; `font_tabular` (`theme.rs:999`) is monospaced for every number |
+| Roles | `theme.rs:945`, `theme.rs:961` | `Tokens { hairline, hairline_strong, text, muted, accent }`, resolved per frame from the live palette (custom backgrounds and glass still apply) |
+| Components | `theme.rs:1003`–`theme.rs:1050` | `page_header`, `section_header`, `paint_status_dot`, `value_pill` |
+
+### Palettes
+
+| Surface | Dark (Precision Obsidian) | Light (Crisp Studio Alabaster) |
+|---|---|---|
+| Canvas | `#0B0D11` | `#F6F7F9` |
+| Chrome | `#0E1015` | `#EFEFF2` |
+| Card / surface | `#13161E` | `#FFFFFF` |
+| Hover / active control | `#191D27` | `#EAECEF` |
+| Hairline (resting) | `rgba(255,255,255,0.06)` | `rgba(0,0,0,0.07)` |
+| Hairline (hover/focus) | `rgba(255,255,255,0.13)` | `rgba(0,0,0,0.15)` |
+
+Semantic colour is reserved for 5 px status dots only (`EMERALD` in game, `AMBER` away,
+`CORAL` warning) - never for borders, text or chrome. One accent drives primary actions and
+the focused-input ring. No glows, no gradients, no bracket decorations, no emoji icons.
+
+### What changed in the shared components
+
+| Component | Before | Now |
+|---|---|---|
+| Game card (`widgets.rs:292`) | 19 px titles, stacked stats row, border that thickened on hover | 13 px body title on one line, one metadata line in tabular figures (`94%` · `12.4K`), hairline border that only changes colour on hover, 52 px reserved text height |
+| Stats row (`widgets.rs:141`) | proportional digits, `•` bullets | monospaced digits, 11 px muted labels via `font_meta` |
+| Friends strip (`widgets.rs:576`) | 96 px avatars in 108 px cells | 48 px avatars in 72 px cells, 5 px semantic dot with a canvas ring, 1 px ring that never thickens |
+| Section headers (`widgets.rs:212`) | 19 px bold, ad-hoc spacing | 14 px semibold through `section_header`, 24 px above / 8 px below |
+| Buttons and pills | mixed radii (14, 16, 20) | one control radius (`6 px`) and one outlined `value_pill` |
+
+The `+ Add URL` action, Home headers and the friends strip are converted; the remaining
+pages inherit the new palette, typography, radii and control metrics automatically because
+they draw through `card_frame`, `pal`, `tokens` and this widget set.
 
 What to expect in `~/Library/Application Support/CREBLOX/`: `window: hidden to the menu bar (NSApp hide, event loop stays alive)` when a game starts, `window: restoring the launcher` when it ends or the Dock icon is clicked, and `overlay.log` showing `spec loaded (N panels)` followed by a `Server: <city>, <region>` title within a second of the join.
 

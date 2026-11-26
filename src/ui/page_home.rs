@@ -12,20 +12,25 @@ impl Creblox {
             .as_ref()
             .map(|p| p.friends)
             .unwrap_or(self.friends.len() as u64);
-        ui.add_space(16.0);
-        ui.label(
-            RichText::new(format!("Friends ({count})"))
-                .size(19.0)
-                .strong(),
-        );
-        ui.add_space(10.0);
+        ui.add_space(crate::theme::SPACE_4);
+        // Page header (20 px semibold) with the count in tabular figures, so it does not
+        // nudge the title while friends come online.
+        ui.horizontal(|ui| {
+            crate::theme::page_header(ui, "Friends");
+            ui.label(
+                RichText::new(count.to_string())
+                    .font(crate::theme::font_tabular(crate::theme::TEXT_META))
+                    .color(crate::theme::tokens(ui).muted),
+            );
+        });
+        ui.add_space(crate::theme::SPACE_3);
 
         egui::ScrollArea::horizontal()
             .id_salt("friends")
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.spacing_mut().item_spacing.x = crate::theme::SPACE_3;
                     let add_bubble = bubble(ui, None, "Add Friend", "", 0, true, false)
                         .on_hover_text("Search and add friends on Roblox");
                     if add_bubble.clicked() {
@@ -135,8 +140,8 @@ impl Creblox {
                             .add(
                                 egui::Label::new(
                                     RichText::new(format!("{}  \u{203A}", first.title))
-                                        .size(19.0)
-                                        .strong(),
+                                        .font(crate::theme::font_section())
+                                        .color(crate::theme::tokens(ui).text),
                                 )
                                 .sense(Sense::click()),
                             )
@@ -176,15 +181,14 @@ impl Creblox {
                     .fit_to_exact_size(egui::vec2(15.0, 15.0))
                     .tint(p.text),
             );
-            ui.label(RichText::new("Favorites").size(20.0).strong());
+            ui.label(
+                RichText::new("Favorites")
+                    .font(crate::theme::font_page())
+                    .color(crate::theme::tokens(ui).text),
+            );
             ui.add_space(8.0);
-            let add_btn =
-                egui::Button::new(RichText::new("+ Add URL").size(12.0).strong().color(p.text))
-                    .fill(p.surface_bg)
-                    .stroke(egui::Stroke::new(1.0, p.border))
-                    .corner_radius(14);
-            if ui
-                .add(add_btn)
+            // Shared outlined pill: 6 px radius, hairline border, tabular label.
+            if crate::theme::value_pill(ui, "+ Add URL", false)
                 .on_hover_text("Open, play, or pin a Roblox game manually by URL link or Place ID")
                 .clicked()
             {
