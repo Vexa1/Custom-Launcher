@@ -344,11 +344,12 @@ impl OverlayManager {
         let Some(r) = &self.running else {
             return;
         };
-        if let Ok(mut g) = r.shared.lock() {
-            if g.cfg.edit != edit {
-                g.cfg.edit = edit;
-                g.dirty = true;
-            }
+        let Ok(mut g) = r.shared.lock() else {
+            return;
+        };
+        if g.cfg.edit != edit {
+            g.cfg.edit = edit;
+            g.dirty = true;
         }
     }
 

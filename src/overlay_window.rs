@@ -870,12 +870,11 @@ impl OverlayWindowApp {
 
         // Image overlay first: it is a background decoration, the text panels go on top.
         // Borrowed, never cloned: the old version cloned the path string every frame.
-        if let Some(img) = self.image.as_ref() {
-            if !img.path.is_empty() {
-                let tex = texture_for(ui.ctx(), &mut self.image_tex, &img.path, "overlay-image");
-                if let Some(tex) = tex {
-                    paint_overlay_image(painter, area, title_bar, img, &tex);
-                }
+        let image = self.image.as_ref().filter(|img| !img.path.is_empty());
+        if let Some(img) = image {
+            let tex = texture_for(ui.ctx(), &mut self.image_tex, &img.path, "overlay-image");
+            if let Some(tex) = tex {
+                paint_overlay_image(painter, area, title_bar, img, &tex);
             }
         }
 
