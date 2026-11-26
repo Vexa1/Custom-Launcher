@@ -696,7 +696,7 @@ Read this before editing. These are not preferences; breaking them breaks Catali
 7. **Preserve launcher features.** FastFlags presets, custom flags, multi-account, overlay,
    tray and deep links all ship. Fix them; don't delete them. The dormant update
    subsystem is the one exception: it is scheduled for deletion, not preservation.
-8. **The release contract is `RELEASING.md`.** `Cargo.toml` version == tag, normal release,
+8. **The release contract is `memory.md`.** `Cargo.toml` version == tag, normal release,
    exact asset names, binaries built from the tagged commit, never re-upload an asset.
 9. **The macOS binary must contain an x86_64 slice.** Catalina is Intel-only; keep the
    universal build in `scripts/build-macos-app.sh` working.

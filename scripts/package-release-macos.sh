@@ -7,7 +7,7 @@
 #   2. the packaged app's own binary must contain an x86_64 slice. An Apple
 #      Silicon host build is arm64-only even when the x86_64 target links.
 #
-# RELEASING.md requires this exact asset name and requires the archive to be made
+# memory.md requires this exact asset name and requires the archive to be made
 # with `ditto`: a Finder/`zip` archive drops resource forks and xattrs and breaks
 # the ad-hoc code signature, which makes the updater refuse to install it.
 #
