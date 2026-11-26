@@ -178,7 +178,13 @@ pub fn run() {
     }
     // Reopen the launcher first - that is what the player is waiting for - and only then
     // tear the overlay down. The overlay hides itself as soon as Roblox is not in front.
-    log("companion: reopening launcher");
-    relaunch_launcher();
+    // A server hop kills the old client on purpose and immediately starts the next one, so
+    // the "the game ended" path must not race it and put the launcher in front of it.
+    if crate::server_hop::hop_in_progress() {
+        log("companion: server hop in flight - not reopening the launcher");
+    } else {
+        log("companion: reopening launcher");
+        relaunch_launcher();
+    }
     overlay.stop_and_wait();
 }

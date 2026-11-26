@@ -993,6 +993,10 @@ pub enum Msg {
     TrayAction(crate::tray::TrayEvent),
     /// Result of an off-thread "Close Roblox": how many processes were killed.
     RobloxKilled(usize),
+    /// A tray Server Hop finished: the success line, or why nothing was done.
+    ServerHopDone(crate::server_hop::ServerHopMode, Result<String, String>),
+    /// The active session context changed, so the tray submenu enablement did too.
+    ServerHopAvailability,
     RobloxBackgroundDetected {
         pid: u32,
         is_playing: bool,

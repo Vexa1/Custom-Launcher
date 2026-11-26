@@ -13,6 +13,7 @@ mod overlay_window;
 mod platform;
 mod playtime;
 mod roblox_process;
+mod server_hop;
 #[allow(dead_code)]
 mod telemetry;
 mod theme;

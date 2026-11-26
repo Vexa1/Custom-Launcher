@@ -664,6 +664,24 @@ pub struct ServerInfo {
     pub ip: String,
     pub job_id: String,
     pub place_id: u64,
+    /// `universeId` when the log carries one, `0` otherwise. Server Hop only needs the
+    /// place, so a missing universe id never blocks a hop.
+    pub universe_id: u64,
+}
+
+/// `universeId: 123` / `UniverseId = 123`, when the client writes it at all. Not every
+/// build does, and the join banner never includes it.
+fn universe_id_from_log(text: &str) -> u64 {
+    let lower = text.to_ascii_lowercase();
+    let Some(p) = lower.rfind("universeid") else {
+        return 0;
+    };
+    let rest = text[p + "universeid".len()..].trim_start_matches([' ', '=', ':', '"']);
+    rest.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
 }
 
 fn looks_like_ip(s: &str) -> bool {
@@ -784,6 +802,7 @@ pub fn extract_server_info_from_log(text: &str) -> Option<ServerInfo> {
             ip,
             job_id: String::new(),
             place_id: 0,
+            universe_id: universe_id_from_log(text),
         });
     };
     let tail = &text[idx..];
@@ -812,6 +831,7 @@ pub fn extract_server_info_from_log(text: &str) -> Option<ServerInfo> {
         ip,
         job_id,
         place_id,
+        universe_id: universe_id_from_log(text),
     })
 }
 
@@ -1130,6 +1150,10 @@ pub fn start_roblox_watcher(
             let logs_dir = roblox_logs_dir();
             let mut active_playing_place: Option<u64> = None;
             let mut active_server: Option<ServerInfo> = None;
+            // The server of a session that is actually `Playing`, which is what a hop may
+            // leave. `active_server` is broader on purpose (the overlay wants an address
+            // even in an unrecognised state), so the two are tracked separately.
+            let mut active_playing_server: Option<ServerInfo> = None;
             let mut closed_any = false;
             for p in procs {
                 if recently_closed.contains_key(&p.pid) {
@@ -1178,6 +1202,7 @@ pub fn start_roblox_watcher(
                 let is_playing = matches!(log_state, Some((LogSessionState::Playing, _)));
                 if is_playing {
                     ever_playing.insert(p.pid);
+                    active_playing_server = full_session.as_ref().and_then(|f| f.3.clone());
                 }
                 let launch_may_be_starting = launched_game
                     && proc_age_ms < 90_000
@@ -1294,6 +1319,20 @@ pub fn start_roblox_watcher(
             }
             #[cfg(not(target_os = "macos"))]
             let _ = closed_any;
+            // Publish the session to the hop engine. Only a live `Playing` session with both
+            // the place and the job known can be hopped; leaving the game clears it, which
+            // is what grays the tray submenu out again.
+            let hop_context = active_playing_server
+                .filter(|s| s.place_id > 0 && !s.job_id.is_empty())
+                .map(|s| crate::server_hop::HopContext {
+                    place_id: s.place_id,
+                    job_id: s.job_id,
+                    universe_id: s.universe_id,
+                });
+            if crate::server_hop::set_context(hop_context) {
+                let _ = tx.send(Msg::ServerHopAvailability);
+                ctx.request_repaint();
+            }
             if last_sent_server.as_ref() != Some(&active_server) {
                 // One line per change. With no server this is the only place that separates
                 // "the player log was read and had no address in it" from "CREBLOX never

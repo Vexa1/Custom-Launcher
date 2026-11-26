@@ -43,6 +43,9 @@ const ITEM_PRESET_COMPETITIVE: &str = "creblox.preset.competitive";
 const ACCOUNT_SLOTS: usize = 4;
 const ITEM_DISCORD: &str = "creblox.discord";
 const ITEM_UPDATES: &str = "creblox.updates";
+const ITEM_HOP_RANDOM: &str = "creblox.hop.random";
+const ITEM_HOP_LEAST: &str = "creblox.hop.least";
+const ITEM_HOP_PING: &str = "creblox.hop.ping";
 const ITEM_QUIT: &str = "creblox.quit";
 
 const LAUNCH_AGENT_LABEL: &str = "com.creblox.launcher";
@@ -64,6 +67,8 @@ pub enum TrayEvent {
     EditOverlayPosition,
     CopyJobId,
     CloseRoblox,
+    /// Move to a different public server of the place being played.
+    ServerHop(crate::server_hop::ServerHopMode),
     /// Index into `TrayState.accounts`; the app resolves it, because it owns the list.
     SwitchAccountSlot(usize),
     ApplyQualityPreset,
@@ -86,6 +91,8 @@ pub struct TrayState {
     pub server_line: String,
     /// Roblox Job ID of the current server, empty when unknown.
     pub job_id: String,
+    /// A live game session with a known place and job: the Server Hop submenu is usable.
+    pub hop_enabled: bool,
     /// A Roblox player process is alive, so "Close Roblox" has something to close.
     pub roblox_running: bool,
     /// Saved accounts for the switcher, active one prefixed with a check mark.
@@ -108,6 +115,7 @@ impl Default for TrayState {
             signed_in: false,
             server_line: String::new(),
             job_id: String::new(),
+            hop_enabled: false,
             roblox_running: false,
             accounts: Vec::new(),
             overlay_server: true,
@@ -145,6 +153,13 @@ fn map_menu_id(id: &str) -> Option<TrayEvent> {
         ITEM_DISCORD => Some(TrayEvent::ToggleDiscordRpc),
         ITEM_UPDATES => Some(TrayEvent::CheckUpdates),
         ITEM_QUIT => Some(TrayEvent::QuitApp),
+        ITEM_HOP_RANDOM => Some(TrayEvent::ServerHop(crate::server_hop::ServerHopMode::Random)),
+        ITEM_HOP_LEAST => Some(TrayEvent::ServerHop(
+            crate::server_hop::ServerHopMode::LeastPlayers,
+        )),
+        ITEM_HOP_PING => Some(TrayEvent::ServerHop(
+            crate::server_hop::ServerHopMode::LowestPing,
+        )),
         _ => id
             .strip_prefix(ITEM_ACCOUNT_PREFIX)
             .and_then(|slot| slot.parse::<usize>().ok())
@@ -161,6 +176,9 @@ pub struct TrayController {
     status_item: MenuItem,
     server_item: MenuItem,
     copy_job_item: MenuItem,
+    /// The Server Hop submenu: grayed out until a game session is live.
+    hop_menu: Option<Submenu>,
+    hop_items: Vec<MenuItem>,
     close_roblox_item: MenuItem,
     account_items: Vec<MenuItem>,
     preset_quality_item: MenuItem,
@@ -206,6 +224,33 @@ impl TrayController {
             initial.roblox_running,
             None,
         );
+        // Server Hop: three fixed slots, enabled together with their parent submenu. Built
+        // once at startup like the account switcher, because native menu items are not
+        // rebuilt while the app runs.
+        let hop_random_item = MenuItem::with_id(
+            ITEM_HOP_RANDOM,
+            "Quick Hop (Any Server)",
+            initial.hop_enabled,
+            None,
+        );
+        let hop_least_item = MenuItem::with_id(
+            ITEM_HOP_LEAST,
+            "Least Players",
+            initial.hop_enabled,
+            None,
+        );
+        let hop_ping_item = MenuItem::with_id(
+            ITEM_HOP_PING,
+            "Lowest Ping",
+            initial.hop_enabled,
+            None,
+        );
+        let hop_menu = Submenu::with_items(
+            "Server Hop",
+            initial.hop_enabled,
+            &[&hop_random_item, &hop_least_item, &hop_ping_item],
+        )
+        .ok();
         let account_items: Vec<MenuItem> = (0..ACCOUNT_SLOTS)
             .map(|slot| {
                 MenuItem::with_id(
@@ -270,6 +315,7 @@ impl TrayController {
                 [&preset_quality_item, &preset_competitive_item];
             let presets_menu =
                 Submenu::with_items("FastFlags Preset", true, &preset_refs).ok()?;
+            let hop_menu_ref: &dyn IsMenuItem = hop_menu.as_ref()?;
             let menu = Menu::with_items(&[
                 &show_item,
                 &hide_item,
@@ -287,6 +333,7 @@ impl TrayController {
                 &server_item,
                 &copy_job_item,
                 &close_roblox_item,
+                hop_menu_ref,
                 &sep3,
                 &server_overlay_item,
                 &stats_overlay_item,
@@ -364,6 +411,8 @@ impl TrayController {
             status_item,
             server_item,
             copy_job_item,
+            hop_menu,
+            hop_items: vec![hop_random_item, hop_least_item, hop_ping_item],
             close_roblox_item,
             account_items,
             preset_quality_item,
@@ -453,6 +502,16 @@ impl TrayController {
             next.server_line.clone()
         });
         self.copy_job_item.set_enabled(!next.job_id.is_empty());
+        // A hop is only offered mid-game: idle, or a session whose server has not parsed
+        // yet, leaves the submenu grayed out instead of hiding it (a menu that moves is
+        // harder to use than one that is visibly unavailable).
+        let hop_ready = next.enabled && next.hop_enabled;
+        for item in &self.hop_items {
+            item.set_enabled(hop_ready);
+        }
+        if let Some(menu) = &self.hop_menu {
+            menu.set_enabled(hop_ready);
+        }
         self.close_roblox_item
             .set_enabled(next.enabled && next.roblox_running);
         for (slot, item) in self.account_items.iter().enumerate() {
@@ -1001,7 +1060,10 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
                 // sends would never be read.
                 let game_over = !dock_click
                     && HIDDEN_FOR_GAME.load(std::sync::atomic::Ordering::Relaxed)
-                    && !game_still_running();
+                    && !game_still_running()
+                    // A hop kills the old client and starts the next one: that gap looks
+                    // exactly like "the game ended" and must not raise the launcher.
+                    && !crate::server_hop::hop_in_progress();
                 if !dock_click && !game_over {
                     idle_checks = 0;
                     continue;

@@ -314,6 +314,7 @@ impl Creblox {
                 signed_in: logged_in,
                 server_line: String::new(),
                 job_id: String::new(),
+                hop_enabled: false,
                 roblox_running: false,
                 accounts: Vec::new(),
                 overlay_server: settings.overlay_enabled,
@@ -2717,6 +2718,44 @@ impl Creblox {
                     };
                     self.sync_tray_state();
                 }
+                Msg::ServerHopAvailability => self.sync_tray_state(),
+                Msg::ServerHopDone(mode, result) => match result {
+                    Ok(line) => {
+                        // A hop launches a fresh client, so the watcher keeps its brisk
+                        // polling cadence for the next few seconds.
+                        self.last_roblox_launch_ms
+                            .store(now_unix_ms(), Ordering::Relaxed);
+                        self.status = line.clone();
+                        crate::auth::log(&format!("hop: {} finished", mode.label()));
+                        self.push_toast(
+                            NotificationSource::Creblox,
+                            ToastKind::Success,
+                            "Server Hop",
+                            line,
+                            None,
+                            None,
+                            None,
+                            6.0,
+                            true,
+                        );
+                    }
+                    Err(e) => {
+                        // The old game was left alone (or the launcher came back), so this
+                        // is a message, not a state to recover from.
+                        self.status = format!("Server Hop failed: {e}");
+                        self.push_toast(
+                            NotificationSource::Creblox,
+                            ToastKind::Error,
+                            "Server Hop",
+                            e,
+                            None,
+                            None,
+                            None,
+                            7.5,
+                            true,
+                        );
+                    }
+                },
                 Msg::TrayAction(ev) => {
                     crate::auth::log(&format!("tray: {ev:?}"));
                     match ev {
@@ -2790,6 +2829,7 @@ impl Creblox {
                                 }
                             }
                         }
+                        TrayEvent::ServerHop(mode) => self.hop_to_server(mode),
                         TrayEvent::CloseRoblox => {
                             // Deliberately the same call Settings uses, so the tray cannot
                             // close a different set of processes than the UI would - but off
@@ -3352,6 +3392,33 @@ impl Creblox {
                 ))
             });
         }
+    }
+
+    /// Start a Server Hop from the tray menu.
+    ///
+    /// The lookup, the kill and the relaunch happen on a worker thread (two network round
+    /// trips plus process teardown); the UI only reports that a hop is in progress. The
+    /// worker refuses before touching the running client when there is no target.
+    pub fn hop_to_server(&mut self, mode: crate::server_hop::ServerHopMode) {
+        let Some(cookie) = self.cookie.clone() else {
+            self.status = "Sign in to hop servers".to_string();
+            self.sync_tray_state();
+            return;
+        };
+        if !crate::server_hop::in_game() {
+            self.status = "Server Hop needs an active game session".to_string();
+            self.sync_tray_state();
+            return;
+        }
+        self.status = format!("Server Hop: {} - looking for a server...", mode.label());
+        self.sync_tray_state();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::server_hop::run_hop(mode, &cookie);
+            let _ = tx.send(Msg::ServerHopDone(mode, result));
+            ctx.request_repaint();
+        });
     }
 
     pub fn launch_private_server(&self, place_id: u64, link_code: String) {
@@ -3969,6 +4036,9 @@ impl Creblox {
                 .as_ref()
                 .map(|i| i.job_id.clone())
                 .unwrap_or_default(),
+            // The hop engine owns this decision: true only while a live `Playing` session has
+            // both its place and its job, so the submenu cannot be used from the desktop app.
+            hop_enabled: crate::server_hop::in_game(),
             // The menu item is only useful while a player process exists; `roblox_running`
             // is already maintained by the process scan that drives the tray state.
             roblox_running: self.roblox_running || self.active_roblox_place_id.is_some(),
@@ -4155,6 +4225,13 @@ impl Creblox {
     }
 
     pub fn return_to_launcher(&mut self) {
+        // A Server Hop ends one session and starts the next on purpose. The gap between them
+        // is exactly what this function reacts to, so it must not raise the launcher over the
+        // game that is being joined. The hop window expires on its own if a hop fails.
+        if crate::server_hop::hop_in_progress() {
+            crate::auth::log("hop: launcher restore suppressed while the hop is in flight");
+            return;
+        }
         // CREBLOX hid itself when the game was launched, so it always comes back - even when
         // "return to the launcher" is off: the window should never go away for good.
         if self.hidden_for_game {

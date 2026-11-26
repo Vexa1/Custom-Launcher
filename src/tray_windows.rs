@@ -18,7 +18,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
     DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW,
     GetSystemMetrics, HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_CHECKED, MF_GRAYED,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassW,
     RegisterWindowMessageW, SM_CXSMICON, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
     SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP,
     WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
@@ -50,6 +51,9 @@ const CMD_EDIT_OVERLAY: usize = 1007;
 const CMD_TOGGLE_DISCORD_RPC: usize = 1004;
 const CMD_CHECK_UPDATES: usize = 1005;
 const CMD_QUIT_APP: usize = 1006;
+const CMD_HOP_RANDOM: usize = 1008;
+const CMD_HOP_LEAST: usize = 1009;
+const CMD_HOP_PING: usize = 1010;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayEvent {
@@ -68,6 +72,8 @@ pub enum TrayEvent {
     EditOverlayPosition,
     CopyJobId,
     CloseRoblox,
+    /// Move to a different public server of the place being played.
+    ServerHop(crate::server_hop::ServerHopMode),
     /// Index into `TrayState.accounts`; the app resolves it, because it owns the list.
     SwitchAccountSlot(usize),
     ApplyQualityPreset,
@@ -87,6 +93,8 @@ pub struct TrayState {
     pub signed_in: bool,
     pub server_line: String,
     pub job_id: String,
+    /// A live game session with a known place and job: the Server Hop submenu is usable.
+    pub hop_enabled: bool,
     /// A Roblox player process is alive (the macOS menu uses this to enable its
     /// "Close Roblox" item; Windows keeps the action in Settings).
     pub roblox_running: bool,
@@ -110,6 +118,7 @@ impl Default for TrayState {
             signed_in: false,
             server_line: String::new(),
             job_id: String::new(),
+            hop_enabled: false,
             roblox_running: false,
             accounts: Vec::new(),
             overlay_server: true,
@@ -705,6 +714,30 @@ unsafe fn show_context_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_GRAYED, 0, wide_nul(&status_label).as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
+        // Server Hop: grayed out while no game is live, so the entry never moves around
+        // and a click while idle cannot close a client that is not playing.
+        let hop_sub = CreatePopupMenu();
+        if !hop_sub.is_null() {
+            for (cmd, label) in [
+                (CMD_HOP_RANDOM, "Quick Hop (Any Server)"),
+                (CMD_HOP_LEAST, "Least Players"),
+                (CMD_HOP_PING, "Lowest Ping"),
+            ] {
+                AppendMenuW(hop_sub, MF_STRING, cmd, wide_nul(label).as_ptr());
+            }
+            let hop_flag = if state.hop_enabled {
+                MF_POPUP
+            } else {
+                MF_POPUP | MF_GRAYED
+            };
+            AppendMenuW(
+                menu,
+                hop_flag,
+                hop_sub as usize,
+                wide_nul("Server Hop").as_ptr(),
+            );
+        }
+
         let rpc_flag = if state.discord_rpc_enabled {
             MF_STRING | MF_CHECKED
         } else {
@@ -776,6 +809,15 @@ unsafe fn show_context_menu(hwnd: HWND) {
                 CMD_EDIT_OVERLAY => emit_tray_event(TrayEvent::EditOverlayPosition),
                 CMD_TOGGLE_DISCORD_RPC => emit_tray_event(TrayEvent::ToggleDiscordRpc),
                 CMD_CHECK_UPDATES => emit_tray_event(TrayEvent::CheckUpdates),
+                CMD_HOP_RANDOM => emit_tray_event(TrayEvent::ServerHop(
+                    crate::server_hop::ServerHopMode::Random,
+                )),
+                CMD_HOP_LEAST => emit_tray_event(TrayEvent::ServerHop(
+                    crate::server_hop::ServerHopMode::LeastPlayers,
+                )),
+                CMD_HOP_PING => emit_tray_event(TrayEvent::ServerHop(
+                    crate::server_hop::ServerHopMode::LowestPing,
+                )),
                 CMD_QUIT_APP => emit_tray_event(TrayEvent::QuitApp),
                 _ => {}
             }

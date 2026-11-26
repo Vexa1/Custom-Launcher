@@ -1422,6 +1422,57 @@ pub fn fetch_game_servers(
     Ok((servers, next))
 }
 
+/// The public-server pool for one place, several pages deep.
+///
+/// `sort_order` is the API's own value - `"Asc"` (fewest players first) or `"Desc"` - and
+/// the caller picks it, because the hop modes rank differently and the panel keeps its own
+/// ordering. Servers are not filtered here: the caller knows the job id it must avoid.
+pub fn fetch_public_server_pool(
+    place_id: u64,
+    sort_order: &str,
+    pages: usize,
+    cookie: Option<&str>,
+) -> Result<Vec<ServerItem>, String> {
+    let order = if sort_order.eq_ignore_ascii_case("asc") {
+        "Asc"
+    } else {
+        "Desc"
+    };
+    let mut out: Vec<ServerItem> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..pages.clamp(1, 3) {
+        let mut url = format!(
+            "https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder={order}&limit=100"
+        );
+        if let Some(c) = cursor.as_deref().filter(|s| !s.is_empty()) {
+            url.push_str("&cursor=");
+            url.push_str(&enc(c));
+        }
+        let v = auth_get_json(&url, cookie)?;
+        for s in v["data"].as_array().into_iter().flatten() {
+            let Some(id) = s["id"].as_str().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            out.push(ServerItem {
+                id: id.to_string(),
+                playing: s["playing"].as_u64().unwrap_or(0),
+                max_players: s["maxPlayers"].as_u64().unwrap_or(0),
+                ping: s["ping"].as_u64(),
+                fps: s["fps"].as_f64(),
+            });
+        }
+        cursor = v["nextPageCursor"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 pub fn vote_game(universe_id: u64, vote: Option<bool>, cookie: &str) -> Result<(), String> {
     patch_csrf(
         &format!("https://games.roblox.com/v1/games/{universe_id}/user-votes"),
