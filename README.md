@@ -669,6 +669,11 @@ files by path (`#[path = "../../src/party.rs"]`) and supplies stand-ins only for
 window, a Roblox session or macOS (`eframe` stub, `api`, `auth`, `roblox_process`). Add a module
 there when you want host-runnable coverage of it, and put new checks in `vm-tests/tests/`.
 
+A stand-in can go stale without breaking the harness, so `vm-tests/tests/stub_drift.rs`
+re-reads `src/types.rs`, `src/api.rs`, `src/auth.rs` and `src/roblox_process.rs` and fails when
+a restated struct field, variant payload or function signature no longer matches the real one.
+`scripts/verify.sh` runs it first, so a shape change fails there instead of passing quietly.
+
 Why a release build is untouched:
 
 * the root package does not depend on `vm-tests`, so `cargo build --release` never compiles it;

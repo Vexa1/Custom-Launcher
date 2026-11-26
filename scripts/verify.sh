@@ -24,6 +24,11 @@ if [[ -z "${CC_x86_64_apple_darwin:-}" && -x /tmp/cc-darwin ]]; then
     fi
 fi
 
+# Fail fast and unambiguously if a stand-in no longer matches the real declaration, before the
+# rest of the suite can pass against a stale shape.
+echo "== vm-tests: stand-ins still match the launcher's types and signatures"
+cargo test --locked --manifest-path vm-tests/Cargo.toml --test stub_drift
+
 echo "== vm-tests: real party + server-hop code on this host"
 cargo test --locked --manifest-path vm-tests/Cargo.toml
 
