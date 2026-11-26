@@ -730,7 +730,12 @@ fn relaunch_app_bundle() {
 pub fn dispatch_main<F: FnOnce() + Send + 'static>(f: F) {
     use std::os::raw::c_void;
     unsafe extern "C" {
-        fn dispatch_get_main_queue() -> *mut c_void;
+        // `dispatch_get_main_queue()` is a C **macro** in <dispatch/queue.h> that expands to
+        // `&_dispatch_main_q`; it is not an exported function. Declaring it as one compiles
+        // (and even passes `cargo check`) but fails at `ld` with
+        //   "_dispatch_get_main_queue, referenced from ..."
+        // The real libSystem symbol is the global queue object below.
+        static _dispatch_main_q: c_void;
         fn dispatch_async_f(
             queue: *mut c_void,
             context: *mut c_void,
@@ -742,7 +747,10 @@ pub fn dispatch_main<F: FnOnce() + Send + 'static>(f: F) {
         f();
     }
     let boxed = Box::into_raw(Box::new(f));
-    unsafe { dispatch_async_f(dispatch_get_main_queue(), boxed.cast(), trampoline::<F>) };
+    unsafe {
+        let queue = std::ptr::addr_of!(_dispatch_main_q) as *mut c_void;
+        dispatch_async_f(queue, boxed.cast(), trampoline::<F>);
+    }
 }
 
 /// Hides the launcher **without** freezing the egui event loop.

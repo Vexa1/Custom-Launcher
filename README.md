@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.26
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.4.27
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -241,6 +241,18 @@ dock: reopen requested while the app had no visible window
 | Restore path | Nothing on the main thread ever ran the AppKit sequence | `tray_macos.rs::show_launcher_window` logs `window: restoring the launcher` and performs the full sequence - `setActivationPolicy:Regular`, `unhide:`, `deminiaturize:` + `makeKeyAndOrderFront:` per window, `activateIgnoringOtherApps:YES`. The watcher calls it through `dispatch_main`, and `restore_from_tray` calls it directly (`app.rs`), so restoration no longer depends on a frame ever running |
 | Hidden vs. invisible | `[NSApp hide:]` keeps windows *ordered in*, so `isVisible` stays true and "no visible window" alone can no longer detect the hidden state | The watcher also checks `[NSApp isHidden]` (`app_is_hidden`), so both the Dock click and the post-game restore fire in either state |
 | Server panel | `Server: …` / `ROBLOX STATS` sat on `Server info unavailable` and `Ping --` for the whole session: the parser never matched a line | `ip_from_network_lines` matched only `UDMUX Address` / `Connection accepted from` / `Connected to`. It now matches **`serverId:`**, the line a normal join writes, plus `raknet`; it scans the whole 512 KB chunk instead of the last 600 lines (a long session pushes the connect line far back); it skips loopback/private/link-local candidates so a local UDMUX relay can never be GeoIP'd into `Unknown location`; and `placeId:` / `PlaceId:` is parsed when the `! Joining game … place N` banner is missing |
+
+## Catalina FFI invariants (read before adding any AppKit/libdispatch call)
+
+These are build-breaking rules, not style preferences. `cargo check` cannot catch the first
+one, which is why 0.4.25 shipped and 0.4.26 fixed it.
+
+| Rule | Why |
+|---|---|
+| **Never declare `dispatch_get_main_queue` as an `extern "C"` function.** It is a C *macro* in `<dispatch/queue.h>` that expands to `&_dispatch_main_q`; there is no such symbol to link against | Declaring it compiles, then `ld` fails with `Undefined symbols: "_dispatch_get_main_queue", referenced from creblox::tray::platform::dispatch_main`. Use the real exported global: `static _dispatch_main_q: c_void;` and pass `&_dispatch_main_q` as the queue (`tray_macos.rs::dispatch_main`) |
+| `dispatch_async_f` is an ordinary function and may be declared normally | It has been exported since 10.6, so it is safe on 10.15 |
+| Every framework symbol must come from a framework actually linked | CoreGraphics, CoreFoundation and `objc` are declared with `#[link(name = ...)]`; anything from AppKit is reached through `objc_msgSend` with a runtime selector, so no 11.0+ symbol can leak in |
+| Verify with `cargo build --release --target x86_64-apple-darwin`, not `cargo check` | Only the release build runs `cc`/`ld`; a check-only workflow cannot see a missing symbol |
 
 ## The CREBLOX design system (0.4.26)
 

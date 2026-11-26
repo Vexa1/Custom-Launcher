@@ -876,7 +876,7 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     // Read by the handful of places that animate on their own clock (toasts).
     ctx.data_mut(|d| {
         d.insert_temp(
-            egui::Id::new("creblox_motion_on"),
+            egui::Id::NULL.with("creblox_motion_on"),
             settings.animations_enabled,
         );
     });
@@ -906,7 +906,7 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
 /// True while the user has left interface motion on. Set by [`apply_theme`].
 pub fn motion_enabled(ctx: &egui::Context) -> bool {
     ctx.data(|d| {
-        d.get_temp::<bool>(egui::Id::new("creblox_motion_on"))
+        d.get_temp::<bool>(egui::Id::NULL.with("creblox_motion_on"))
             .unwrap_or(true)
     })
 }
