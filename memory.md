@@ -223,7 +223,7 @@ curl -s https://api.github.com/repos/Vexa1/Custom-Launcher/releases/latest \
   | python3 -c "
 import json,sys,re
 b=json.load(sys.stdin)['body']
-u=next(t.strip('()') for t in b.split() if t.startswith('https://') and '.zip' in t)
+u=re.search(r'https://\S+?\.zip', b).group(0)
 print('first zip:', u)
 print('hash on that line:', re.search(r'[0-9a-f]{64}', b.split(u)[1].split(chr(10))[0]).group(0))"
 
@@ -237,7 +237,7 @@ for a in d['assets']:
     print(a['size'], a['name'], a['browser_download_url'])
 print('assets:', len(d['assets']))"
 
-# 5. the macOS selection rule still finds its own archive in that asset list
+# 5. the asset list: empty while Windows is paused, so nothing may be picked from it
 curl -s https://api.github.com/repos/Vexa1/Custom-Launcher/releases/latest \
   | python3 -c "
 import json,sys
@@ -251,10 +251,12 @@ for plat in ('macos','windows'):
     print(plat, '->', pick)"
 ```
 
-The third check must show `...-update.zip` first and the hash printed for *that* file. The fifth
-must print the macOS archive for `macos`, and `None` for `windows` while it is paused (no zip of
-that name is attached, and the parser must not fall back to the macOS one). Do not look for,
-download or verify a Windows asset - there is none to check.
+The third check must show `...-update.zip` first and the hash printed for *that* file. Its
+pattern matches a Markdown link as well as a bare URL, exactly as the updater does (`find("https://")`
+inside each whitespace token). The fifth must print `None` for both platforms while Windows is
+paused: there are no assets, so the updater falls back to the notes link the third check verified,
+and a Windows build finds no Windows zip there and reports no update instead of installing the
+macOS one. Do not look for, download or verify a Windows asset - there is none to check.
 
 Also confirm the release is public: the repository `Vexa1/Custom-Launcher` is **public**
 (flipped during the audit), so anonymous `curl`/raw downloads must return `200` without a token.
