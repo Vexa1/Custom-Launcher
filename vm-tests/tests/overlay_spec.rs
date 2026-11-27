@@ -194,6 +194,31 @@ fn the_server_panel_expires_only_after_its_configured_duration() {
         .any(|p| p["lines"].to_string().contains("Ping     35 ms")));
 }
 
+/// One physical menu click can reach the tray thread and the window's drain (macOS delivers a
+/// status-menu action to every reader of the menu channel). The second copy must be dropped,
+/// or it flips the switch straight back and leaves the HUD where it started.
+#[test]
+fn a_duplicate_tray_click_is_applied_once() {
+    use std::time::{Duration, Instant};
+
+    let mut seen = overlay_spec::ClickDebounce::new();
+    let t0 = Instant::now();
+    assert!(seen.accept(TrayToggle::Crosshair, t0), "the click itself");
+    assert!(
+        !seen.accept(TrayToggle::Crosshair, t0 + Duration::from_millis(3)),
+        "a second copy of the same click must not flip the switch back"
+    );
+    assert!(
+        seen.accept(TrayToggle::Stats, t0 + Duration::from_millis(4)),
+        "a different switch is never a duplicate"
+    );
+    // A real second click arrives after the menu has closed and been reopened.
+    assert!(seen.accept(
+        TrayToggle::Crosshair,
+        t0 + Duration::from_millis(4) + overlay_spec::CLICK_DEBOUNCE
+    ));
+}
+
 /// Every tray check item must change the payload the overlay reads, with no restart: the menu
 /// hands the click to `apply_tray_toggle`, which flips one field and wakes the writer.
 #[test]

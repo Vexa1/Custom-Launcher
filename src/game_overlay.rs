@@ -483,14 +483,28 @@ pub fn set_live_server(server: Option<ServerData>) {
 /// `settings.json` and stayed invisible until the next launch. This path has no window
 /// dependency - the overlay loop is a thread of this process - and waking it rewrites
 /// `overlay-panels-<id>.json` within one 100 ms step.
-pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> overlay_spec::HudToggles {
+/// Returns the state now in effect and whether this call applied it; `false` means it was a
+/// duplicate delivery of a click that had already been applied.
+pub fn apply_tray_toggle(
+    toggle: overlay_spec::TrayToggle,
+) -> (overlay_spec::HudToggles, bool) {
     let mut settings = crate::auth::load_settings();
-    let now = overlay_spec::HudToggles {
+    let current = overlay_spec::HudToggles {
         server: settings.overlay_enabled,
         stats: settings.overlay_stats_enabled,
         crosshair: settings.crosshair_enabled,
+    };
+    // One physical click flips one switch once. macOS delivers a menu action to every reader
+    // of the global menu channel, so the tray thread and the window's drain can both see the
+    // same click; the copy that arrives second would flip the setting - and the HUD - back.
+    let first = HUD_CLICK_DEBOUNCE
+        .lock()
+        .map(|mut seen| seen.accept(toggle, Instant::now()))
+        .unwrap_or(true);
+    if !first {
+        return (current, false);
     }
-    .flipped(toggle);
+    let now = current.flipped(toggle);
     settings.overlay_enabled = now.server;
     settings.overlay_stats_enabled = now.stats;
     settings.crosshair_enabled = now.crosshair;
@@ -514,8 +528,13 @@ pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> overlay_spec::HudT
         )),
         None => crate::auth::log("tray: no overlay running - settings saved, no panels spec to rewrite"),
     }
-    now
+    (now, true)
 }
+
+/// The last tray click applied in this process, so a duplicate delivery of that click is
+/// dropped instead of undoing it.
+static HUD_CLICK_DEBOUNCE: Mutex<overlay_spec::ClickDebounce> =
+    Mutex::new(overlay_spec::ClickDebounce::new());
 
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
@@ -1021,14 +1040,19 @@ fn log_room_list_ping(job_id: &str) {
         .unwrap_or(false);
     if first {
         crate::auth::log(
-            "ping: the game server answered neither a RakNet ping nor ICMP - using the room list's ping for this job",
+            "ping: the game server answered neither ICMP, a RakNet ping nor a TCP connect - using the room list's ping for this job",
         );
     }
 }
 
 /// Measures the live game server, never a web edge: a probe to `www.roblox.com` reported
 /// ~125 ms from New Zealand while the server the player was in (Sydney) answered in ~30 ms.
-/// When the server does not answer at all the row stays `-- ms`.
+///
+/// Tiers, in the order they run: ICMP echo to that exact IP (what the game's own stats
+/// show), then the RakNet unconnected ping over the game's UDP port, then a TCP handshake to
+/// the data-centre edge, then the public room list's ping for this job. Roblox's UDMUX relays
+/// drop unauthenticated RakNet pings and often ICMP too, which is why one silent tier does
+/// not leave the row at `-- ms` for the whole session.
 fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
     if PING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         return;
@@ -1044,8 +1068,18 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
             } else {
                 server.port
             };
-            let mut rtt = crate::net_probe::udp_rtt(&server.ip, port)
-                .or_else(|| crate::net_probe::icmp_rtt(&server.ip));
+            let mut measured = crate::net_probe::icmp_rtt(&server.ip).map(|ms| ("icmp", ms));
+            if measured.is_none() {
+                measured = crate::net_probe::udp_rtt(&server.ip, port).map(|ms| ("raknet", ms));
+            }
+            if measured.is_none() {
+                measured = crate::net_probe::tcp_rtt(&server.ip, &crate::net_probe::TCP_PROBE_PORTS)
+                    .map(|ms| ("tcp", ms));
+            }
+            if let Some((method, ms)) = measured {
+                log_ping_method(&server, method, ms);
+            }
+            let mut rtt = measured.map(|(_, ms)| ms);
             if rtt.is_none() {
                 // Only ever a cache read here: the HTTP fallback is started on its own
                 // thread, so it can never stall this probe or the in-flight flag with it.
@@ -1063,7 +1097,37 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
     }
 }
 
-/// One line in overlay.log the first time a host answers neither probe. The HUD can only
+/// The tier that answered, logged once per job: `-- ms` for a whole match used to be
+/// indistinguishable from a probe that never ran, and a number from another path (the room
+/// list, a web edge) must be visible as such.
+static PING_METHOD_LOGGED: Mutex<Option<String>> = Mutex::new(None);
+
+fn log_ping_method(server: &ServerData, method: &str, ms: u32) {
+    let key = format!(
+        "{}:{method}",
+        if server.job_id.is_empty() {
+            server.ip.as_str()
+        } else {
+            server.job_id.as_str()
+        }
+    );
+    let first = PING_METHOD_LOGGED
+        .lock()
+        .map(|mut seen| {
+            if seen.as_deref() == Some(key.as_str()) {
+                false
+            } else {
+                *seen = Some(key);
+                true
+            }
+        })
+        .unwrap_or(false);
+    if first {
+        crate::auth::log(&format!("overlay: ping probe active ({method}: {ms} ms)"));
+    }
+}
+
+/// One line in overlay.log the first time a host answers none of the probes. The HUD can only
 /// show `-- ms`, which is indistinguishable from a broken probe; this records which host
 /// was asked and that it stayed silent, next to the overlay window's own stderr.
 fn log_silent_server(ip: &str, port: u16) {
@@ -1085,7 +1149,10 @@ fn log_silent_server(ip: &str, port: u16) {
     use std::io::Write;
     let path = data_dir().join("overlay.log");
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "ping {key}: no reply to UDP ping or ICMP echo");
+        let _ = writeln!(
+            file,
+            "ping {key}: no reply to ICMP echo, a RakNet ping or a TCP connect"
+        );
     }
 }
 
@@ -1406,9 +1473,10 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 g.usage.reset();
             }
         }
-        // Ping: the live game server only, on the UDP path the game uses. Until the log
-        // yields that server's address the row stays `-- ms`, so it can never show a
-        // number measured against a web API on another continent.
+        // Ping: the live game server only, over every path that can reach it (ICMP, RakNet,
+        // a TCP handshake, then the room list for this job). Until the log yields that
+        // server's address the row stays `-- ms`, so it can never show a number measured
+        // against a web API on another continent.
         if let Some(stats) = &cfg.stats {
             if stats.ping {
                 let target = server.as_ref().filter(|s| !s.ip.is_empty()).cloned();

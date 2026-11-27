@@ -118,6 +118,36 @@ fn a_silent_server_yields_no_measurement_instead_of_a_wrong_one() {
 fn an_empty_address_is_never_probed() {
     assert!(net_probe::udp_rtt("", 0).is_none());
     assert!(net_probe::udp_rtt("   ", 53_640).is_none());
+    assert!(net_probe::tcp_rtt("", &[443]).is_none());
+}
+
+/// Tier three: a handshake with a listening port is a real round trip over the player's path
+/// and is measured, for a relay that drops both ICMP and the RakNet ping.
+#[test]
+fn a_tcp_handshake_gives_a_round_trip() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let _ = listener.accept();
+    });
+
+    let rtt = net_probe::tcp_rtt("127.0.0.1", &[port]).expect("a listening port answers");
+    assert!(rtt >= 1 && rtt < 1_000, "loopback RTT was {rtt} ms");
+    handle.join().unwrap();
+}
+
+/// A closed port must report nothing rather than a number: `-- ms` is honest, a measurement
+/// against something that refused the connection is not.
+#[test]
+fn a_closed_tcp_port_yields_no_measurement() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let start = Instant::now();
+    assert!(net_probe::tcp_rtt("127.0.0.1", &[port]).is_none());
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(net_probe::tcp_rtt("127.0.0.1", &[]).is_none());
 }
 
 #[test]

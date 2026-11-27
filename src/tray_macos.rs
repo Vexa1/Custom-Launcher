@@ -176,18 +176,27 @@ fn map_menu_id(id: &str) -> Option<TrayEvent> {
 /// overlay kept drawing the old panels until the game was restarted. Flipping the setting here
 /// hands it to the overlay loop, which is a thread of this process and rewrites the panels file
 /// without any window.
-fn apply_hud_action(action: &TrayEvent) {
+/// Returns `false` when this was a second copy of a click that was already applied, so the
+/// caller does not forward that copy (and log it) again.
+fn apply_hud_action(action: &TrayEvent) -> bool {
     use crate::overlay_spec::TrayToggle;
     let toggle = match action {
         TrayEvent::ToggleServerOverlay => TrayToggle::Server,
         TrayEvent::ToggleStatsOverlay => TrayToggle::Stats,
         TrayEvent::ToggleCrosshair => TrayToggle::Crosshair,
-        _ => return,
+        // Not a HUD switch: always belongs to the window.
+        _ => return true,
     };
-    let now = crate::game_overlay::apply_tray_toggle(toggle);
+    let (now, applied) = crate::game_overlay::apply_tray_toggle(toggle);
+    if !applied {
+        // `muda` hands one physical click to every reader of its menu channel; the copy that
+        // arrives second must not flip the switch back or queue a second message.
+        return false;
+    }
     // The tick next to the item is an AppKit object: `muda` items are `Rc`-based, so they
     // stay on the main thread and the new state is applied there, even while eframe is idle.
     dispatch_main(move || sync_hud_checks(now));
+    true
 }
 
 thread_local! {
@@ -412,9 +421,12 @@ impl TrayController {
                     let mut fired = false;
                     while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                         if let Some(action) = map_menu_id(ev.id().as_ref()) {
-                            apply_hud_action(&action);
-                            let _ = tx.send(Msg::TrayAction(action));
-                            fired = true;
+                            // A duplicate copy of a HUD click is dropped here, so the window
+                            // never sees the same toggle twice.
+                            if apply_hud_action(&action) {
+                                let _ = tx.send(Msg::TrayAction(action));
+                                fired = true;
+                            }
                         }
                     }
                     while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
@@ -485,9 +497,11 @@ impl TrayController {
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if let Some(action) = map_menu_id(ev.id().as_ref()) {
                 // The main thread may win the race for a click; apply it here too so the HUD
-                // never depends on which reader of the menu channel got there first.
-                apply_hud_action(&action);
-                out.push(action);
+                // never depends on which reader of the menu channel got there first. A
+                // duplicate copy is not forwarded: the running HUD already has that state.
+                if apply_hud_action(&action) {
+                    out.push(action);
+                }
             }
         }
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {

@@ -8,6 +8,7 @@
 //! testable in `vm-tests`, where the GUI crate cannot be linked.
 
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerPanel {
@@ -263,6 +264,38 @@ impl HudToggles {
                 ..self
             },
         }
+    }
+}
+
+/// How close two copies of one click can be and still be the same physical click. Two real
+/// clicks on one check item cannot be this close: the menu closes after the first one.
+pub const CLICK_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Drops a duplicate delivery of one tray click.
+///
+/// macOS hands a status-menu action to every reader of the global menu channel (the tray
+/// thread and the window's drain both read it), so one click can arrive twice within
+/// milliseconds. Flipping on the second copy would undo the first - the switch and the HUD
+/// would blink back to where they were - so a click is accepted once per window.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClickDebounce {
+    last: Option<(TrayToggle, Instant)>,
+}
+
+impl ClickDebounce {
+    pub const fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// `true` for the first sighting of a physical click, `false` for its duplicate.
+    pub fn accept(&mut self, toggle: TrayToggle, at: Instant) -> bool {
+        if let Some((last, when)) = self.last {
+            if last == toggle && at.saturating_duration_since(when) < CLICK_DEBOUNCE {
+                return false;
+            }
+        }
+        self.last = Some((toggle, at));
+        true
     }
 }
 

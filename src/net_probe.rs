@@ -3,13 +3,21 @@
 //! A ping is only meaningful against the machine serving the game. Roblox's web edge is in
 //! the US and answers in ~125 ms from New Zealand, while the live server in Sydney answers in
 //! ~30 ms - so a web probe reports a number that has nothing to do with the session. This
-//! module probes the server IP the client log names (over the same UDP path the game uses,
-//! then ICMP) and returns `None` when that server does not answer, which is what the HUD
-//! shows as `-- ms`.
+//! module measures the server IP the client log names, in four tiers, and returns `None` when
+//! none of them answers, which is what the HUD shows as `-- ms`:
+//!
+//! 1. **ICMP echo** to that exact IP - what Roblox's native performance stats report.
+//! 2. **RakNet `ID_UNCONNECTED_PING`** over the game's own UDP port.
+//! 3. **TCP handshake** to the data-centre edge (443, then 80).
+//! 4. The public room list's ping for the job (in `game_overlay`, off this thread).
+//!
+//! Roblox's UDMUX relays drop unauthenticated RakNet pings and often ICMP as well, which left
+//! the row at `-- ms` for a whole session; each tier exists because the one above it is
+//! filtered by some relay.
 //!
 //! No image, no egui, no platform APIs: the whole module runs in the VM test harness.
 
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -101,7 +109,15 @@ pub fn ping_for_job(entries: &[(String, Option<u64>)], job_id: &str) -> Option<u
 
 /// One ICMP echo through the system `ping`, for servers that answer echo but filter TCP and
 /// ignore RakNet's unconnected ping.
+///
+/// This is tier one: Roblox's regional data-centre IPs answer echo over the same path the
+/// game uses, so the number matches what the game's own performance stats show. A filtered
+/// echo costs the bounded wait below and nothing else.
 pub fn icmp_rtt(ip: &str) -> Option<u32> {
+    let ip = ip.trim();
+    if ip.is_empty() {
+        return None;
+    }
     let out = ping_command(ip)?.output().ok()?;
     if !out.status.success() {
         return None;
@@ -112,23 +128,63 @@ pub fn icmp_rtt(ip: &str) -> Option<u32> {
 
 #[cfg(target_os = "macos")]
 fn ping_command(ip: &str) -> Option<Command> {
+    use std::process::Stdio;
     let mut cmd = Command::new("/sbin/ping");
-    cmd.args(["-c", "1", "-t", "1", ip]);
+    // `-W` is the per-reply wait in milliseconds and `-t` bounds the whole run, so a relay
+    // that drops echo can never hold the probe thread; `-n` keeps it numeric (no reverse DNS
+    // on an address that may be dead) and stdin is closed so the child never waits on us.
+    cmd.args(["-n", "-c", "1", "-W", "800", "-t", "1", ip])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
     Some(cmd)
 }
 
 #[cfg(target_os = "windows")]
 fn ping_command(ip: &str) -> Option<Command> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut cmd = Command::new("ping");
-    cmd.args(["-n", "1", "-w", "1000", ip])
-        .creation_flags(CREATE_NO_WINDOW);
+    cmd.args(["-n", "1", "-w", "800", ip])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
     Some(cmd)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn ping_command(_ip: &str) -> Option<Command> {
+    None
+}
+
+/// Ports a Roblox data-centre edge answers even when it filters ICMP and RakNet: the HTTP(S)
+/// listeners in front of the same machines that host the game server.
+pub const TCP_PROBE_PORTS: [u16; 2] = [443, 80];
+
+/// How long one handshake may take before the next port is tried.
+const TCP_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Tier three: the TCP handshake RTT to the same IP.
+///
+/// UDMUX relays drop unauthenticated RakNet pings, and some drop ICMP too, but the edge in
+/// front of the server still completes a handshake - and a handshake is a real round trip
+/// over the player's path, not a web request to another continent. `None` when no port
+/// answers, so the row falls through to the room list instead of inventing a number.
+pub fn tcp_rtt(ip: &str, ports: &[u16]) -> Option<u32> {
+    let ip = ip.trim();
+    if ip.is_empty() || ports.is_empty() {
+        return None;
+    }
+    // Resolve once for every port: a dead address is not looked up again per port.
+    let addrs = (ip, ports[0]).to_socket_addrs().ok()?;
+    let ip = addrs.map(|a| a.ip()).find(|ip| ip.is_ipv4())?;
+    for port in ports {
+        let addr = std::net::SocketAddr::new(ip, *port);
+        let start = Instant::now();
+        if TcpStream::connect_timeout(&addr, TCP_TIMEOUT).is_ok() {
+            return Some(start.elapsed().as_millis().clamp(1, 9_999) as u32);
+        }
+    }
     None
 }
 

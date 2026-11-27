@@ -601,7 +601,10 @@ fn emit_tray_event(ev: TrayEvent) {
         _ => None,
     };
     if let Some(toggle) = toggle {
-        crate::game_overlay::apply_tray_toggle(toggle);
+        // A duplicate copy of a click never reaches the window twice.
+        if !crate::game_overlay::apply_tray_toggle(toggle).1 {
+            return;
+        }
     }
     TRAY_RUNTIME.with(|cell| {
         if let Some(rt) = cell.borrow().as_ref() {
