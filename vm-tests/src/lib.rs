@@ -13,6 +13,10 @@ pub mod auth;
 pub mod roblox_process;
 pub mod types;
 
+// Headless UI rendering (dev-only): real egui, software rasterizer, PNGs in `artifacts/`.
+pub mod screens;
+pub mod shots;
+
 #[path = "../../src/game_log.rs"]
 pub mod game_log;
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Developer self-check. Run before calling any change done.
 #
+#   0. `vm-tests/` renders every UI page to a PNG with a real egui and checks the layout.
 #   1. `vm-tests/` executes the real party and server-hop code on the build host, which is
 #      where the logic can actually run without a window or a Roblox session.
 #   2. The macOS target check proves the whole GUI crate still compiles for the release
@@ -33,6 +34,12 @@ cargo test --locked --manifest-path vm-tests/Cargo.toml --test stub_drift
 
 echo "== vm-tests: real party + server-hop code on this host"
 cargo test --locked --manifest-path vm-tests/Cargo.toml
+
+# Headless UI screenshots: real egui, a software rasterizer, PNGs in vm-tests/artifacts/.
+# The same test is the layout check (clipping, overlap, text fit, hit targets, contrast).
+# A UI change is not done until these images have been looked at - see AGENTS.md.
+echo "== vm-tests: UI screenshots rendered to vm-tests/artifacts/"
+cargo test --locked --manifest-path vm-tests/Cargo.toml --test shots
 
 echo "== creblox: compiles for the macOS release target"
 cargo check --locked --target x86_64-apple-darwin

@@ -661,6 +661,7 @@ scripts/verify.sh
 | Step | What it proves | Runs where |
 |---|---|---|
 | `cargo test --locked --manifest-path vm-tests/Cargo.toml` | The real `src/party.rs` and `src/server_hop.rs` - invite codec, room-token handshake, roster/kick, presence fallback, hop ranking - plus loopback end-to-end joins | Any host, including a Linux VM where the GUI crate cannot compile |
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml --test shots` | Renders Home, Charts, Game details, Party, Settings, the updater and the overlay HUD to PNG with the real egui, and fails on clipped, collapsed or overlapping widgets, text that does not fit, hit targets under 24x24 and contrast below 4.5:1 | Any host |
 | `cargo check --locked --target x86_64-apple-darwin` | The whole GUI crate, including `#[cfg(macos)]` FFI and every `#[cfg(test)]` module, still compiles for the release target | Any host with the target installed |
 | `cargo test --locked` (macOS only) | The in-crate suites: layout, updater parsing, auth paths, theme tokens, Roblox log parser | A Mac; they need the window and OS APIs |
 
@@ -668,6 +669,23 @@ scripts/verify.sh
 files by path (`#[path = "../../src/party.rs"]`) and supplies stand-ins only for what needs a
 window, a Roblox session or macOS (`eframe` stub, `api`, `auth`, `roblox_process`). Add a module
 there when you want host-runnable coverage of it, and put new checks in `vm-tests/tests/`.
+
+### Headless UI screenshots
+
+`cargo test --manifest-path vm-tests/Cargo.toml --test shots` renders the launcher's pages with
+the real `egui` (0.37, the version the app uses) through a small software rasterizer, at 1280x800
+and 1440x900, and writes `vm-tests/artifacts/<page>-<width>x<height>.png`: Home, Charts, Game
+details, Party, Settings, the in-app Updater and the overlay HUD.
+
+The same test is the automated layout check. Every registered widget must stay inside the
+window, keep a non-zero size, avoid illegal overlap, fit its text, offer a hit target of at least
+24x24 when interactive, and keep 4.5:1 contrast. UI changes additionally require looking at
+the images - a green test is not a visual check; the rule is in `AGENTS.md`.
+
+The GUI crate cannot be linked on a Linux host (`src/ui/*` needs `crate::app::Creblox`, eframe and
+the OS APIs), so the screens in `vm-tests/src/screens.rs` mirror `src/ui/*`, `src/theme.rs` and
+the overlay; keep them in step when a page's layout changes. `vm-tests/artifacts/` is gitignored,
+and none of it is part of a release build.
 
 A stand-in can go stale without breaking the harness, so `vm-tests/tests/stub_drift.rs`
 re-reads `src/types.rs`, `src/api.rs`, `src/auth.rs` and `src/roblox_process.rs` and fails when

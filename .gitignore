@@ -39,5 +39,6 @@ fastflags.json
 relay/node_modules/
 relay/.wrangler/
 
-# Dev-only harness build output
+# Dev-only harness build output and rendered UI screenshots
 /vm-tests/target
+/vm-tests/artifacts/

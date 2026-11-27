@@ -15,10 +15,22 @@ igd-next = { version = "0.18", default-features = false, features = ["io_sync"] 
 eframe = { path = "eframe" }
 # Used by the real `src/zip_update.rs`, which `tests/update_zip.rs` exercises.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Headless UI screenshots: the real egui (same 0.37 line as the app) is driven offscreen and
+# its triangles are rasterized in software by `src/shots.rs`. `image` only encodes the PNG.
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 # `tests/stub_drift.rs` compares the stand-ins below with the real declarations.
 [dev-dependencies]
 syn = { version = "2", features = ["full", "parsing", "printing"] }
 quote = "1"
+
+# The rasterizer is a per-pixel loop; a debug build of it would make the screenshot test the
+# slowest thing in `scripts/verify.sh`. Dependencies are optimized, this crate only mildly.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [workspace]

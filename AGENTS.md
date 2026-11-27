@@ -6,7 +6,7 @@ Before finishing any change, run `scripts/verify.sh` and fix what it reports:
 
 - `cargo test --locked --manifest-path vm-tests/Cargo.toml` — the real `src/party.rs` and
   `src/server_hop.rs`, compiled for this host against the stand-ins in `vm-tests/`, plus the
-  loopback end-to-end tests in `vm-tests/tests/`.
+  loopback end-to-end tests in `vm-tests/tests/` and the UI screenshot/layout suite.
 - `cargo check --locked --target x86_64-apple-darwin` — the full GUI crate for the release
   target, including all `#[cfg(test)]` and `#[cfg(macos)]` code.
 
@@ -21,3 +21,26 @@ Release builds stay clean by construction: `vm-tests/` is a separate package wit
 `vm-tests/tests/`, and `scripts/package-release.sh` copies an explicit file list that excludes
 it. Never add runtime test flags, background test threads or debug logging to shipping code to
 make a check pass.
+
+# UI changes: render the pages and look at them
+
+A change to `src/ui/*`, `src/app.rs`, `src/theme.rs`, `src/game_overlay.rs` or the overlay HUD
+(`src/overlay_window.rs`) is not finished when the tests pass. It is finished when the rendered
+pages have been looked at.
+
+```bash
+cargo test --manifest-path vm-tests/Cargo.toml --test shots
+# writes vm-tests/artifacts/<page>-<1280x800|1440x900>.png
+```
+
+1. Run it. It fails on layout problems: a widget clipped by the window, collapsed to zero size,
+   overlapping another one, text wider than its box, a hit target under 24x24, or contrast below
+   4.5:1. Fix those first.
+2. Look at the PNGs — Home, Charts, Game details, Party, Settings, Updater, overlay HUD. Check
+   spacing, alignment, icons, contrast and anything cut off or cramped. Fix what you see.
+3. If a page's structure changed, mirror it in `vm-tests/src/screens.rs`. The GUI crate cannot be
+   linked on Linux (`src/ui/*` needs `crate::app::Creblox`, eframe and the OS APIs), so those
+   fixtures are what the screenshots show; stale fixtures hide real regressions.
+4. Say what you looked at and what you did not. Passing geometry checks are not an eyeball check.
+
+`vm-tests/artifacts/` is gitignored, and none of this is part of a release build.
