@@ -2882,7 +2882,22 @@ impl Creblox {
                     }
                 },
                 Msg::TrayAction(ev) => {
-                    crate::auth::log(&format!("tray: {ev:?}"));
+                    // A HUD switch click was applied to `settings.json` and to the live HUD by
+                    // the tray dispatcher (`apply_hud_action`), which needs no window: the
+                    // launcher is hidden for the whole game. This arm only adopts what was
+                    // saved, so a replayed copy of a click - the queue is drained when the
+                    // window comes back - changes nothing and must not be logged or acted on
+                    // a second time. That replay is what printed `tray: ToggleCrosshair`
+                    // twice at the moment the launcher unhid.
+                    let replay = match &ev {
+                        TrayEvent::ToggleServerOverlay
+                        | TrayEvent::ToggleStatsOverlay
+                        | TrayEvent::ToggleCrosshair => !self.adopt_saved_hud(),
+                        _ => false,
+                    };
+                    if !replay {
+                        crate::auth::log(&format!("tray: {ev:?}"));
+                    }
                     match ev {
                         TrayEvent::ShowAndFocus => self.restore_from_tray(),
                         TrayEvent::HideToTray => {
@@ -2911,14 +2926,13 @@ impl Creblox {
                         TrayEvent::ToggleServerOverlay
                         | TrayEvent::ToggleStatsOverlay
                         | TrayEvent::ToggleCrosshair => {
-                            // The click was already applied to settings.json and to the running
-                            // HUD by the tray dispatcher (`apply_hud_action`), which does not
-                            // need this window: the launcher is hidden for the whole game and
-                            // egui is not drawing frames then. Adopt the saved value instead of
-                            // flipping it again; a menu click must never toggle twice.
-                            self.settings = load_settings();
-                            self.maybe_show_game_overlay();
-                            self.sync_tray_state();
+                            // `adopt_saved_hud` above already read the value the dispatcher
+                            // saved; only the window's own copies need refreshing, and only
+                            // for the click itself - never for its replayed copy.
+                            if !replay {
+                                self.maybe_show_game_overlay();
+                                self.sync_tray_state();
+                            }
                         }
                         TrayEvent::EditOverlayPosition => {
                             // The overlay process owns the pointer and the launcher owns
@@ -4691,6 +4705,22 @@ impl Creblox {
         self.raise_frames = 8;
         self.ctx.request_repaint();
         self.sync_tray_state();
+    }
+
+    /// Adopts the HUD switches the tray dispatcher saved, and reports whether that changed
+    /// anything this window was showing.
+    ///
+    /// A click is applied by the tray the moment it happens (`apply_hud_action`), so the
+    /// message that reaches the window is a refresh, not a request to toggle. Comparing with
+    /// what is already here turns a replayed copy into a no-op: the state it would adopt is
+    /// the state this window already has.
+    fn adopt_saved_hud(&mut self) -> bool {
+        let saved = load_settings();
+        let changed = saved.overlay_enabled != self.settings.overlay_enabled
+            || saved.overlay_stats_enabled != self.settings.overlay_stats_enabled
+            || saved.crosshair_enabled != self.settings.crosshair_enabled;
+        self.settings = saved;
+        changed
     }
 
     pub fn quit_app(&mut self) {

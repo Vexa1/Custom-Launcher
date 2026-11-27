@@ -945,6 +945,14 @@ impl Usage {
 /// only add sockets and out-of-order results.
 static PING_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// When the running probe started. A probe thread that ended without clearing
+/// `PING_IN_FLIGHT` would quietly stop every later probe for the rest of the match, which is
+/// exactly what `-- ms` after the first tick looks like.
+static PING_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// A probe still marked as running after this long is treated as dead and replaced.
+const PROBE_STUCK: Duration = Duration::from_secs(15);
+
 /// The server already reported as silent, so overlay.log gets one line per host and not one
 /// every two seconds.
 static PING_LOGGED: Mutex<Option<String>> = Mutex::new(None);
@@ -993,9 +1001,15 @@ fn request_room_list_ping(server: ServerData) {
     let spawned = thread::Builder::new()
         .name("creblox-ping-list".to_string())
         .spawn(move || {
-            let ping = fetch_room_list_ping(&server);
+            let (ping, failure) = match fetch_room_list_ping(&server) {
+                Ok(ping) => (ping, None),
+                Err(why) => (None, Some(why)),
+            };
             if let Ok(mut cache) = PING_FROM_LIST.lock() {
                 *cache = Some((server.job_id.clone(), ping, Instant::now()));
+            }
+            if let Some(why) = failure {
+                log_room_list_failure(&server.job_id, &why);
             }
             if let Some(ms) = ping {
                 // Land it on the live row when the player is still in that job; otherwise the
@@ -1017,10 +1031,35 @@ fn request_room_list_ping(server: ServerData) {
 }
 
 /// The network half of the fallback, run on its own thread.
-fn fetch_room_list_ping(server: &ServerData) -> Option<u32> {
-    let pool = crate::api::fetch_public_server_pool(server.place_id, "Desc", 2, None).ok()?;
+///
+/// `Err` is a lookup that could not run (the API request failed); `Ok(None)` is a list that
+/// exists but does not carry this job. The probe line in `log.txt` says which one happened,
+/// because only the first is worth retrying.
+fn fetch_room_list_ping(server: &ServerData) -> Result<Option<u32>, String> {
+    let pool = crate::api::fetch_public_server_pool(server.place_id, "Desc", 2, None)?;
     let entries: Vec<(String, Option<u64>)> = pool.into_iter().map(|s| (s.id, s.ping)).collect();
-    crate::net_probe::ping_for_job(&entries, &server.job_id)
+    Ok(crate::net_probe::ping_for_job(&entries, &server.job_id))
+}
+
+/// One line per job whose room-list lookup could not run: `None` alone is indistinguishable
+/// from a job that is simply not listed.
+fn log_room_list_failure(job_id: &str, why: &str) {
+    static LOGGED: Mutex<Option<String>> = Mutex::new(None);
+    let key = format!("{job_id}:{why}");
+    let first = LOGGED
+        .lock()
+        .map(|mut seen| {
+            if seen.as_deref() == Some(key.as_str()) {
+                false
+            } else {
+                *seen = Some(key);
+                true
+            }
+        })
+        .unwrap_or(false);
+    if first {
+        crate::auth::log(&format!("ping: room list lookup failed ({why})"));
+    }
 }
 
 /// One line the first time a job's ping comes from the room list instead of the server: the
@@ -1055,7 +1094,20 @@ fn log_room_list_ping(job_id: &str) {
 /// not leave the row at `-- ms` for the whole session.
 fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
     if PING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
-        return;
+        // A probe that ended without clearing the flag would stop every later one; take the
+        // flag over once it has clearly been abandoned, and say so once.
+        let stuck = PING_STARTED
+            .lock()
+            .ok()
+            .and_then(|at| *at)
+            .is_some_and(|at| at.elapsed() >= PROBE_STUCK);
+        if !stuck {
+            return;
+        }
+        log_ping_idle("the previous probe is still marked as running");
+    }
+    if let Ok(mut at) = PING_STARTED.lock() {
+        *at = Some(Instant::now());
     }
     if let Ok(mut target) = PING_TARGET.lock() {
         *target = Some((server.job_id.clone(), Arc::clone(&out)));
@@ -1068,62 +1120,123 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
             } else {
                 server.port
             };
-            let mut measured = crate::net_probe::icmp_rtt(&server.ip).map(|ms| ("icmp", ms));
-            if measured.is_none() {
-                measured = crate::net_probe::udp_rtt(&server.ip, port).map(|ms| ("raknet", ms));
+            // Every tier reports why it had no number, so the one probe line in log.txt
+            // shows what was actually attempted against which address.
+            let mut misses: Vec<String> = Vec::new();
+            let mut measured: Option<(&'static str, u32)> = None;
+            match crate::net_probe::icmp_rtt_traced(&server.ip) {
+                Ok(ms) => measured = Some(("icmp", ms)),
+                Err(why) => misses.push(format!("icmp {why}")),
             }
             if measured.is_none() {
-                measured = crate::net_probe::tcp_rtt(&server.ip, &crate::net_probe::TCP_PROBE_PORTS)
-                    .map(|ms| ("tcp", ms));
+                match crate::net_probe::udp_rtt_traced(&server.ip, port) {
+                    Ok(ms) => measured = Some(("raknet", ms)),
+                    Err(why) => misses.push(format!("raknet {why}")),
+                }
             }
-            if let Some((method, ms)) = measured {
-                log_ping_method(&server, method, ms);
+            if measured.is_none() {
+                match crate::net_probe::tcp_rtt_traced(&server.ip, &crate::net_probe::TCP_PROBE_PORTS)
+                {
+                    Ok(ms) => measured = Some(("tcp", ms)),
+                    Err(why) => misses.push(format!("tcp {why}")),
+                }
             }
             let mut rtt = measured.map(|(_, ms)| ms);
+            let mut source = measured.map(|(method, _)| method);
             if rtt.is_none() {
                 // Only ever a cache read here: the HTTP fallback is started on its own
                 // thread, so it can never stall this probe or the in-flight flag with it.
                 rtt = cached_room_list_ping(&server);
+                source = rtt.map(|_| "room list");
                 if rtt.is_none() {
+                    misses.push(room_list_miss(&server));
                     request_room_list_ping(server.clone());
                     log_silent_server(&server.ip, port);
                 }
             }
+            log_ping_probe(&server, port, rtt, source, &misses);
             out.store(rtt.unwrap_or(NO_PING), Ordering::Relaxed);
             PING_IN_FLIGHT.store(false, Ordering::Release);
+            if let Ok(mut at) = PING_STARTED.lock() {
+                *at = None;
+            }
         });
     if spawned.is_err() {
         PING_IN_FLIGHT.store(false, Ordering::Release);
+        if let Ok(mut at) = PING_STARTED.lock() {
+            *at = None;
+        }
     }
 }
 
-/// The tier that answered, logged once per job: `-- ms` for a whole match used to be
-/// indistinguishable from a probe that never ran, and a number from another path (the room
-/// list, a web edge) must be visible as such.
-static PING_METHOD_LOGGED: Mutex<Option<String>> = Mutex::new(None);
+/// Why the room-list tier could not supply a number for this job.
+fn room_list_miss(server: &ServerData) -> String {
+    if server.place_id == 0 {
+        "room list no place id in the log".to_string()
+    } else if server.job_id.is_empty() {
+        "room list no job id in the log".to_string()
+    } else {
+        "room list no ping for this job yet".to_string()
+    }
+}
 
-fn log_ping_method(server: &ServerData, method: &str, ms: u32) {
-    let key = format!(
-        "{}:{method}",
-        if server.job_id.is_empty() {
-            server.ip.as_str()
-        } else {
-            server.job_id.as_str()
-        }
-    );
-    let first = PING_METHOD_LOGGED
+/// One line per probe: the address, the result, and - when it is `-- ms` - every tier's
+/// reason. `-- ms` for a whole match was indistinguishable from a probe that never ran, so
+/// this is the concrete proof: target IP:port plus timeout/refused/not-attempted per tier.
+///
+/// Written when the target or the result changes, and once a minute while it stays `None`,
+/// so a silent relay cannot flood log.txt at one line every two seconds.
+static PING_PROBE_LOGGED: Mutex<Option<(String, Option<u32>, Instant)>> = Mutex::new(None);
+
+fn log_ping_probe(
+    server: &ServerData,
+    port: u16,
+    rtt: Option<u32>,
+    source: Option<&str>,
+    misses: &[String],
+) {
+    let target = format!("{}:{port}", server.ip);
+    let line = match (rtt, source) {
+        (Some(ms), Some(source)) => format!("overlay: ping probe {target} -> {ms} ms ({source})"),
+        (Some(ms), None) => format!("overlay: ping probe {target} -> {ms} ms"),
+        (None, _) => format!("overlay: ping probe {target} -> none ({})", misses.join("; ")),
+    };
+    let write = PING_PROBE_LOGGED
         .lock()
-        .map(|mut seen| {
-            if seen.as_deref() == Some(key.as_str()) {
+        .map(|mut last| {
+            let repeat = last.as_ref().is_some_and(|(seen, seen_rtt, at)| {
+                seen == &target && *seen_rtt == rtt && at.elapsed() < Duration::from_secs(60)
+            });
+            if repeat {
                 false
             } else {
-                *seen = Some(key);
+                *last = Some((target, rtt, Instant::now()));
+                true
+            }
+        })
+        .unwrap_or(true);
+    if write {
+        crate::auth::log(&line);
+    }
+}
+
+/// The other half of `-- ms`: one line per reason the probe is not running at all - the Ping
+/// row is off, the Stats panel is off, or the log has not named a server yet.
+fn log_ping_idle(reason: &str) {
+    static LOGGED: Mutex<Option<String>> = Mutex::new(None);
+    let first = LOGGED
+        .lock()
+        .map(|mut seen| {
+            if seen.as_deref() == Some(reason) {
+                false
+            } else {
+                *seen = Some(reason.to_string());
                 true
             }
         })
         .unwrap_or(false);
     if first {
-        crate::auth::log(&format!("overlay: ping probe active ({method}: {ms} ms)"));
+        crate::auth::log(&format!("overlay: ping probe not running ({reason})"));
     }
 }
 
@@ -1493,13 +1606,20 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                         last_ping = Instant::now();
                         spawn_ping(target, Arc::clone(&ping));
                     }
+                } else {
+                    // A server with no address cannot be probed; say so instead of leaving
+                    // `-- ms` looking like a probe that failed.
+                    log_ping_idle("no server address yet - the log has not named the server");
                 }
             } else {
                 // Ping is off: drop the target so switching it back on shows `-- ms` until
                 // the first real measurement instead of a number from minutes ago.
                 last_ping_target = None;
                 ping.store(NO_PING, Ordering::Relaxed);
+                log_ping_idle("the Ping row is switched off in Settings");
             }
+        } else {
+            log_ping_idle("the Stats overlay is switched off");
         }
 
         // Build and write through the one function a tray click also uses: one definition of

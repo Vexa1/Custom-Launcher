@@ -50,7 +50,7 @@ fn a_raknet_unconnected_ping_is_answered_with_a_pong() {
         server.send_to(&pong, from).expect("the pong is delivered");
     });
 
-    let rtt = net_probe::udp_rtt("127.0.0.1", port).expect("a pong gives an RTT");
+    let rtt = net_probe::udp_rtt_traced("127.0.0.1", port).expect("a pong gives an RTT");
     assert!(rtt >= 1 && rtt < 1_000, "loopback RTT was {rtt} ms");
     handle.join().unwrap();
 }
@@ -69,7 +69,7 @@ fn a_datagram_that_is_not_a_pong_is_not_timed() {
     });
 
     let start = Instant::now();
-    assert!(net_probe::udp_rtt("127.0.0.1", port).is_none());
+    assert!(net_probe::udp_rtt_traced("127.0.0.1", port).is_err());
     assert!(start.elapsed() < Duration::from_secs(2));
     handle.join().unwrap();
 }
@@ -109,16 +109,16 @@ fn a_silent_server_yields_no_measurement_instead_of_a_wrong_one() {
     drop(socket);
 
     let start = Instant::now();
-    let rtt = net_probe::udp_rtt("127.0.0.1", port);
-    assert!(rtt.is_none(), "nothing answered, yet an RTT was reported");
+    let rtt = net_probe::udp_rtt_traced("127.0.0.1", port);
+    assert!(rtt.is_err(), "nothing answered, yet an RTT was reported");
     assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
 fn an_empty_address_is_never_probed() {
-    assert!(net_probe::udp_rtt("", 0).is_none());
-    assert!(net_probe::udp_rtt("   ", 53_640).is_none());
-    assert!(net_probe::tcp_rtt("", &[443]).is_none());
+    assert!(net_probe::udp_rtt_traced("", 0).is_err());
+    assert!(net_probe::udp_rtt_traced("   ", 53_640).is_err());
+    assert!(net_probe::tcp_rtt_traced("", &[443]).is_err());
 }
 
 /// Tier three: a handshake with a listening port is a real round trip over the player's path
@@ -131,7 +131,7 @@ fn a_tcp_handshake_gives_a_round_trip() {
         let _ = listener.accept();
     });
 
-    let rtt = net_probe::tcp_rtt("127.0.0.1", &[port]).expect("a listening port answers");
+    let rtt = net_probe::tcp_rtt_traced("127.0.0.1", &[port]).expect("a listening port answers");
     assert!(rtt >= 1 && rtt < 1_000, "loopback RTT was {rtt} ms");
     handle.join().unwrap();
 }
@@ -145,9 +145,37 @@ fn a_closed_tcp_port_yields_no_measurement() {
     drop(listener);
 
     let start = Instant::now();
-    assert!(net_probe::tcp_rtt("127.0.0.1", &[port]).is_none());
+    assert!(net_probe::tcp_rtt_traced("127.0.0.1", &[port]).is_err());
     assert!(start.elapsed() < Duration::from_secs(2));
-    assert!(net_probe::tcp_rtt("127.0.0.1", &[]).is_none());
+    assert!(net_probe::tcp_rtt_traced("127.0.0.1", &[]).is_err());
+}
+
+/// `-- ms` for a whole match must be explainable: every failed tier reports why it had no
+/// number, so the probe line in `log.txt` names the reason instead of leaving it to guesswork.
+#[test]
+fn a_failed_probe_says_why() {
+    // A server that answers nothing at all: the reason is free text, but never empty.
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let why = net_probe::udp_rtt_traced("127.0.0.1", port).unwrap_err();
+    assert!(!why.is_empty(), "a silent server must say why it was silent");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let why = net_probe::tcp_rtt_traced("127.0.0.1", &[port]).unwrap_err();
+    assert!(
+        why.contains("refused") || why.contains("timeout"),
+        "a closed port says refused/timeout, got {why}"
+    );
+
+    // Inputs that never reach the network name themselves too.
+    assert!(net_probe::udp_rtt_traced("", 0).unwrap_err().contains("empty address"));
+    assert!(net_probe::icmp_rtt_traced("  ").unwrap_err().contains("empty address"));
+    assert!(net_probe::tcp_rtt_traced("127.0.0.1", &[])
+        .unwrap_err()
+        .contains("no port to try"));
 }
 
 #[test]

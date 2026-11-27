@@ -54,37 +54,55 @@ pub fn is_unconnected_pong(datagram: &[u8]) -> bool {
 /// One RakNet `ID_UNCONNECTED_PING` on a connected UDP socket, timed until the matching
 /// `ID_UNCONNECTED_PONG` comes back. Datagrams of any other shape are ignored, and the whole
 /// exchange gives up after [`UDP_TIMEOUT`] so a silent server costs one tick, not the loop.
-pub fn udp_rtt(ip: &str, port: u16) -> Option<u32> {
+/// Returns the RTT, or the reason it produced no number, so the probe can put that in
+/// `log.txt` instead of leaving `-- ms` unexplained.
+pub fn udp_rtt_traced(ip: &str, port: u16) -> Result<u32, String> {
     let ip = ip.trim();
     if ip.is_empty() {
-        return None;
+        return Err("empty address".to_string());
     }
     let addr = (ip, port)
         .to_socket_addrs()
-        .ok()?
-        .find(|a| a.is_ipv4())?;
-    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect(addr).ok()?;
+        .map_err(|e| format!("unresolved address ({e})"))?
+        .find(|a| a.is_ipv4())
+        .ok_or_else(|| "no IPv4 address".to_string())?;
+    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind failed ({e})"))?;
+    sock.connect(addr)
+        .map_err(|e| format!("connect failed ({e})"))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let start = Instant::now();
-    sock.send(&unconnected_ping(now)).ok()?;
+    sock.send(&unconnected_ping(now))
+        .map_err(|e| format!("send failed ({e})"))?;
     let deadline = start + UDP_TIMEOUT;
+    let timeout = || format!("no pong in {} ms", UDP_TIMEOUT.as_millis());
     let mut buf = [0u8; 512];
     loop {
-        let left = deadline.checked_duration_since(Instant::now())?;
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| timeout())?;
         if left.is_zero() {
-            return None;
+            return Err(timeout());
         }
-        sock.set_read_timeout(Some(left)).ok()?;
-        let Ok(n) = sock.recv(&mut buf) else {
-            return None;
+        sock.set_read_timeout(Some(left))
+            .map_err(|e| format!("read timeout failed ({e})"))?;
+        let n = match sock.recv(&mut buf) {
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(timeout())
+            }
+            Err(e) => return Err(format!("recv failed ({e})")),
         };
         if is_unconnected_pong(&buf[..n]) {
-            return Some(start.elapsed().as_millis().clamp(1, 9_999) as u32);
+            return Ok(start.elapsed().as_millis().clamp(1, 9_999) as u32);
         }
         // Not our answer: keep waiting for the pong until the deadline.
     }
@@ -113,17 +131,26 @@ pub fn ping_for_job(entries: &[(String, Option<u64>)], job_id: &str) -> Option<u
 /// This is tier one: Roblox's regional data-centre IPs answer echo over the same path the
 /// game uses, so the number matches what the game's own performance stats show. A filtered
 /// echo costs the bounded wait below and nothing else.
-pub fn icmp_rtt(ip: &str) -> Option<u32> {
+/// Returns the RTT, or the reason it produced no number (no reply, no tool, exit status).
+pub fn icmp_rtt_traced(ip: &str) -> Result<u32, String> {
     let ip = ip.trim();
     if ip.is_empty() {
-        return None;
+        return Err("empty address".to_string());
     }
-    let out = ping_command(ip)?.output().ok()?;
+    let Some(mut cmd) = ping_command(ip) else {
+        return Err("no icmp tool on this platform".to_string());
+    };
+    let out = cmd
+        .output()
+        .map_err(|e| format!("ping could not run ({e})"))?;
     if !out.status.success() {
-        return None;
+        return Err(match out.status.code() {
+            Some(code) => format!("no echo reply (ping exit {code})"),
+            None => "no echo reply (ping killed)".to_string(),
+        });
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    parse_ping_time(&text)
+    parse_ping_time(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| "unparsable ping output".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -170,22 +197,45 @@ const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 /// front of the server still completes a handshake - and a handshake is a real round trip
 /// over the player's path, not a web request to another continent. `None` when no port
 /// answers, so the row falls through to the room list instead of inventing a number.
-pub fn tcp_rtt(ip: &str, ports: &[u16]) -> Option<u32> {
+/// Returns the RTT, or the reason it produced no number, one word per port tried.
+pub fn tcp_rtt_traced(ip: &str, ports: &[u16]) -> Result<u32, String> {
     let ip = ip.trim();
-    if ip.is_empty() || ports.is_empty() {
-        return None;
+    if ip.is_empty() {
+        return Err("empty address".to_string());
+    }
+    if ports.is_empty() {
+        return Err("no port to try".to_string());
     }
     // Resolve once for every port: a dead address is not looked up again per port.
-    let addrs = (ip, ports[0]).to_socket_addrs().ok()?;
-    let ip = addrs.map(|a| a.ip()).find(|ip| ip.is_ipv4())?;
+    let addrs = (ip, ports[0])
+        .to_socket_addrs()
+        .map_err(|e| format!("unresolved address ({e})"))?;
+    let ip = addrs
+        .map(|a| a.ip())
+        .find(|ip| ip.is_ipv4())
+        .ok_or_else(|| "no IPv4 address".to_string())?;
+    let mut tried = Vec::new();
     for port in ports {
         let addr = std::net::SocketAddr::new(ip, *port);
         let start = Instant::now();
-        if TcpStream::connect_timeout(&addr, TCP_TIMEOUT).is_ok() {
-            return Some(start.elapsed().as_millis().clamp(1, 9_999) as u32);
+        match TcpStream::connect_timeout(&addr, TCP_TIMEOUT) {
+            Ok(_) => return Ok(start.elapsed().as_millis().clamp(1, 9_999) as u32),
+            Err(e) => tried.push(format!("{port} {}", tcp_reason(&e))),
         }
     }
-    None
+    Err(tried.join(", "))
+}
+
+/// One word for a failed handshake, short enough to read inside a log line.
+fn tcp_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::ConnectionRefused => "refused",
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "timeout",
+        std::io::ErrorKind::PermissionDenied => "blocked",
+        std::io::ErrorKind::NetworkUnreachable => "unreachable",
+        std::io::ErrorKind::HostUnreachable => "unreachable",
+        _ => "failed",
+    }
 }
 
 /// `time=30.4 ms` (macOS), `time=30ms` / `time<1ms` (Windows).
