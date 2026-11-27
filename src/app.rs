@@ -287,6 +287,8 @@ pub struct Creblox {
     /// The tray's "Edit Overlay Position" mode is open: the HUD is draggable and the
     /// overlay process is waiting for a Confirm / Esc.
     pub overlay_editing: bool,
+    /// The Player Inventory Viewer modal, when one is open.
+    pub inventory: Option<crate::ui::page_inventory::InventoryView>,
     /// Last look at the editor's answer file.
     pub last_overlay_edit_check: Option<Instant>,
     /// Frames to wait after showing the window before raising it over Roblox.
@@ -582,6 +584,7 @@ impl Creblox {
             last_visibility_check: None,
             last_overlay_check: None,
             overlay_editing: false,
+            inventory: None,
             last_overlay_edit_check: None,
             raise_frames: 0,
             pending_start_in_tray_frames: if start_in_tray { 2 } else { 0 },
@@ -5605,6 +5608,17 @@ impl eframe::App for Creblox {
         }
         self.render_notifications(ui.ctx(), &mut acts);
         self.render_server_badge(ui.ctx());
+        // The inventory modal floats over every page; its clicks join the same action list.
+        if self.inventory.is_some() {
+            let (mut inv_acts, still_open) = {
+                let inv = self.inventory.as_mut().expect("checked above");
+                (inv.render(ui.ctx()), inv.open)
+            };
+            if !still_open {
+                self.inventory = None;
+            }
+            acts.append(&mut inv_acts);
+        }
 
         let hovered_game = acts.iter().find_map(|a| {
             if let Action::HoverGame(uid) = a {
@@ -5641,6 +5655,15 @@ impl eframe::App for Creblox {
                     if let Err(e) = open::that(&u) {
                         self.status = format!("Error: {e}");
                     }
+                }
+                Action::ViewInventory(uid, name) => {
+                    let is_self = self.me.as_ref().is_some_and(|p| p.user.id == uid);
+                    self.inventory = Some(crate::ui::page_inventory::InventoryView::new(
+                        uid,
+                        name,
+                        is_self,
+                        self.cookie.clone(),
+                    ));
                 }
                 _ if !self.cookie.is_some() => {}
                 Action::Go(p) => {

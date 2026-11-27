@@ -111,6 +111,10 @@ impl Creblox {
                                 acts.push(Action::OpenFriend(f.clone()));
                                 ui.close();
                             }
+                            if ui.button("View Inventory").clicked() {
+                                acts.push(Action::ViewInventory(f.id, f.name.clone()));
+                                ui.close();
+                            }
                             if let Some(pid) = f.place_id {
                                 if ui.button("Join game").clicked() {
                                     acts.push(Action::JoinPlace(pid));

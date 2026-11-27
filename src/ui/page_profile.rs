@@ -413,6 +413,13 @@ impl Creblox {
             self.status = "Copied user ID!".to_string();
             ui.close();
         }
+        if ui.button("View inventory").clicked() {
+            acts.push(Action::ViewInventory(
+                profile.user.id,
+                profile.user.name.clone(),
+            ));
+            ui.close();
+        }
         if ui.button("Open in browser").clicked() {
             acts.push(Action::OpenUrl(format!(
                 "https://www.roblox.com/users/{}/profile",

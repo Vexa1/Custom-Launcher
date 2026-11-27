@@ -97,6 +97,9 @@ impl Creblox {
             }
 
             ui.add_space(SPACE_2);
+            // Applied after the list: the menu closure must not borrow `self` while the rows
+            // are being drawn.
+            let mut open_inventory: Option<(u64, String)> = None;
             for m in &party.members {
                 let is_me = m.user.id == me;
                 let response = ui
@@ -112,6 +115,10 @@ impl Creblox {
                     .response
                     .on_hover_text(format!("@{} - {}", m.user.name, m.status.label()));
                 response.context_menu(|ui| {
+                    if ui.button("View Inventory").clicked() {
+                        open_inventory = Some((m.user.id, m.user.name.clone()));
+                        ui.close();
+                    }
                     if m.place_id > 0 && !m.job_id.is_empty() && !is_me {
                         if ui.button("Join their server").clicked() {
                             join_target = Some((m.place_id, m.job_id.clone()));
@@ -129,6 +136,15 @@ impl Creblox {
                         }
                     }
                 });
+            }
+
+            if let Some((user_id, name)) = open_inventory {
+                self.inventory = Some(crate::ui::page_inventory::InventoryView::new(
+                    user_id,
+                    name,
+                    false,
+                    self.cookie.clone(),
+                ));
             }
 
             ui.add_space(SPACE_2);

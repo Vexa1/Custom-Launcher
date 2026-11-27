@@ -6,6 +6,7 @@ pub mod page_charts;
 pub mod page_game;
 pub mod page_home;
 pub mod page_login;
+pub mod page_inventory;
 pub mod page_profile;
 pub mod page_search;
 pub mod page_settings;

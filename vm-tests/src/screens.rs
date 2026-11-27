@@ -9,6 +9,7 @@
 
 use egui::{Color32, CornerRadius, Stroke, Vec2};
 
+use crate::inventory::Category;
 use crate::shots::Probe;
 
 // Palette: `Palette::of(true)` in `src/theme.rs` (Precision Obsidian).
@@ -40,6 +41,8 @@ pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
         ("settings", settings),
         ("updater", updater),
         ("overlay", overlay),
+        ("inventory", inventory),
+        ("inventory-private", inventory_private),
     ]
 }
 
@@ -857,5 +860,192 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
             MUTED,
             CARD,
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Player Inventory Viewer (`src/ui/page_inventory.rs`)
+// ---------------------------------------------------------------------------
+
+/// The modal shell: dimmed page, card, title row, the five lazy category tabs.
+fn inventory_shell(
+    ui: &mut egui::Ui,
+    probe: &mut Probe,
+    title: &str,
+    body: impl FnOnce(&mut egui::Ui, &mut Probe),
+) {
+    let screen = ui.ctx().viewport_rect();
+    ui.painter().rect_filled(screen, CornerRadius::ZERO, BG);
+    probe.widget("inventory.backdrop", screen, false);
+
+    let modal = egui::Rect::from_center_size(screen.center(), Vec2::new(1120.0, 720.0));
+    ui.painter()
+        .rect_filled(modal, CornerRadius::same(12), CARD);
+    ui.painter().rect_stroke(
+        modal,
+        CornerRadius::same(12),
+        Stroke::new(1.0, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    probe.widget("inventory.modal", modal, false);
+
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(modal.shrink(16.0)),
+        |ui| {
+            ui.set_width(modal.width() - 32.0);
+            ui.horizontal(|ui| {
+                probe.label(
+                    ui,
+                    "inventory.title",
+                    title,
+                    egui::FontId::proportional(17.0),
+                    TEXT,
+                    CARD,
+                );
+                ui.add_space(6.0);
+                probe.label(
+                    ui,
+                    "inventory.subtitle",
+                    "Roblox · 50 per page",
+                    egui::FontId::proportional(10.0),
+                    MUTED,
+                    CARD,
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    probe.button(
+                        ui,
+                        "inventory.close",
+                        "Close",
+                        Vec2::new(58.0, 26.0),
+                        SURFACE,
+                        TEXT,
+                    );
+                });
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for (i, category) in Category::ALL.iter().enumerate() {
+                    let selected = i == 0;
+                    probe.button(
+                        ui,
+                        format!("inventory.tab.{i}"),
+                        category.label(),
+                        Vec2::new(150.0, 28.0),
+                        if selected { SELECTED } else { SURFACE },
+                        if selected { TEXT } else { MUTED },
+                    );
+                }
+            });
+            ui.add_space(10.0);
+            body(ui, probe);
+        },
+    );
+}
+
+pub fn inventory(ui: &mut egui::Ui, probe: &mut Probe) {
+    inventory_shell(ui, probe, "Your inventory", |ui, probe| {
+        let items = [
+            ("Sparkle Fedora", "HAT"),
+            ("Blue Hair", "HAIR"),
+            ("Classic Shirt", "SHIRT"),
+            ("Black Pants", "PANTS"),
+            ("Round Shades", "FACE"),
+            ("Wings", "BACK"),
+            ("Sword", "GEAR"),
+            ("Wave", "EMOTE"),
+            ("Idle", "ANIMATION"),
+            ("Run", "ANIMATION"),
+            ("Walk", "ANIMATION"),
+            ("Neck Fluff", "NECK"),
+            ("Beanie", "HAT"),
+            ("Backpack", "BACK"),
+        ];
+        // Same responsive column count as `page_inventory::grid`.
+        let columns = (((ui.available_width() + 8.0) / 140.0).floor() as usize).max(1);
+        for (row, chunk) in items.chunks(columns).enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (column, (name, kind)) in chunk.iter().enumerate() {
+                    inventory_card(ui, probe, row * columns + column, name, kind);
+                }
+            });
+            ui.add_space(8.0);
+        }
+        probe.button(
+            ui,
+            "inventory.load_more",
+            "Load more",
+            Vec2::new(96.0, 28.0),
+            SURFACE,
+            TEXT,
+        );
+    });
+}
+
+/// One card: thumbnail slot, name, type badge. The real card paints the 150 px thumbnail
+/// once its texture is admitted; the fixture keeps the same slot with a placeholder.
+fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, kind: &str) {
+    let frame = egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(8));
+    let inner = frame.show(ui, |ui| {
+        ui.set_width(116.0);
+        ui.vertical(|ui| {
+            let (thumb, _) = ui.allocate_exact_size(Vec2::splat(108.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(thumb, CornerRadius::same(6), HOVER);
+            ui.painter().circle_filled(
+                thumb.center(),
+                16.0,
+                Color32::from_rgb(0x2E, 0x34, 0x44),
+            );
+            probe.widget(format!("inventory.card.{idx}.thumb"), thumb, false);
+            ui.add_space(6.0);
+            probe.label(
+                ui,
+                format!("inventory.card.{idx}.name"),
+                name,
+                egui::FontId::proportional(11.5),
+                TEXT,
+                SURFACE,
+            );
+            ui.add_space(2.0);
+            probe.label(
+                ui,
+                format!("inventory.card.{idx}.type"),
+                kind,
+                egui::FontId::proportional(10.0),
+                MUTED,
+                SURFACE,
+            );
+        });
+    });
+    probe.widget(format!("inventory.card.{idx}"), inner.response.rect, false);
+}
+
+pub fn inventory_private(ui: &mut egui::Ui, probe: &mut Probe) {
+    inventory_shell(ui, probe, "MysteryPlayer's inventory", |ui, probe| {
+        ui.add_space(220.0);
+        ui.vertical_centered(|ui| {
+            probe.label(
+                ui,
+                "inventory.empty.title",
+                "This player's inventory is private",
+                egui::FontId::proportional(16.0),
+                TEXT,
+                CARD,
+            );
+            ui.add_space(4.0);
+            probe.label(
+                ui,
+                "inventory.empty.detail",
+                "Roblox only shows an inventory its owner made public.",
+                egui::FontId::proportional(12.0),
+                MUTED,
+                CARD,
+            );
+        });
     });
 }

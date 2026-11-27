@@ -870,6 +870,8 @@ pub enum Action {
     HoverGame(u64),
     Open(Game),
     OpenFriend(User),
+    /// Open the Player Inventory Viewer for this user (`user id`, display name).
+    ViewInventory(u64, String),
     /// Copy the party invite and point the user at this friend.
     InviteToParty(User),
     OpenAddFriend,

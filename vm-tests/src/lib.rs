@@ -21,6 +21,9 @@ pub mod shots;
 #[path = "../../src/game_log.rs"]
 pub mod game_log;
 
+#[path = "../../src/inventory.rs"]
+pub mod inventory;
+
 #[path = "../../src/net_probe.rs"]
 pub mod net_probe;
 

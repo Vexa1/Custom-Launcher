@@ -40,6 +40,110 @@ pub fn auth_get_json(url: &str, cookie: Option<&str>) -> Result<Value, String> {
         .map_err(|e| e.to_string())
 }
 
+/// One worker-thread fetch of an inventory tab.
+///
+/// A tab owns several asset types (Roblox's inventory API is per type), so this walks them
+/// and merges their pages. `pages_per_type` bounds the work of one call: the viewer asks for
+/// one page per type when a tab opens and one more per type when the grid is scrolled to the
+/// end. A private inventory aborts immediately - retrying it can never succeed - and a 429 is
+/// handed back as [`FetchError::RateLimited`] for the viewer to back off on.
+pub fn fetch_inventory_tab(
+    user_id: u64,
+    category: crate::inventory::Category,
+    cursors: Vec<Option<String>>,
+    cookie: Option<&str>,
+    pages_per_type: usize,
+) -> Result<crate::inventory::Page, crate::inventory::FetchError> {
+    use crate::inventory::{Page, badges_url, inventory_url, parse_badges, parse_inventory};
+    let types = category.asset_types();
+    let mut out = Page {
+        items: Vec::new(),
+        cursors: vec![None; types.len()],
+        complete: false,
+    };
+    let pages_wanted = pages_per_type.max(1);
+
+    // Badges are served by `badges.roblox.com`, not by the inventory endpoint. Asset type 21
+    // stays in the category so its cursor lines up with the tab's type list.
+    if category.uses_badges() {
+        let slot = types.iter().position(|t| *t == 21);
+        let mut cursor = slot.and_then(|i| cursors.get(i).cloned().flatten());
+        let mut pages = 0;
+        loop {
+            let value = inventory_get(&badges_url(user_id, cursor.as_deref()), cookie)?;
+            let page = parse_badges(&value)?;
+            out.items.extend(page.items);
+            cursor = page.cursors.into_iter().next().flatten();
+            pages += 1;
+            if cursor.is_none() || pages >= pages_wanted {
+                break;
+            }
+        }
+        if let Some(i) = slot {
+            out.cursors[i] = cursor;
+        }
+    }
+
+    for (i, asset_type) in types.iter().enumerate() {
+        if category.uses_badges() && *asset_type == 21 {
+            continue; // already walked above
+        }
+        let mut cursor = cursors.get(i).cloned().flatten();
+        let mut pages = 0;
+        loop {
+            let value = inventory_get(
+                &inventory_url(user_id, *asset_type, cursor.as_deref()),
+                cookie,
+            )?;
+            let page = parse_inventory(&value, *asset_type)?;
+            out.items.extend(page.items);
+            cursor = page.cursors.into_iter().next().flatten();
+            pages += 1;
+            if cursor.is_none() || pages >= pages_wanted {
+                break;
+            }
+        }
+        out.cursors[i] = cursor;
+    }
+
+    out.complete = out.cursors.iter().all(Option::is_none);
+    // A tab walks several types, so the same asset can come back twice; keep the first sight.
+    let mut seen = HashSet::new();
+    out.items.retain(|item| seen.insert(item.id));
+    Ok(out)
+}
+
+/// One Roblox GET with the inventory policy attached: 403 becomes `Private`, 429 carries its
+/// `Retry-After` when Roblox sends one, everything else keeps its status.
+fn inventory_get(url: &str, cookie: Option<&str>) -> Result<Value, crate::inventory::FetchError> {
+    use crate::inventory::{FetchError, classify_error};
+    let mut req = agent().get(url);
+    if let Some(c) = cookie {
+        req = req.set("Cookie", &format!(".ROBLOSECURITY={c}"));
+    }
+    match req.call() {
+        Ok(resp) => resp
+            .into_json()
+            .map_err(|e| FetchError::Other(e.to_string())),
+        Err(ureq::Error::Status(code, resp)) => {
+            let retry_after = resp
+                .header("Retry-After")
+                .or_else(|| resp.header("x-ratelimit-reset"))
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5)
+                .clamp(1, 120);
+            let body = resp.into_string().unwrap_or_default();
+            Err(match classify_error(code, &body) {
+                FetchError::RateLimited { .. } => FetchError::RateLimited {
+                    retry_after_secs: retry_after,
+                },
+                other => other,
+            })
+        }
+        Err(e) => Err(FetchError::Other(e.to_string())),
+    }
+}
+
 /// Looks up a rough "City, Region, Country" for a server IP address.
 pub fn lookup_server_location(ip: &str) -> Option<String> {
     fn join(parts: [Option<&str>; 3]) -> Option<String> {
