@@ -130,6 +130,10 @@ pub struct CrebloxRelease {
     pub zip_name: Option<String>,
     pub zip_size: u64,
     pub zip_sha256: Option<String>,
+    /// True when the zip came from a release asset rather than a link written into the notes.
+    /// An asset always carries a checksum, so an asset without one is refused rather than
+    /// installed unverified.
+    pub zip_from_asset: bool,
     pub hotfix_url: Option<String>,
 }
 
@@ -270,13 +274,15 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
     // Which archive belongs to this platform is `release_links`' rule, so the VM tests cover it
     // instead of it living in the JSON parser. Assets come first; the notes are the documented
     // fallback for the macOS overlay. A foreign build is ignored, never used as a fallback.
-    let chosen_zip = crate::release_links::pick_zip_asset(&zip_assets, WINDOWS_BUILD);
-    let (zip_url, zip_name, zip_size, zip_sha256) = match chosen_zip {
+    let chosen_zip =
+        crate::release_links::pick_zip_asset(&zip_assets, WINDOWS_BUILD, Some(&normalized_ver));
+    let (zip_url, zip_name, zip_size, zip_sha256, zip_from_asset) = match chosen_zip {
         Some(asset) => (
             Some(asset.url.to_string()),
             Some(asset.name.to_string()),
             asset.size,
             crate::release_links::zip_checksum(&notes, asset.url, true),
+            true,
         ),
         None => match crate::release_links::notes_zip(&notes, WINDOWS_BUILD) {
             Some((url, sha256)) => {
@@ -288,9 +294,9 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
                     .next()
                     .unwrap_or("creblox-update.zip")
                     .to_string();
-                (Some(url), Some(name), 0, sha256)
+                (Some(url), Some(name), 0, sha256, false)
             }
-            None => (None, None, 0, None),
+            None => (None, None, 0, None, false),
         },
     };
 
@@ -316,6 +322,7 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
         zip_name,
         zip_size,
         zip_sha256,
+        zip_from_asset,
         hotfix_url,
     })
 }
@@ -412,30 +419,18 @@ pub fn downloaded_update_path(version: &str) -> PathBuf {
     updates_dir().join(format!("CREBLOX-{version}-update.zip"))
 }
 
+/// SHA-256 of the downloaded archive, computed in Rust.
+///
+/// This used to run `/usr/bin/shasum` and fall back to `shasum` on the PATH. Neither exists on a
+/// stock Windows install, so the Windows update could only ever fail here - and shelling out put
+/// the integrity check behind a tool the user's machine may not have.
 fn sha256_of(path: &Path) -> Result<String, String> {
-    let out = Command::new("/usr/bin/shasum")
-        .args(["-a", "256"])
-        .arg(path)
-        .output()
-        .or_else(|_| {
-            Command::new("shasum")
-                .args(["-a", "256"])
-                .arg(path)
-                .output()
-        })
-        .map_err(|e| format!("Could not run shasum: {e}"))?;
-    if !out.status.success() {
-        return Err("Could not checksum the downloaded update.".to_string());
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .map(|s| s.to_ascii_lowercase())
-        .ok_or_else(|| "Could not read the downloaded update checksum.".to_string())
+    crate::sha256::file_hex(path)
 }
 
-/// Downloads the macOS source-update zip from the release body, verifies its zip
-/// signature and (when the release publishes one) its SHA-256.
+/// Downloads this platform's update zip (a release asset, or the body link on macOS), checks
+/// that it really is a zip, and verifies its SHA-256 before the caller may install it.
+/// An asset must carry a checksum; a hand-written body link may omit one.
 pub fn download_update_zip(
     release: &CrebloxRelease,
     downloaded: &AtomicU64,
@@ -508,6 +503,20 @@ pub fn download_update_zip(
     if !valid_zip {
         let _ = fs::remove_file(&part);
         return Err("Downloaded file is not a valid update zip.".to_string());
+    }
+    if release.zip_size > 0 && written != release.zip_size {
+        let _ = fs::remove_file(&part);
+        return Err(format!(
+            "The update download stopped early ({written} of {} bytes).",
+            release.zip_size
+        ));
+    }
+    // An asset is published by our own workflow, which always prints its checksum: no
+    // checksum means the notes were edited wrong, and an unverified exe must never replace a
+    // working install.
+    if release.zip_from_asset && release.zip_sha256.is_none() {
+        let _ = fs::remove_file(&part);
+        return Err("This release publishes no SHA-256 for its download, so CREBLOX will not install it. Get it from the Releases page instead.".to_string());
     }
     if let Some(expected) = &release.zip_sha256 {
         let actual = sha256_of(&part)?;
@@ -1239,6 +1248,12 @@ fn swap_binary_with_retries(target_exe: &Path, staged_exe: &Path) -> Result<(), 
     }
 
     if let Err(e) = fs::rename(staged_exe, target_exe) {
+        // The staging folder lives under %LOCALAPPDATA%; an install on another drive cannot be
+        // renamed into place across volumes, so fall back to a copy before giving up.
+        if fs::copy(staged_exe, target_exe).is_ok() {
+            let _ = fs::remove_file(staged_exe);
+            return Ok(());
+        }
         if moved_old {
             let _ = fs::rename(&backup_path, target_exe);
         }

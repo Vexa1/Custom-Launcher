@@ -839,9 +839,11 @@ impl Creblox {
         let Some(release) = self.app_update_available.clone() else {
             return;
         };
-        // macOS releases are source zips linked in the release body: download them
-        // inside the app, then let the user press Install & Restart.
-        if cfg!(target_os = "macos") && release.zip_url.is_some() {
+        // Both platforms update from the release zip: macOS rebuilds from the source overlay,
+        // Windows swaps its single exe out of `CREBLOX-<ver>-windows-x64.zip`. It is downloaded
+        // inside the app, verified, then installed when the user presses Install & Restart.
+        // The .exe asset path below stays as the fallback for a release that ships no zip.
+        if release.zip_url.is_some() {
             let ver = release.version.clone();
             let downloaded = Arc::new(AtomicU64::new(0));
             let total = Arc::new(AtomicU64::new(release.zip_size));

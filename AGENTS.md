@@ -44,3 +44,42 @@ cargo test --manifest-path vm-tests/Cargo.toml --test shots
 4. Say what you looked at and what you did not. Passing geometry checks are not an eyeball check.
 
 `vm-tests/artifacts/` is gitignored, and none of this is part of a release build.
+
+# Releases: a release is not done until Windows is attached
+
+CREBLOX ships macOS **and** Windows 10/11 from this tree. `memory.md` is the step-by-step
+runbook; this is the gate that decides whether a release exists.
+
+A release is complete only when all of these are true:
+
+1. `Cargo.toml` and `README.md` carry the new version, and `Cargo.lock` is committed with it.
+2. `release/CREBLOX-<ver>-update.zip` and `release/CREBLOX-<ver>-full.zip` are committed,
+   pushed, and their byte size + SHA-256 are printed in the notes.
+3. The `build-windows` workflow finished **green** on that tag and attached
+   `CREBLOX-<ver>-windows-x64.zip` to the release, with its size and SHA-256 in the notes.
+4. The release's `assets[]` lists `CREBLOX-<ver>-update.zip` first and
+   `CREBLOX-<ver>-windows-x64.zip` second, both with a non-zero size.
+5. The release is published (not a draft) and is the repository's latest.
+
+Never call a release done, announce it, or start the next change while the Windows job is
+still running or its zip is missing. The Windows updater installs from that asset, so a missing
+asset means every Windows user is stuck. Re-run the job (`workflow_dispatch`, input
+`release_tag: v<ver>`) or fix the build; do not publish a macOS-only release.
+
+The workflow must keep compiling `creblox.exe` with the GUI subsystem
+(`#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]` in
+`src/main.rs`, checked as PE subsystem 2 in the job), running `cargo test` on the Windows
+runner, and packaging exactly `CREBLOX-<ver>-windows-x64.zip`.
+
+# Windows self-update: the rules the tests enforce
+
+- The release parser takes the asset named exactly `CREBLOX-<version>-windows-x64.zip`
+  (`release_links::is_windows_zip_for`); a zip for another version, product or architecture is
+  ignored, never installed.
+- The archive's SHA-256 is verified with `src/sha256.rs` **before** anything is written: no
+  external tool, no PowerShell, no script. A release asset without a published hash is refused.
+- Extraction is `zip`-crate-only into `%LOCALAPPDATA%\creblox\updates\`; only `creblox.exe` is
+  taken out and its PE header must be x64 + GUI.
+- The running exe is renamed to `creblox.exe.old` with retries, the new one is renamed into
+  place (copying when the target is on another volume), the process reopens it with
+  `CREATE_NO_WINDOW`, and `cleanup_old_binary()` deletes the leftovers on the next start.

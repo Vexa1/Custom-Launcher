@@ -342,7 +342,7 @@ process owns the pointer while the launcher owns the config.
 | **Launch at login** (`set_startup`) | Writes a login item/LaunchAgent for the resolved bundle path. |
 | **Discord Rich Presence** (`discord_rpc.rs`) | A hand-written Discord IPC client (Unix socket / named pipe, 8-byte frame header, `SET_ACTIVITY`), so no `discord-rich-presence` dependency. Shows the game being played; default app id `1005469189907173486`, overridable in Settings. |
 | **Notifications** (`ui/notifications.rs`, `auth.rs:730-745`) | Roblox notifications, friend requests and system alerts, with unread badges on the nav rail, top-centre toast popups, a "silent" mode and a `seen_notifications.json` ledger. The page also shows two status cards (Roblox API health, background Roblox processes). |
-| **Updates** | Manual, from GitHub Releases: download `CREBLOX-<version>-update.zip` and double-click **`Update CREBLOX.command`**, which rebuilds your source folder in place and keeps settings, logins, playtime and FastFlags. See *Updating an existing install* under building. Nothing in the app contacts the network to look for updates. |
+| **Updates** | In-app: **Settings → Updates** checks GitHub Releases and installs after SHA-256 verification — macOS rebuilds from `CREBLOX-<version>-update.zip`, Windows swaps in `CREBLOX-<version>-windows-x64.zip` and reopens. The manual path still works: download `CREBLOX-<version>-update.zip` and double-click **`Update CREBLOX.command`**, which rebuilds your source folder in place and keeps settings, logins, playtime and FastFlags. |
 | **Live `hotfix.json`** (`updater.rs`) | Dormant with the rest of the update subsystem: no client fetches it. |
 | **Theme packs** (`ui/page_settings.rs:37-110`) | Light, Dark, Mint, Rose, Ocean, Sand, plus fully custom: background (theme default / solid colour / wallpaper with drag-and-drop image and dim overlay), text colour mode, per-surface border colours, corner roundness, and the "Liquid Glass" edition (opacity + highlight), all persisted. |
 | **Animations toggle** | Global: `animation_time = 0` in egui plus the page cross-fade is skipped. |
@@ -619,6 +619,25 @@ scripts/package-release.sh
 # binary has no x86_64 slice
 scripts/package-release-macos.sh
 ```
+
+### Releasing (macOS + Windows)
+
+`memory.md` is the full runbook. A release exists only when **both** platforms are on it:
+
+1. Bump `Cargo.toml` / `README.md`, refresh `Cargo.lock`, and package the macOS archives with
+   `scripts/package-release.sh`; commit `release/CREBLOX-<ver>-update.zip` and
+   `release/CREBLOX-<ver>-full.zip` and push `main`.
+2. Create the GitHub release for tag `v<ver>` with the notes (byte size + SHA-256 per archive,
+   update archive linked first).
+3. Wait for the `build-windows` job to finish green. It builds `creblox.exe`, runs the unit
+   tests and the `update_zip` suite on Windows, packages
+   `CREBLOX-<ver>-windows-x64.zip`, attaches it to the release and appends its URL + `sha256`
+   to the notes.
+4. Verify the release before calling it done: the raw archives return `200` at the printed
+   sizes, `assets[]` lists the macOS update first and the Windows zip second, and the Windows
+   zip's own SHA-256 matches the line in the notes. A release that is missing its Windows zip
+   is broken for every Windows user — re-run the job (`workflow_dispatch` with
+   `release_tag: v<ver>`), never ship it as is.
 
 `MACOSX_DEPLOYMENT_TARGET` is pinned to `10.15` in `.cargo/config.toml`, so
 `MACOSX_DEPLOYMENT_TARGET=10.15 cargo check` and a bare `cargo check` are equivalent (an

@@ -51,20 +51,31 @@ pub fn is_macos_zip(name: &str) -> bool {
         && (lower.contains("creblox") || lower.contains("macos"))
 }
 
-/// A Windows release archive: only the x64 build, keyed on `windows`.
+/// A Windows release archive: a CREBLOX zip that names the platform and the architecture.
+///
+/// Deliberately stricter than "contains windows": the Windows installer swaps an exe out of
+/// whatever it downloads, so a helper zip that happened to carry the word must never qualify.
 pub fn is_windows_zip(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.ends_with(".zip") && lower.contains("windows")
+    lower.starts_with("creblox-")
+        && lower.ends_with(".zip")
+        && lower.contains("windows")
+        && lower.contains("x64")
 }
 
-/// Whether a `.zip` name is the one this platform's in-app updater should take. Windows looks
-/// for the x64 build; macOS takes the project archive.
-pub fn prefers_zip_asset(name: &str, windows: bool) -> bool {
-    if windows {
-        is_windows_zip(name)
-    } else {
-        is_macos_zip(name)
-    }
+/// The one file name a release must use for its Windows build.
+pub fn windows_zip_name(version: &str) -> String {
+    format!("CREBLOX-{version}-windows-x64.zip")
+}
+
+/// Whether `name` is exactly the Windows build for `version`.
+///
+/// This is what the release parser asks for, which is why the version is compared and not just
+/// the shape: an archive built for another version (or another product) is not this update, and
+/// the installer only ever swaps a file it is sure about. A release that renames the asset fails
+/// here instead of installing something unexpected.
+pub fn is_windows_zip_for(name: &str, version: &str) -> bool {
+    name.eq_ignore_ascii_case(&windows_zip_name(version))
 }
 
 /// One release asset as GitHub lists it: file name, download URL and size in bytes.
@@ -83,11 +94,23 @@ pub struct ZipAsset<'a> {
 /// swap in an .exe, and a Windows client that took the macOS overlay would unzip a source tree
 /// instead of a launcher. `None` means this release has no build for this platform, so the caller
 /// falls back to a zip link written into the notes.
-pub fn pick_zip_asset<'a>(assets: &[ZipAsset<'a>], windows: bool) -> Option<ZipAsset<'a>> {
-    assets
-        .iter()
-        .copied()
-        .find(|asset| prefers_zip_asset(asset.name, windows))
+///
+/// With `version` the Windows match is the exact `CREBLOX-<version>-windows-x64.zip` name from
+/// the release; without it the structurally stricter [`is_windows_zip`] rule applies.
+pub fn pick_zip_asset<'a>(
+    assets: &[ZipAsset<'a>],
+    windows: bool,
+    version: Option<&str>,
+) -> Option<ZipAsset<'a>> {
+    assets.iter().copied().find(|asset| {
+        if !windows {
+            return is_macos_zip(asset.name);
+        }
+        match version {
+            Some(version) => is_windows_zip_for(asset.name, version),
+            None => is_windows_zip(asset.name),
+        }
+    })
 }
 
 /// The zip link in a release body that this platform can install.

@@ -2,10 +2,16 @@
 //! host-independent modules (`src/release_links.rs`, `src/zip_update.rs`), so this suite runs the
 //! real code on the Linux VM where the GUI crate does not build.
 
-use creblox_vm_tests::{release_links, zip_update};
+use creblox_vm_tests::{release_links, sha256, zip_update};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// The asset name the `build-windows` job attaches for 0.5.6, URL included: the parser asks
+/// for exactly this name, so the fixture drifts the moment the workflow does.
+const WIN_056_NAME: &str = "CREBLOX-0.5.6-windows-x64.zip";
+const WIN_056_URL: &str =
+    "https://github.com/Vexa1/Custom-Launcher/releases/download/v0.5.6/CREBLOX-0.5.6-windows-x64.zip";
 
 const WINDOWS_URL: &str =
     "https://github.com/Vexa1/Custom-Launcher/releases/download/v0.5.4/CREBLOX-0.5.4-windows-x64.zip";
@@ -24,6 +30,13 @@ fn the_checksum_fixtures_are_64_hex_characters() {
         assert_eq!(hash.len(), 64, "not a SHA-256 token: {hash}");
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "not hex: {hash}");
     }
+}
+
+/// SHA-256 of some bytes, through the streaming API the updater uses for a download.
+fn sha_hex(data: &[u8]) -> String {
+    let mut hasher = sha256::Sha256::new();
+    hasher.update(data);
+    hasher.finish_hex()
 }
 
 struct Scratch(PathBuf);
@@ -354,10 +367,10 @@ fn asset_names_are_chosen_per_platform() {
     let windows = "CREBLOX-0.5.4-windows-x64.zip";
     let macos = "creblox-0.5.4-macos-full.zip";
 
-    assert!(release_links::prefers_zip_asset(windows, true));
-    assert!(!release_links::prefers_zip_asset(windows, false));
-    assert!(release_links::prefers_zip_asset(macos, false));
-    assert!(!release_links::prefers_zip_asset(macos, true));
+    assert!(release_links::is_windows_zip(windows));
+    assert!(!release_links::is_windows_zip(macos));
+    assert!(release_links::is_macos_zip(macos));
+    assert!(!release_links::is_macos_zip(windows));
 }
 
 fn asset<'a>(name: &'a str, url: &'a str, size: u64) -> release_links::ZipAsset<'a> {
@@ -374,12 +387,12 @@ fn a_foreign_zip_asset_is_ignored_not_merely_ordered_last() {
     ];
 
     assert_eq!(
-        release_links::pick_zip_asset(&release, false).map(|a| a.url),
+        release_links::pick_zip_asset(&release, false, None).map(|a| a.url),
         Some(MAC_UPDATE_URL),
         "a Mac must skip the .exe zip even when it is listed first"
     );
     assert_eq!(
-        release_links::pick_zip_asset(&release, true).map(|a| a.url),
+        release_links::pick_zip_asset(&release, true, None).map(|a| a.url),
         Some(WINDOWS_URL),
         "Windows must skip the macOS overlay"
     );
@@ -393,7 +406,7 @@ fn the_first_usable_asset_wins() {
     ];
 
     // The overlay is published first so the in-app update stays small.
-    let picked = release_links::pick_zip_asset(&release, false).expect("a macOS build");
+    let picked = release_links::pick_zip_asset(&release, false, None).expect("a macOS build");
     assert_eq!(picked.name, "CREBLOX-0.5.5-update.zip");
     assert_eq!(picked.size, 398_986, "the size comes from the asset");
 }
@@ -405,9 +418,9 @@ fn a_release_without_this_platforms_asset_picks_nothing() {
 
     // None is what makes the updater fall back to the notes link instead of installing a build
     // the platform cannot run.
-    assert_eq!(release_links::pick_zip_asset(&mac_only, true), None);
-    assert_eq!(release_links::pick_zip_asset(&windows_only, false), None);
-    assert_eq!(release_links::pick_zip_asset(&[], false), None);
+    assert_eq!(release_links::pick_zip_asset(&mac_only, true, None), None);
+    assert_eq!(release_links::pick_zip_asset(&windows_only, false, None), None);
+    assert_eq!(release_links::pick_zip_asset(&[], false, None), None);
 }
 
 #[test]
@@ -415,7 +428,7 @@ fn only_zip_assets_are_candidates() {
     let notes = [asset("creblox-0.5.5-notes.txt", "https://example.com/notes.txt", 10)];
 
     assert_eq!(
-        release_links::pick_zip_asset(&notes, false),
+        release_links::pick_zip_asset(&notes, false, None),
         None,
         "a name alone is not an updatable archive"
     );
@@ -474,5 +487,176 @@ fn the_hash_may_sit_on_the_same_line_as_the_link() {
     assert_eq!(
         release_links::find_sha256_near(&notes, WINDOWS_URL).as_deref(),
         Some(WIN_HASH)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256: the check that stands between a downloaded zip and the installed exe.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sha256_matches_the_published_vectors() {
+    assert_eq!(
+        sha_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        sha_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        sha_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    );
+}
+
+#[test]
+fn a_megabyte_is_hashed_across_blocks() {
+    // One million `a`: the classic long-message vector, and the size class of a real release
+    // archive, so padding across many blocks is exercised.
+    let data = vec![b'a'; 1_000_000];
+    assert_eq!(
+        sha_hex(&data),
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+    );
+}
+
+#[test]
+fn streaming_in_short_chunks_gives_the_same_digest() {
+    let mut hasher = sha256::Sha256::new();
+    for byte in b"The file is read in whatever chunks the OS returns" {
+        hasher.update(&[*byte]);
+    }
+    assert_eq!(
+        hasher.finish_hex(),
+        sha_hex(b"The file is read in whatever chunks the OS returns")
+    );
+}
+
+#[test]
+fn the_file_digest_matches_its_bytes() {
+    let scratch = Scratch::new("sha-file");
+    let file = scratch.path().join("CREBLOX-0.5.6-windows-x64.zip");
+    fs::write(&file, b"abc").expect("write archive");
+
+    assert_eq!(
+        sha256::file_hex(&file).expect("hash the file"),
+        sha_hex(b"abc")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Release-asset selection: exactly one Windows zip, matched by name and version.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_windows_asset_must_be_the_exact_release_zip() {
+    let release = [
+        asset("CREBLOX-0.5.6-update.zip", MAC_UPDATE_URL, 412_856),
+        asset("CREBLOX-0.5.6-full.zip", MAC_FULL_URL, 745_330),
+        asset(WIN_056_NAME, WIN_056_URL, 8_959_062),
+        asset(
+            "CREBLOX-0.5.5-windows-x64.zip",
+            "https://example.com/old.zip",
+            8_773_620,
+        ),
+    ];
+
+    let picked = release_links::pick_zip_asset(&release, true, Some("0.5.6"))
+        .expect("this release has a Windows build");
+    assert_eq!(picked.name, WIN_056_NAME);
+    assert_eq!(picked.url, WIN_056_URL);
+    assert_eq!(picked.size, 8_959_062, "the size comes from the asset");
+
+    // macOS still takes the update overlay, never the Windows exe.
+    let mac = release_links::pick_zip_asset(&release, false, Some("0.5.6")).expect("a macOS build");
+    assert_eq!(mac.name, "CREBLOX-0.5.6-update.zip");
+}
+
+#[test]
+fn a_windows_zip_for_another_version_is_not_this_update() {
+    let release = [
+        asset("CREBLOX-0.5.5-windows-x64.zip", WINDOWS_URL, 8_773_620),
+        asset("CREBLOX-0.5.6-windows-x64.zip.bak", WIN_056_URL, 8_959_062),
+    ];
+
+    assert_eq!(
+        release_links::pick_zip_asset(&release, true, Some("0.5.6")),
+        None,
+        "a zip built for 0.5.5 must not be installed as 0.5.6"
+    );
+}
+
+#[test]
+fn a_zip_that_is_not_the_launcher_build_is_ignored() {
+    for name in [
+        "CREBLOX-0.5.6-windows.zip",
+        "creblox-windows-helper.zip",
+        "other-product-windows-x64.zip",
+        "CREBLOX-0.5.6-windows-x64.exe",
+    ] {
+        let release = [asset(name, "https://example.com/x.zip", 1024)];
+        assert_eq!(
+            release_links::pick_zip_asset(&release, true, None),
+            None,
+            "{name} is not the Windows launcher archive"
+        );
+    }
+}
+
+#[test]
+fn the_windows_zip_name_is_the_one_ci_publishes() {
+    assert_eq!(
+        release_links::windows_zip_name("0.5.6"),
+        "CREBLOX-0.5.6-windows-x64.zip"
+    );
+    assert!(release_links::is_windows_zip_for(WIN_056_NAME, "0.5.6"));
+    assert!(release_links::is_windows_zip_for(
+        "creblox-0.5.6-windows-x64.zip",
+        "0.5.6"
+    ));
+    assert!(!release_links::is_windows_zip_for(WIN_056_NAME, "0.5.5"));
+}
+
+#[test]
+fn the_appended_asset_lines_give_windows_its_own_hash() {
+    // The exact shape the Windows job appends to the notes: each asset URL followed by the
+    // `sha256` line for that file.
+    let notes = format!(
+        "A release.\n\n### Downloads\n- **Update**: [CREBLOX-0.5.6-update.zip](https://github.com/Vexa1/Custom-Launcher/raw/main/release/CREBLOX-0.5.6-update.zip) — 412,856 B, `{MAC_HASH}`\n\n\
+         macOS update (release asset): https://github.com/Vexa1/Custom-Launcher/releases/download/v0.5.6/CREBLOX-0.5.6-update.zip\nsha256 {MAC_HASH}\n\
+         Windows x64: {WIN_056_URL}\nsha256 {WIN_HASH}"
+    );
+
+    assert_eq!(
+        release_links::zip_checksum(&notes, WIN_056_URL, true).as_deref(),
+        Some(WIN_HASH),
+        "the Windows asset is verified against the hash printed under its own URL"
+    );
+    assert_eq!(
+        release_links::notes_zip(&notes, true).map(|(url, _)| url).as_deref(),
+        Some(WIN_056_URL),
+        "and it is the link the Windows updater would download"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The archive layout the workflow packages.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_ci_artifact_layout_installs() {
+    // `Compress-Archive -Path dist/creblox.exe` puts the launcher at the archive root.
+    let scratch = Scratch::new("ci-layout");
+    let zip_path = scratch.path().join(WIN_056_NAME);
+    let payload = launcher_bytes(90 * 1024);
+    write_zip(&zip_path, &[("creblox.exe", &payload)]);
+
+    let dest = scratch.path().join("out");
+    let exe = zip_update::extract_launcher(&zip_path, &dest).expect("the CI layout extracts");
+    assert_eq!(exe, dest.join("creblox.exe"));
+    assert_eq!(
+        zip_update::verify_launcher(&exe).expect("the extracted launcher verifies"),
+        payload.len() as u64
     );
 }

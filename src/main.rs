@@ -9,6 +9,7 @@ mod companion;
 mod discord_rpc;
 mod fastflags;
 mod game_log;
+mod sha256;
 mod game_overlay;
 mod net_probe;
 mod overlay_window;

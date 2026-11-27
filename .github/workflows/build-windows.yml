@@ -53,6 +53,12 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # The launcher's own #[cfg(test)] suites (release parsing, updater, auth, FastFlags,
+      # theme) run here too, on the platform whose self-update they install. `--bins` keeps it
+      # to the binary's unit tests; the vm-tests harness below covers the rest.
+      - name: Unit tests
+        run: cargo test --locked --bins
+
       # The updater's Windows half only ever runs on Windows, so exercise it here: the vm-tests
       # compile the real `src/zip_update.rs` and `src/release_links.rs`, and
       # `the_built_launcher_passes_its_own_check` reads CREBLOX_LAUNCHER, which is the exe this
