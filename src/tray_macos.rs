@@ -4,6 +4,7 @@
 //! `TrayController::new`, which eframe calls while starting the AppKit event
 //! loop. Menu clicks are forwarded to the app over the existing `Msg` channel.
 
+use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -166,6 +167,44 @@ fn map_menu_id(id: &str) -> Option<TrayEvent> {
             .filter(|slot| *slot < ACCOUNT_SLOTS)
             .map(TrayEvent::SwitchAccountSlot),
     }
+}
+
+/// Applies the HUD half of a menu click on the thread that read it.
+///
+/// The status item keeps working while the launcher is hidden (`NSApp hide`) and egui is not
+/// drawing frames, so a click that only became a `Msg` was written to `settings.json` and the
+/// overlay kept drawing the old panels until the game was restarted. Flipping the setting here
+/// hands it to the overlay loop, which is a thread of this process and rewrites the panels file
+/// without any window.
+fn apply_hud_action(action: &TrayEvent) {
+    use crate::overlay_spec::TrayToggle;
+    let toggle = match action {
+        TrayEvent::ToggleServerOverlay => TrayToggle::Server,
+        TrayEvent::ToggleStatsOverlay => TrayToggle::Stats,
+        TrayEvent::ToggleCrosshair => TrayToggle::Crosshair,
+        _ => return,
+    };
+    let now = crate::game_overlay::apply_tray_toggle(toggle);
+    // The tick next to the item is an AppKit object: `muda` items are `Rc`-based, so they
+    // stay on the main thread and the new state is applied there, even while eframe is idle.
+    dispatch_main(move || sync_hud_checks(now));
+}
+
+thread_local! {
+    /// The three HUD check items, registered when the menu is built (main thread).
+    static HUD_ITEMS: RefCell<Option<(CheckMenuItem, CheckMenuItem, CheckMenuItem)>> =
+        const { RefCell::new(None) };
+}
+
+/// Sets the check marks from the state the click just produced. Runs on the main thread.
+fn sync_hud_checks(state: crate::overlay_spec::HudToggles) {
+    let _ = HUD_ITEMS.try_with(|items| {
+        if let Some((server, stats, crosshair)) = items.borrow().as_ref() {
+            server.set_checked(state.server);
+            stats.set_checked(state.stats);
+            crosshair.set_checked(state.crosshair);
+        }
+    });
 }
 
 pub struct TrayController {
@@ -373,6 +412,7 @@ impl TrayController {
                     let mut fired = false;
                     while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                         if let Some(action) = map_menu_id(ev.id().as_ref()) {
+                            apply_hud_action(&action);
                             let _ = tx.send(Msg::TrayAction(action));
                             fired = true;
                         }
@@ -395,6 +435,14 @@ impl TrayController {
                 }
             })
             .ok();
+
+        HUD_ITEMS.with(|slot| {
+            *slot.borrow_mut() = Some((
+                server_overlay_item.clone(),
+                stats_overlay_item.clone(),
+                crosshair_item.clone(),
+            ));
+        });
 
         Self {
             icon: Mutex::new(icon),
@@ -436,6 +484,9 @@ impl TrayController {
         let mut out = Vec::new();
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if let Some(action) = map_menu_id(ev.id().as_ref()) {
+                // The main thread may win the race for a click; apply it here too so the HUD
+                // never depends on which reader of the menu channel got there first.
+                apply_hud_action(&action);
                 out.push(action);
             }
         }

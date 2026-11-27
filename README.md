@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.8
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.9
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -621,6 +621,12 @@ scripts/package-release-macos.sh
 ```
 
 ### Releasing (macOS + Windows)
+
+**Every fix or update must be fully released before the change is finished.** Never leave a
+fix sitting only in local commits: bump the version, package the archives, push `main`,
+publish the GitHub Release with its assets and SHA-256 hashes, and verify every release check
+(including the Windows workflow artifact) in the same turn. Committed-but-unreleased work is
+unfinished work.
 
 `memory.md` is the full runbook. A release exists only when **both** platforms are on it:
 

@@ -10,19 +10,95 @@ use std::time::{Duration, Instant};
 use creblox_vm_tests::net_probe;
 
 #[test]
-fn a_udp_round_trip_to_an_answering_socket_is_measured() {
-    let echo = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = echo.local_addr().unwrap().port();
-    let server = thread::spawn(move || {
+fn the_unconnected_ping_is_the_25_byte_raknet_packet() {
+    let ping = net_probe::unconnected_ping(0x0102_0304_0506_0708);
+    assert_eq!(ping.len(), 25);
+    assert_eq!(ping[0], 0x01, "ID_UNCONNECTED_PING");
+    assert_eq!(&ping[1..9], &[1, 2, 3, 4, 5, 6, 7, 8], "the send time");
+    assert_eq!(
+        &ping[9..],
+        &[
+            0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34,
+            0x56, 0x78
+        ],
+        "RakNet's offline-message magic"
+    );
+
+    assert!(net_probe::is_unconnected_pong(&[0x1c; 33]));
+    assert!(!net_probe::is_unconnected_pong(&[0x00; 33]));
+    assert!(!net_probe::is_unconnected_pong(&[0x1c; 20]));
+}
+
+/// A real RakNet server: it receives `ID_UNCONNECTED_PING` and answers with
+/// `ID_UNCONNECTED_PONG` (`0x1c`), which the probe must time.
+#[test]
+fn a_raknet_unconnected_ping_is_answered_with_a_pong() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
         let mut buf = [0u8; 512];
-        if let Ok((n, from)) = echo.recv_from(&mut buf) {
-            let _ = echo.send_to(&buf[..n], from);
+        let (n, from) = server.recv_from(&mut buf).expect("the ping arrives");
+        assert_eq!(n, 25, "the probe sends exactly the 25-byte packet");
+        assert_eq!(buf[0], 0x01);
+        assert_eq!(&buf[9..25], &net_probe::unconnected_ping(0)[9..25]);
+
+        let mut pong = Vec::new();
+        pong.push(0x1c); // ID_UNCONNECTED_PONG
+        pong.extend_from_slice(&buf[1..9]); // the time we were sent
+        pong.extend_from_slice(&[0u8; 8]); // server guid
+        pong.extend_from_slice(&net_probe::unconnected_ping(0)[9..25]);
+        server.send_to(&pong, from).expect("the pong is delivered");
+    });
+
+    let rtt = net_probe::udp_rtt("127.0.0.1", port).expect("a pong gives an RTT");
+    assert!(rtt >= 1 && rtt < 1_000, "loopback RTT was {rtt} ms");
+    handle.join().unwrap();
+}
+
+/// A relay that answers something that is not a pong must never be reported as the server's
+/// round trip - `-- ms` is honest, a number measured against a relay is not.
+#[test]
+fn a_datagram_that_is_not_a_pong_is_not_timed() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        if let Ok((_, from)) = server.recv_from(&mut buf) {
+            let _ = server.send_to(&[0u8; 25], from);
         }
     });
 
-    let rtt = net_probe::udp_rtt("127.0.0.1", port).expect("an answering socket gives an RTT");
-    assert!(rtt >= 1 && rtt < 1_000, "loopback RTT was {rtt} ms");
-    server.join().unwrap();
+    let start = Instant::now();
+    assert!(net_probe::udp_rtt("127.0.0.1", port).is_none());
+    assert!(start.elapsed() < Duration::from_secs(2));
+    handle.join().unwrap();
+}
+
+/// The room-list fallback is only ever the ping of the job the player is in.
+#[test]
+fn the_room_list_ping_is_used_only_for_the_matching_job() {
+    let entries = vec![
+        ("job-a".to_string(), Some(45u64)),
+        ("job-b".to_string(), None),
+        ("job-c".to_string(), Some(0)),
+    ];
+    assert_eq!(net_probe::ping_for_job(&entries, "job-a"), Some(45));
+    assert_eq!(
+        net_probe::ping_for_job(&entries, "job-b"),
+        None,
+        "the API did not report a ping for this job"
+    );
+    assert_eq!(
+        net_probe::ping_for_job(&entries, "job-c"),
+        None,
+        "0 is the API's unknown"
+    );
+    assert_eq!(net_probe::ping_for_job(&entries, "job-z"), None);
+    assert_eq!(
+        net_probe::ping_for_job(&entries, ""),
+        None,
+        "no job id: nothing to match"
+    );
 }
 
 #[test]

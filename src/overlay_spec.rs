@@ -227,6 +227,60 @@ pub fn build(panels: &Panels, live: &Live) -> Vec<Value> {
     out
 }
 
+/// A HUD switch the tray's check items own. The menu item and the panel the overlay draws
+/// are the same switch, and a click has to change both `settings.json` and the JSON the HUD
+/// reads. Keeping that mapping here (no egui, no `Settings`) is what lets `vm-tests` prove a
+/// click removes or restores the panel in the spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayToggle {
+    Server,
+    Stats,
+    Crosshair,
+}
+
+/// The on/off state of the switches the tray owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HudToggles {
+    pub server: bool,
+    pub stats: bool,
+    pub crosshair: bool,
+}
+
+impl HudToggles {
+    /// The state the menu shows after the user clicks `toggle`.
+    pub fn flipped(self, toggle: TrayToggle) -> Self {
+        match toggle {
+            TrayToggle::Server => Self {
+                server: !self.server,
+                ..self
+            },
+            TrayToggle::Stats => Self {
+                stats: !self.stats,
+                ..self
+            },
+            TrayToggle::Crosshair => Self {
+                crosshair: !self.crosshair,
+                ..self
+            },
+        }
+    }
+}
+
+/// Adds or removes the `crosshair` entry of a spec, exactly as the tray's Crosshair item does.
+///
+/// The overlay treats a missing key as "no crosshair", so removing it - not writing an empty
+/// object - is what stops it being drawn on the next reload.
+pub fn set_crosshair(spec: &mut Value, crosshair: Option<Value>) {
+    match crosshair {
+        Some(c) => spec["crosshair"] = c,
+        None => {
+            if let Some(obj) = spec.as_object_mut() {
+                obj.remove("crosshair");
+            }
+        }
+    }
+}
+
 /// The `Ping` row: the live game-server RTT, or `-- ms` while there is no measurement.
 pub fn ping_row(ping_ms: Option<u32>) -> String {
     match ping_ms {

@@ -2908,22 +2908,15 @@ impl Creblox {
                             }
                             self.sync_tray_state();
                         }
-                        TrayEvent::ToggleServerOverlay => {
-                            self.settings.overlay_enabled = !self.settings.overlay_enabled;
-                            save_settings(&self.settings);
-                            self.maybe_show_game_overlay();
-                            self.sync_tray_state();
-                        }
-                        TrayEvent::ToggleStatsOverlay => {
-                            self.settings.overlay_stats_enabled =
-                                !self.settings.overlay_stats_enabled;
-                            save_settings(&self.settings);
-                            self.maybe_show_game_overlay();
-                            self.sync_tray_state();
-                        }
-                        TrayEvent::ToggleCrosshair => {
-                            self.settings.crosshair_enabled = !self.settings.crosshair_enabled;
-                            save_settings(&self.settings);
+                        TrayEvent::ToggleServerOverlay
+                        | TrayEvent::ToggleStatsOverlay
+                        | TrayEvent::ToggleCrosshair => {
+                            // The click was already applied to settings.json and to the running
+                            // HUD by the tray dispatcher (`apply_hud_action`), which does not
+                            // need this window: the launcher is hidden for the whole game and
+                            // egui is not drawing frames then. Adopt the saved value instead of
+                            // flipping it again; a menu click must never toggle twice.
+                            self.settings = load_settings();
                             self.maybe_show_game_overlay();
                             self.sync_tray_state();
                         }
@@ -4565,15 +4558,18 @@ impl Creblox {
             || self.active_roblox_place_id.is_some()
             || (self.roblox_running && launched_recently);
         self.game_overlay.start(cfg);
-        let server = self.server_info.as_ref().map(|i| {
-            crate::game_overlay::ServerData {
-                ip: i.ip.clone(),
-                port: i.port,
-                job_id: i.job_id.clone(),
-                place_id: i.place_id,
-            }
-        });
-        self.game_overlay.set_server(server);
+        // Only report a server this window knows. The watcher publishes straight into the
+        // overlay too (it runs while the launcher is hidden), and sending a `None` from a
+        // stale `server_info` would blank the HUD back to "Server info unavailable".
+        if let Some(info) = self.server_info.as_ref() {
+            self.game_overlay
+                .set_server(Some(crate::game_overlay::ServerData {
+                    ip: info.ip.clone(),
+                    port: info.port,
+                    job_id: info.job_id.clone(),
+                    place_id: info.place_id,
+                }));
+        }
     }
 
     pub fn render_server_badge(&mut self, ctx: &egui::Context) {

@@ -591,6 +591,18 @@ unsafe extern "system" fn tray_wnd_proc(
 }
 
 fn emit_tray_event(ev: TrayEvent) {
+    // A HUD check item must reach the overlay even if the launcher window is not drawing
+    // frames (the game session normally hides it), so the switch is flipped here, on the
+    // thread that read the click, exactly as the macOS menu does.
+    let toggle = match ev {
+        TrayEvent::ToggleServerOverlay => Some(crate::overlay_spec::TrayToggle::Server),
+        TrayEvent::ToggleStatsOverlay => Some(crate::overlay_spec::TrayToggle::Stats),
+        TrayEvent::ToggleCrosshair => Some(crate::overlay_spec::TrayToggle::Crosshair),
+        _ => None,
+    };
+    if let Some(toggle) = toggle {
+        crate::game_overlay::apply_tray_toggle(toggle);
+    }
     TRAY_RUNTIME.with(|cell| {
         if let Some(rt) = cell.borrow().as_ref() {
             let _ = rt.tx.send(Msg::TrayAction(ev));

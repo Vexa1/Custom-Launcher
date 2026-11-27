@@ -7,7 +7,7 @@
 //! overlay window opened with), then with the resolved server, its region and a measured RTT.
 
 use creblox_vm_tests::overlay_spec::{
-    self, Live, LiveServer, Panels, ServerPanel, StatsPanel,
+    self, HudToggles, Live, LiveServer, Panels, ServerPanel, StatsPanel, TrayToggle,
 };
 
 fn server_cfg() -> ServerPanel {
@@ -29,6 +29,40 @@ fn stats_cfg() -> StatsPanel {
         clock: false,
         fps_cap: None,
     }
+}
+
+/// The whole file the overlay window reads for one HUD state: the panels those switches
+/// select (exactly as `OverlayConfig::from_settings` builds them) plus the crosshair entry.
+fn spec_for(toggles: HudToggles, crosshair: bool) -> String {
+    let server = server_cfg();
+    let stats = stats_cfg();
+    let panels = overlay_spec::build(
+        &Panels {
+            server: toggles.server.then_some(&server),
+            stats: toggles.stats.then_some(&stats),
+            flags: None,
+            game: None,
+        },
+        &resolved(),
+    );
+    let mut spec = overlay_spec::spec_json(0.9, true, 0, 0, false, panels);
+    overlay_spec::set_crosshair(
+        &mut spec,
+        crosshair.then(|| {
+            serde_json::json!({
+                "style": 3,
+                "size": 18,
+                "thickness": 2,
+                "gap": 4,
+                "color": [255, 60, 60],
+                "opacity": 0.9,
+                "offset_x": 0,
+                "offset_y": 0,
+                "image": ""
+            })
+        }),
+    );
+    spec.to_string()
 }
 
 /// Before the player log names a server: nothing resolved, no region, no measurement.
@@ -158,4 +192,49 @@ fn the_server_panel_expires_only_after_its_configured_duration() {
     assert!(hidden
         .iter()
         .any(|p| p["lines"].to_string().contains("Ping     35 ms")));
+}
+
+/// Every tray check item must change the payload the overlay reads, with no restart: the menu
+/// hands the click to `apply_tray_toggle`, which flips one field and wakes the writer.
+#[test]
+fn every_tray_toggle_rewrites_the_panels_spec() {
+    let all_on = HudToggles {
+        server: true,
+        stats: true,
+        crosshair: true,
+    };
+    let before = spec_for(all_on, all_on.crosshair);
+    assert!(before.contains("\"id\":\"server\""), "{before}");
+    assert!(before.contains("\"id\":\"stats\""), "{before}");
+    assert!(before.contains("\"crosshair\""), "{before}");
+
+    // Server region overlay off: its panel is gone, the others are untouched.
+    let no_server = spec_for(all_on.flipped(TrayToggle::Server), all_on.crosshair);
+    assert!(!no_server.contains("\"id\":\"server\""), "{no_server}");
+    assert!(no_server.contains("\"id\":\"stats\""), "{no_server}");
+    assert!(no_server.contains("\"crosshair\""), "{no_server}");
+    assert_ne!(before, no_server, "the overlay must see new bytes");
+
+    // Stats overlay off: only that panel disappears.
+    let no_stats = spec_for(all_on.flipped(TrayToggle::Stats), all_on.crosshair);
+    assert!(!no_stats.contains("\"id\":\"stats\""), "{no_stats}");
+    assert!(no_stats.contains("\"id\":\"server\""), "{no_stats}");
+    assert_ne!(before, no_stats);
+
+    // Crosshair off: the key is removed, not blanked - that is what stops the drawing.
+    let no_crosshair = spec_for(all_on, false);
+    assert!(!no_crosshair.contains("crosshair"), "{no_crosshair}");
+    assert!(no_crosshair.contains("\"id\":\"server\""), "{no_crosshair}");
+    assert!(no_crosshair.contains("\"id\":\"stats\""), "{no_crosshair}");
+    assert_ne!(before, no_crosshair);
+
+    // Clicking every item again restores exactly the file the overlay opened with.
+    let round_trip = all_on
+        .flipped(TrayToggle::Server)
+        .flipped(TrayToggle::Stats)
+        .flipped(TrayToggle::Server)
+        .flipped(TrayToggle::Stats);
+    assert_eq!(round_trip, all_on);
+    let crosshair_back = all_on.flipped(TrayToggle::Crosshair).flipped(TrayToggle::Crosshair);
+    assert_eq!(spec_for(crosshair_back, crosshair_back.crosshair), before);
 }

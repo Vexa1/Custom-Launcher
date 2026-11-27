@@ -1,5 +1,14 @@
 Do not read the same file more than once per task unless it has been modified. If a file is too large or the fix is unclear after one read, stop and ask me which function to look at instead of re-reading
 
+# Every fix ships: a change is not done until it is released
+
+Every fix or update you implement must be **fully released** before you finish your turn.
+Never leave fixes sitting only in local commits: bump the version (`Cargo.toml`, `README.md`,
+`Cargo.lock`), package the release archives, push `main`, publish the GitHub Release with the
+assets attached and their byte size + SHA-256 in the notes, and verify every release check -
+including the Windows workflow artifact - before calling the work finished. Committed but
+unreleased work is unfinished work, and it is never the end of a turn.
+
 # Automated VM verification (zero release overhead)
 
 Before finishing any change, run `scripts/verify.sh` and fix what it reports:
@@ -47,7 +56,8 @@ cargo test --manifest-path vm-tests/Cargo.toml --test shots
 
 # Releases: a release is not done until Windows is attached
 
-CREBLOX ships macOS **and** Windows 10/11 from this tree. `memory.md` is the step-by-step
+Every fix above ends in a release: bump, package, push, publish, verify - in the same turn,
+not "later". CREBLOX ships macOS **and** Windows 10/11 from this tree. `memory.md` is the step-by-step
 runbook; this is the gate that decides whether a release exists.
 
 A release is complete only when all of these are true:

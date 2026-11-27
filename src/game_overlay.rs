@@ -130,13 +130,20 @@ pub struct OverlayConfig {
 
 impl OverlayConfig {
     pub fn from_settings(s: &Settings, ff: &FastFlagsConfig) -> Self {
-        let server = s.overlay_enabled.then(|| ServerPanelCfg {
+        // The same three switches the tray's check items flip: one reduction, so the menu and
+        // the panels can never disagree about what is on.
+        let toggles = overlay_spec::HudToggles {
+            server: s.overlay_enabled,
+            stats: s.overlay_stats_enabled,
+            crosshair: s.crosshair_enabled,
+        };
+        let server = toggles.server.then(|| ServerPanelCfg {
             corner: s.overlay_corner.min(3),
             duration_secs: s.overlay_duration_secs as u32,
             show_ip: s.overlay_show_ip,
             show_job_id: s.overlay_show_job_id,
         });
-        let stats = s.overlay_stats_enabled.then(|| StatsPanelCfg {
+        let stats = toggles.stats.then(|| StatsPanelCfg {
             corner: s.overlay_stats_corner.min(3),
             cpu: s.overlay_stats_cpu,
             ram: s.overlay_stats_ram,
@@ -183,7 +190,7 @@ impl OverlayConfig {
         } else {
             None
         };
-        let crosshair = s.crosshair_enabled.then(|| CrosshairCfg {
+        let crosshair = toggles.crosshair.then(|| CrosshairCfg {
             style: s.crosshair_style.min(3),
             size: s.crosshair_size.clamp(4, 120),
             thickness: s.crosshair_thickness.clamp(1, 10),
@@ -245,6 +252,18 @@ struct Shared {
     /// flag it is about to clear was consumed by the spec it just wrote, or arrived while
     /// that spec was being built (in which case the wake must be kept).
     rev: u64,
+    /// The one panels file this run writes. A tray click rewrites it itself, so the file no
+    /// longer depends on the loop's next tick (or on the launcher window drawing a frame).
+    spec_path: std::path::PathBuf,
+    /// The bytes last written. Shared so the loop and a tray click can never write a spec
+    /// older than what is already on disk.
+    last_spec: String,
+    /// The overlay's own clock: the `Session` row and how long `Detecting server...` shows.
+    session_start: Instant,
+    usage: Usage,
+    /// `NO_PING` until a probe answers. The probe thread and the late room-list answer both
+    /// write it, so the row can go from `-- ms` to a number without another probe.
+    ping: Arc<AtomicU32>,
 }
 
 struct Running {
@@ -302,6 +321,14 @@ impl OverlayManager {
         // Seed from the server the watcher already reported: starting the overlay mid-session
         // must not cost the player a tick of "Server info unavailable".
         let known_server = LAST_SERVER.lock().ok().and_then(|g| g.clone());
+        // One spec file per run, so an overlay window that is still shutting down can never
+        // read (or be told to quit by) the next run's spec.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let spec_path = crate::auth::data_dir().join(format!("overlay-panels-{stamp}.json"));
+        write_spec(&spec_path, r#"{"panels":[]}"#);
         let shared = Arc::new(Mutex::new(Shared {
             cfg,
             server: known_server,
@@ -311,6 +338,11 @@ impl OverlayManager {
             stop: false,
             dirty: false,
             rev: 0,
+            spec_path,
+            last_spec: r#"{"panels":[]}"#.to_string(),
+            session_start: Instant::now(),
+            usage: Usage::new(),
+            ping: Arc::new(AtomicU32::new(NO_PING)),
         }));
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -354,6 +386,11 @@ impl OverlayManager {
         if let Ok(mut slot) = LIVE.lock() {
             *slot = None;
         }
+        // Forget the server too: the next session must not open seeded with the previous
+        // game's address now that the launcher only publishes a server it actually knows.
+        if let Ok(mut last) = LAST_SERVER.lock() {
+            *last = None;
+        }
         if let Some(r) = self.running.take() {
             if let Ok(mut g) = r.shared.lock() {
                 g.stop = true;
@@ -371,6 +408,9 @@ impl OverlayManager {
     pub fn stop_and_wait(&mut self) {
         if let Ok(mut slot) = LIVE.lock() {
             *slot = None;
+        }
+        if let Ok(mut last) = LAST_SERVER.lock() {
+            *last = None;
         }
         if let Some(r) = self.running.take() {
             if let Ok(mut g) = r.shared.lock() {
@@ -433,6 +473,98 @@ fn publish_server(server: Option<ServerData>) {
 /// Safe to call from any thread and at any time: it only updates an overlay that is running.
 pub fn set_live_server(server: Option<ServerData>) {
     publish_server(server);
+}
+
+/// Applies a HUD check item's click to `settings.json` **and** to the running overlay, on
+/// whatever thread the menu event was read on.
+///
+/// The launcher window is hidden for the whole game (`NSApp hide`), so its egui loop is not
+/// the place to apply a menu click: a toggle that only travelled as a `Msg` was saved to
+/// `settings.json` and stayed invisible until the next launch. This path has no window
+/// dependency - the overlay loop is a thread of this process - and waking it rewrites
+/// `overlay-panels-<id>.json` within one 100 ms step.
+pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> overlay_spec::HudToggles {
+    let mut settings = crate::auth::load_settings();
+    let now = overlay_spec::HudToggles {
+        server: settings.overlay_enabled,
+        stats: settings.overlay_stats_enabled,
+        crosshair: settings.crosshair_enabled,
+    }
+    .flipped(toggle);
+    settings.overlay_enabled = now.server;
+    settings.overlay_stats_enabled = now.stats;
+    settings.crosshair_enabled = now.crosshair;
+    crate::auth::save_settings(&settings);
+    let flags = crate::fastflags::load_fastflags();
+    push_config(OverlayConfig::from_settings(&settings, &flags));
+    // Rewrite the file here, not on the overlay loop's next tick: this is the proof, in
+    // log.txt, that a menu click reached the HUD while the launcher window was hidden.
+    match rewrite_spec_now() {
+        Some((name, true)) => crate::auth::log(&format!(
+            "tray: rewrote overlay panels spec ({name}: server {}, stats {}, crosshair {})",
+            on_off(now.server),
+            on_off(now.stats),
+            on_off(now.crosshair)
+        )),
+        Some((name, false)) => crate::auth::log(&format!(
+            "tray: overlay panels spec already current ({name}: server {}, stats {}, crosshair {})",
+            on_off(now.server),
+            on_off(now.stats),
+            on_off(now.crosshair)
+        )),
+        None => crate::auth::log("tray: no overlay running - settings saved, no panels spec to rewrite"),
+    }
+    now
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// Rebuilds and writes the running overlay's panels file on the calling thread.
+///
+/// Returns the file name and whether the bytes changed. `None` when no overlay is running.
+fn rewrite_spec_now() -> Option<(String, bool)> {
+    let shared = LIVE
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))?;
+    let Ok(mut g) = shared.lock() else {
+        return None;
+    };
+    let changed = write_current_spec(&mut g);
+    let name = g
+        .spec_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    Some((name, changed))
+}
+
+/// Hands a new configuration to the running overlay from any thread, without starting or
+/// stopping it.
+///
+/// `game_active` and `edit` describe the session (launcher state, the position editor), not
+/// the settings file, so a tray click must never reset them.
+fn push_config(mut cfg: OverlayConfig) {
+    let Some(shared) = LIVE
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
+    else {
+        return;
+    };
+    let Ok(mut g) = shared.lock() else {
+        return;
+    };
+    cfg.game_active = g.cfg.game_active;
+    cfg.edit = g.cfg.edit;
+    if g.cfg != cfg {
+        g.cfg = cfg;
+        g.dirty = true;
+        g.rev = g.rev.wrapping_add(1);
+    }
 }
 
 fn sleep_unless_stopped(shared: &Arc<Mutex<Shared>>, total: Duration) -> bool {
@@ -798,25 +930,130 @@ static PING_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// every two seconds.
 static PING_LOGGED: Mutex<Option<String>> = Mutex::new(None);
 
+/// The last room-list answer, so the fallback costs one request a minute instead of one per
+/// probe (the probe runs every two seconds while the game is on).
+static PING_FROM_LIST: Mutex<Option<(String, Option<u32>, Instant)>> = Mutex::new(None);
+
+/// Set while a room-list lookup runs, so the probes never start a second one - and never wait
+/// for the first one either.
+static PING_LIST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// The job the live probe is measuring, so a room-list answer that arrives late only lands
+/// while the player is still in that server.
+static PING_TARGET: Mutex<Option<(String, Arc<AtomicU32>)>> = Mutex::new(None);
+
+/// A room-list ping already fetched for this job, if it is still fresh.
+///
+/// This only reads a cache: it never performs the request, so the probe thread is never held
+/// behind an HTTP round trip.
+fn cached_room_list_ping(server: &ServerData) -> Option<u32> {
+    let cache = PING_FROM_LIST.lock().ok()?;
+    let (job, ping, at) = cache.as_ref()?;
+    if job != &server.job_id {
+        return None;
+    }
+    // An answer is good for a minute; a miss is retried sooner, so a job that appears in the
+    // list a moment later is picked up without hammering the API.
+    let ttl = if ping.is_some() { 60 } else { 20 };
+    (at.elapsed() < Duration::from_secs(ttl)).then_some(*ping)?
+}
+
+/// Starts (at most one) detached room-list lookup for this job.
+///
+/// Roblox gameplay servers sit behind UDMUX relays that often drop RakNet unconnected pings
+/// and ICMP, which left the row at `-- ms` for a whole session even though the address and
+/// job id were known. The lookup runs on its own thread: the probe thread only ever times
+/// packets, so nothing here can stall it or the two-second probe cadence.
+fn request_room_list_ping(server: ServerData) {
+    if server.place_id == 0 || server.job_id.is_empty() {
+        return;
+    }
+    if PING_LIST_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = thread::Builder::new()
+        .name("creblox-ping-list".to_string())
+        .spawn(move || {
+            let ping = fetch_room_list_ping(&server);
+            if let Ok(mut cache) = PING_FROM_LIST.lock() {
+                *cache = Some((server.job_id.clone(), ping, Instant::now()));
+            }
+            if let Some(ms) = ping {
+                // Land it on the live row when the player is still in that job; otherwise the
+                // next probe would overwrite it with `-- ms` two seconds later.
+                if let Ok(target) = PING_TARGET.lock() {
+                    if let Some((job, out)) = target.as_ref() {
+                        if job == &server.job_id {
+                            out.store(ms, Ordering::Relaxed);
+                        }
+                    }
+                }
+                log_room_list_ping(&server.job_id);
+            }
+            PING_LIST_IN_FLIGHT.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        PING_LIST_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// The network half of the fallback, run on its own thread.
+fn fetch_room_list_ping(server: &ServerData) -> Option<u32> {
+    let pool = crate::api::fetch_public_server_pool(server.place_id, "Desc", 2, None).ok()?;
+    let entries: Vec<(String, Option<u64>)> = pool.into_iter().map(|s| (s.id, s.ping)).collect();
+    crate::net_probe::ping_for_job(&entries, &server.job_id)
+}
+
+/// One line the first time a job's ping comes from the room list instead of the server: the
+/// HUD shows a number either way, so log.txt is where the difference is visible.
+fn log_room_list_ping(job_id: &str) {
+    static LOGGED: Mutex<Option<String>> = Mutex::new(None);
+    let first = LOGGED
+        .lock()
+        .map(|mut seen| {
+            if seen.as_deref() == Some(job_id) {
+                false
+            } else {
+                *seen = Some(job_id.to_string());
+                true
+            }
+        })
+        .unwrap_or(false);
+    if first {
+        crate::auth::log(
+            "ping: the game server answered neither a RakNet ping nor ICMP - using the room list's ping for this job",
+        );
+    }
+}
+
 /// Measures the live game server, never a web edge: a probe to `www.roblox.com` reported
 /// ~125 ms from New Zealand while the server the player was in (Sydney) answered in ~30 ms.
 /// When the server does not answer at all the row stays `-- ms`.
-fn spawn_ping(ip: String, port: u16, out: Arc<AtomicU32>) {
+fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
     if PING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         return;
+    }
+    if let Ok(mut target) = PING_TARGET.lock() {
+        *target = Some((server.job_id.clone(), Arc::clone(&out)));
     }
     let spawned = thread::Builder::new()
         .name("creblox-ping".to_string())
         .spawn(move || {
-            let port = if port == 0 {
+            let port = if server.port == 0 {
                 crate::net_probe::DEFAULT_GAME_PORT
             } else {
-                port
+                server.port
             };
-            let rtt = crate::net_probe::udp_rtt(&ip, port)
-                .or_else(|| crate::net_probe::icmp_rtt(&ip));
+            let mut rtt = crate::net_probe::udp_rtt(&server.ip, port)
+                .or_else(|| crate::net_probe::icmp_rtt(&server.ip));
             if rtt.is_none() {
-                log_silent_server(&ip, port);
+                // Only ever a cache read here: the HTTP fallback is started on its own
+                // thread, so it can never stall this probe or the in-flight flag with it.
+                rtt = cached_room_list_ping(&server);
+                if rtt.is_none() {
+                    request_room_list_ping(server.clone());
+                    log_silent_server(&server.ip, port);
+                }
             }
             out.store(rtt.unwrap_or(NO_PING), Ordering::Relaxed);
             PING_IN_FLIGHT.store(false, Ordering::Release);
@@ -885,16 +1122,137 @@ fn find_roblox_pid_by_name() -> Option<u32> {
     None
 }
 
+/// The exact file the overlay window reads, built from the running state.
+///
+/// One builder serves the loop's tick and a tray click's immediate rewrite; the assembly
+/// itself lives in [`overlay_spec`], where `vm-tests` asserts the bytes the HUD receives.
+fn build_spec(g: &Shared) -> Value {
+    let cfg = &g.cfg;
+    let server = &g.server;
+    let server_panel = cfg.server.as_ref().map(|sp| overlay_spec::ServerPanel {
+        corner: sp.corner,
+        duration_secs: sp.duration_secs,
+        show_ip: sp.show_ip,
+        show_job_id: sp.show_job_id,
+    });
+    let stats_panel = cfg.stats.as_ref().map(|st| overlay_spec::StatsPanel {
+        corner: st.corner,
+        cpu: st.cpu,
+        ram: st.ram,
+        ping: st.ping,
+        session: st.session,
+        clock: st.clock,
+        fps_cap: st.fps_cap,
+    });
+    let flags_panel = cfg.flags.as_ref().map(|fl| overlay_spec::FlagsPanel {
+        corner: fl.corner,
+        max_lines: fl.max_lines,
+        preset: fl.preset.to_string(),
+        flags: fl.flags.clone(),
+    });
+    let game_panel = cfg
+        .game
+        .as_ref()
+        .map(|gp| overlay_spec::GamePanel { corner: gp.corner });
+    let region = server
+        .as_ref()
+        .and_then(|s| g.locations.get(&s.ip))
+        .map(String::as_str);
+    let rtt = match g.ping.load(Ordering::Relaxed) {
+        NO_PING => None,
+        p => Some(p),
+    };
+    // The helper outlives a session (it is kept alive while Roblox runs), so the session
+    // timer starts at this join, not when the helper process started.
+    let session_elapsed = match server {
+        Some(_) => g.server_since.elapsed(),
+        None => g.session_start.elapsed(),
+    };
+    let panels = overlay_spec::build(
+        &overlay_spec::Panels {
+            server: server_panel.as_ref(),
+            stats: stats_panel.as_ref(),
+            flags: flags_panel.as_ref(),
+            game: game_panel.as_ref(),
+        },
+        &overlay_spec::Live {
+            server: server.as_ref().map(|s| overlay_spec::LiveServer {
+                ip: s.ip.as_str(),
+                job_id: s.job_id.as_str(),
+                place_id: s.place_id,
+            }),
+            server_age_secs: match server {
+                Some(_) => g.server_since.elapsed().as_secs(),
+                None => 0,
+            },
+            session_secs: session_elapsed.as_secs(),
+            detect_secs: g.session_start.elapsed().as_secs(),
+            region,
+            ping_ms: rtt,
+            game: g
+                .game_info
+                .as_ref()
+                .map(|(name, playing)| (name.as_str(), Some(*playing))),
+            cpu_pct: g.usage.have.then_some(g.usage.cpu),
+            ram_mb: g.usage.have.then_some(g.usage.mem_mb),
+            clock: local_clock(),
+            edit_preview: cfg.edit,
+        },
+    );
+    let mut spec = overlay_spec::spec_json(
+        cfg.opacity,
+        cfg.game_active,
+        cfg.offset_x,
+        cfg.offset_y,
+        cfg.edit,
+        panels,
+    );
+    if let Some(img) = &cfg.image {
+        spec["image"] = json!({
+            "path": img.path,
+            "corner": img.corner,
+            "size": img.size_pct,
+            "opacity": img.opacity,
+            "offset_x": img.offset_x,
+            "offset_y": img.offset_y,
+        });
+    }
+    overlay_spec::set_crosshair(
+        &mut spec,
+        cfg.crosshair.as_ref().map(|ch| {
+            json!({
+                "style": ch.style,
+                "size": ch.size,
+                "thickness": ch.thickness,
+                "gap": ch.gap,
+                "color": ch.color,
+                "opacity": ch.opacity,
+                "offset_x": ch.offset_x,
+                "offset_y": ch.offset_y,
+                "image": ch.image,
+            })
+        }),
+    );
+    spec
+}
+
+/// Writes the panels file when its bytes changed; `true` when it did.
+fn write_current_spec(g: &mut Shared) -> bool {
+    let text = build_spec(g).to_string();
+    if text == g.last_spec {
+        return false;
+    }
+    write_spec(&g.spec_path, &text);
+    g.last_spec = text;
+    true
+}
+
 fn run_loop(shared: Arc<Mutex<Shared>>) {
     let dir = data_dir();
-    // One spec file per run, so an overlay window that is still shutting down can never read
-    // (or be told to quit by) the next run's spec.
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let spec_path = dir.join(format!("overlay-panels-{stamp}.json"));
-    write_spec(&spec_path, r#"{"panels":[]}"#);
+    let (spec_path, ping) = match shared.lock() {
+        Ok(g) => (g.spec_path.clone(), Arc::clone(&g.ping)),
+        Err(_) => return,
+    };
 
     let Ok(exe) = env::current_exe() else {
         return;
@@ -920,18 +1278,13 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         spec_path.file_name().unwrap_or_default().to_string_lossy()
     ));
 
-    let session_start = Instant::now();
-    let ping_ms = Arc::new(AtomicU32::new(NO_PING));
     let mut last_ping = Instant::now() - Duration::from_secs(60);
-    let mut last_ping_target: Option<(String, u16)> = None;
+    let mut last_ping_target: Option<(String, u16, String)> = None;
     let mut roblox_pid: Option<u32> = None;
     let mut last_pid_scan = Instant::now() - Duration::from_secs(60);
-    // One syscall per tick instead of a `/bin/ps` fork, and a delta-based CPU figure.
-    let mut usage = Usage::new();
     let mut pending_locations: Vec<String> = Vec::new();
     let mut last_game_fetch: Option<Instant> = None;
     let mut last_place: Option<u64> = None;
-    let mut last_text = String::new();
     // What was last written to log.txt, so only changes are logged.
     let mut logged_pid: Option<Option<u32>> = None;
     let mut logged_server: Option<Option<String>> = None;
@@ -940,19 +1293,12 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     let mut logged_spec: Option<(String, String, String)> = None;
 
     loop {
-        let (cfg, server, since, locations, game_info, rev) = {
+        let (cfg, server, locations, rev) = {
             let Ok(g) = shared.lock() else { break };
             if g.stop {
                 break;
             }
-            (
-                g.cfg.clone(),
-                g.server.clone(),
-                g.server_since,
-                g.locations.clone(),
-                g.game_info.clone(),
-                g.rev,
-            )
+            (g.cfg.clone(), g.server.clone(), g.locations.clone(), g.rev)
         };
         if matches!(child.try_wait(), Ok(Some(_))) {
             // Say so: "overlay window started" followed by silence is what a helper that
@@ -1051,153 +1397,68 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                     ));
                 }
             }
-            usage.sample(roblox_pid);
+            if let Ok(mut g) = shared.lock() {
+                g.usage.sample(roblox_pid);
+            }
         } else {
             // Nothing is being sampled: start clean if it is switched back on.
-            usage.reset();
+            if let Ok(mut g) = shared.lock() {
+                g.usage.reset();
+            }
         }
         // Ping: the live game server only, on the UDP path the game uses. Until the log
         // yields that server's address the row stays `-- ms`, so it can never show a
         // number measured against a web API on another continent.
         if let Some(stats) = &cfg.stats {
             if stats.ping {
-                let target = server
+                let target = server.as_ref().filter(|s| !s.ip.is_empty()).cloned();
+                let key = target
                     .as_ref()
-                    .map(|s| (s.ip.clone(), s.port))
-                    .filter(|(ip, _)| !ip.is_empty());
-                if last_ping_target != target {
-                    last_ping_target = target.clone();
-                    ping_ms.store(NO_PING, Ordering::Relaxed);
+                    .map(|s| (s.ip.clone(), s.port, s.job_id.clone()));
+                if last_ping_target != key {
+                    last_ping_target = key;
+                    ping.store(NO_PING, Ordering::Relaxed);
                     last_ping = Instant::now() - Duration::from_secs(60);
                 }
-                if let Some((ip, port)) = target {
+                if let Some(target) = target {
                     if last_ping.elapsed() >= Duration::from_secs(2) {
                         last_ping = Instant::now();
-                        spawn_ping(ip, port, Arc::clone(&ping_ms));
+                        spawn_ping(target, Arc::clone(&ping));
                     }
                 }
             } else {
                 // Ping is off: drop the target so switching it back on shows `-- ms` until
                 // the first real measurement instead of a number from minutes ago.
                 last_ping_target = None;
-                ping_ms.store(NO_PING, Ordering::Relaxed);
+                ping.store(NO_PING, Ordering::Relaxed);
             }
         }
 
-        // The helper outlives a session (it is kept alive while Roblox runs), so the
-        // session timer has to start at this join, not when the helper process started.
-        let session_elapsed = match &server {
-            Some(_) => since.elapsed(),
-            None => session_start.elapsed(),
-        };
-
-        // The assembly itself lives in `overlay_spec`, where `vm-tests` can assert the exact
-        // bytes the HUD receives; this maps the live state onto it.
-        let server_panel = cfg.server.as_ref().map(|sp| overlay_spec::ServerPanel {
-            corner: sp.corner,
-            duration_secs: sp.duration_secs,
-            show_ip: sp.show_ip,
-            show_job_id: sp.show_job_id,
-        });
-        let stats_panel = cfg.stats.as_ref().map(|st| overlay_spec::StatsPanel {
-            corner: st.corner,
-            cpu: st.cpu,
-            ram: st.ram,
-            ping: st.ping,
-            session: st.session,
-            clock: st.clock,
-            fps_cap: st.fps_cap,
-        });
-        let flags_panel = cfg.flags.as_ref().map(|fl| overlay_spec::FlagsPanel {
-            corner: fl.corner,
-            max_lines: fl.max_lines,
-            preset: fl.preset.to_string(),
-            flags: fl.flags.clone(),
-        });
-        let game_panel = cfg
-            .game
-            .as_ref()
-            .map(|gp| overlay_spec::GamePanel { corner: gp.corner });
-        let region = server
-            .as_ref()
-            .and_then(|s| locations.get(&s.ip))
-            .map(String::as_str);
-        let rtt = match ping_ms.load(Ordering::Relaxed) {
-            NO_PING => None,
-            p => Some(p),
-        };
-        let panels = overlay_spec::build(
-            &overlay_spec::Panels {
-                server: server_panel.as_ref(),
-                stats: stats_panel.as_ref(),
-                flags: flags_panel.as_ref(),
-                game: game_panel.as_ref(),
-            },
-            &overlay_spec::Live {
-                server: server.as_ref().map(|s| overlay_spec::LiveServer {
-                    ip: s.ip.as_str(),
-                    job_id: s.job_id.as_str(),
-                    place_id: s.place_id,
-                }),
-                server_age_secs: match &server {
-                    Some(_) => since.elapsed().as_secs(),
-                    None => 0,
-                },
-                session_secs: session_elapsed.as_secs(),
-                detect_secs: session_start.elapsed().as_secs(),
-                region,
-                ping_ms: rtt,
-                game: game_info
+        // Build and write through the one function a tray click also uses: one definition of
+        // what the HUD shows, and one writer for the file the overlay window polls.
+        let (wrote, rtt, region) = match shared.lock() {
+            Ok(mut g) => {
+                let rtt = match g.ping.load(Ordering::Relaxed) {
+                    NO_PING => None,
+                    p => Some(p),
+                };
+                let region = g
+                    .server
                     .as_ref()
-                    .map(|(name, playing)| (name.as_str(), Some(*playing))),
-                cpu_pct: usage.have.then_some(usage.cpu),
-                ram_mb: usage.have.then_some(usage.mem_mb),
-                clock: local_clock(),
-                edit_preview: cfg.edit,
-            },
-        );
-        let mut spec = overlay_spec::spec_json(
-            cfg.opacity,
-            cfg.game_active,
-            cfg.offset_x,
-            cfg.offset_y,
-            cfg.edit,
-            panels,
-        );
-        if let Some(img) = &cfg.image {
-            spec["image"] = json!({
-                "path": img.path,
-                "corner": img.corner,
-                "size": img.size_pct,
-                "opacity": img.opacity,
-                "offset_x": img.offset_x,
-                "offset_y": img.offset_y,
-            });
-        }
-        if let Some(ch) = &cfg.crosshair {
-            spec["crosshair"] = json!({
-                "style": ch.style,
-                "size": ch.size,
-                "thickness": ch.thickness,
-                "gap": ch.gap,
-                "color": ch.color,
-                "opacity": ch.opacity,
-                "offset_x": ch.offset_x,
-                "offset_y": ch.offset_y,
-                "image": ch.image,
-            });
-        }
-        let text = spec.to_string();
-        if text != last_text {
-            write_spec(&spec_path, &text);
-            last_text = text;
+                    .and_then(|s| g.locations.get(&s.ip))
+                    .cloned();
+                (write_current_spec(&mut g), rtt, region)
+            }
+            Err(_) => break,
+        };
+        if wrote {
             // One line when the panels start describing a real server: the overlay window
             // logs its own `spec loaded (...)`, so the pair is what shows a resolved server
             // reached the HUD instead of the snapshot it opened with.
             let resolved = server.as_ref().map(|s| {
                 (
                     format!("{}:{}", s.job_id, s.place_id),
-                    region.unwrap_or("locating...").to_string(),
+                    region.unwrap_or_else(|| "locating...".to_string()),
                     rtt.map(|p| p.to_string())
                         .unwrap_or_else(|| "--".to_string()),
                 )
