@@ -7,7 +7,7 @@
 //! used to break - "no server yet" to "server resolved, region known, live ping measured" -
 //! testable in `vm-tests`, where the GUI crate cannot be linked.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,8 +100,8 @@ pub fn build(panels: &Panels, live: &Live) -> Vec<Value> {
     if let Some(sp) = panels.server {
         match &live.server {
             Some(s) => {
-                let visible = sp.duration_secs == 0
-                    || live.server_age_secs < sp.duration_secs as u64;
+                let visible =
+                    sp.duration_secs == 0 || live.server_age_secs < sp.duration_secs as u64;
                 if visible {
                     let title = match live.region {
                         Some(loc) => format!("Server: {loc}"),
@@ -327,6 +327,20 @@ pub fn ping_row(ping_ms: Option<u32>, path: Option<&str>) -> String {
         (None, Some(path)) => format!("Ping     -- ms ({path})"),
         (None, None) => "Ping     -- ms".to_string(),
     }
+}
+
+/// Writes the panels file through a temporary file and a rename, so the overlay window can
+/// never read a half-written spec while switching Spaces. Returns whether the new bytes were
+/// installed.
+///
+/// Lives here rather than in `game_overlay` so the integration test can prove the file it
+/// renders came from this exact writer, not from a test-only copy of it.
+pub fn write_atomic(path: &std::path::Path, text: &str) -> bool {
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp, path).is_ok()
 }
 
 /// The whole file the overlay window reads.

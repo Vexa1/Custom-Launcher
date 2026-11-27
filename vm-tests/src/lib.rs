@@ -14,6 +14,7 @@ pub mod roblox_process;
 pub mod types;
 
 // Headless UI rendering (dev-only): real egui, software rasterizer, PNGs in `artifacts/`.
+pub mod hud;
 pub mod screens;
 pub mod shots;
 

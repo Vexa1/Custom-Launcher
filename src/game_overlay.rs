@@ -485,9 +485,7 @@ pub fn set_live_server(server: Option<ServerData>) {
 /// `overlay-panels-<id>.json` within one 100 ms step.
 /// Returns the state now in effect and whether this call applied it; `false` means it was a
 /// duplicate delivery of a click that had already been applied.
-pub fn apply_tray_toggle(
-    toggle: overlay_spec::TrayToggle,
-) -> (overlay_spec::HudToggles, bool) {
+pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> (overlay_spec::HudToggles, bool) {
     let mut settings = crate::auth::load_settings();
     let current = overlay_spec::HudToggles {
         server: settings.overlay_enabled,
@@ -526,7 +524,9 @@ pub fn apply_tray_toggle(
             on_off(now.stats),
             on_off(now.crosshair)
         )),
-        None => crate::auth::log("tray: no overlay running - settings saved, no panels spec to rewrite"),
+        None => {
+            crate::auth::log("tray: no overlay running - settings saved, no panels spec to rewrite")
+        }
     }
     (now, true)
 }
@@ -609,10 +609,8 @@ fn sleep_unless_stopped(shared: &Arc<Mutex<Shared>>, total: Duration) -> bool {
 }
 
 fn write_spec(path: &std::path::Path, text: &str) {
-    let tmp = path.with_extension("json.tmp");
-    if fs::write(&tmp, text).is_ok() {
-        let _ = fs::rename(&tmp, path);
-    }
+    // The atomic writer is in `overlay_spec`, where the integration test can exercise it.
+    let _ = overlay_spec::write_atomic(path, text);
 }
 
 /// Where the overlay process leaves the answer of its position editor.
@@ -794,13 +792,8 @@ fn process_counters(pid: u32) -> Option<(u64, u64)> {
         let mut exit = FileTime::default();
         let mut kernel = FileTime::default();
         let mut user = FileTime::default();
-        let times_ok = GetProcessTimes(
-            handle,
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user,
-        ) != 0;
+        let times_ok =
+            GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
         let mut counters = ProcessMemoryCounters {
             cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
             ..Default::default()
@@ -1134,41 +1127,27 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
                 server.port
             };
             // Every tier reports why it had no number, so the one probe line in log.txt
-            // shows what was actually attempted against which address.
+            // shows what was actually attempted against which address. The chain lives in
+            // `net_probe::probe_server`, where `vm-tests` drives it against mock relays.
             let mut misses: Vec<String> = Vec::new();
-            let mut measured: Option<(&'static str, u32)> = None;
+            let mut measured: Option<crate::net_probe::ProbeOutcome> = None;
             // The path the HUD names after `-- ms`: the last tier that came back empty,
             // which is where the chain gave up (the room list when even the API had no
             // number for this job).
             let mut failed: Option<&'static str> = None;
-            match crate::net_probe::icmp_rtt_traced(&server.ip) {
-                Ok(ms) => measured = Some(("icmp", ms)),
-                Err(why) => {
-                    misses.push(format!("icmp {why}"));
-                    failed = Some("icmp");
+            match crate::net_probe::probe_server(
+                &server.ip,
+                port,
+                &crate::net_probe::TCP_PROBE_PORTS,
+            ) {
+                Ok(outcome) => measured = Some(outcome),
+                Err(miss) => {
+                    misses = miss.reasons;
+                    failed = Some(miss.last);
                 }
             }
-            if measured.is_none() {
-                match crate::net_probe::udp_rtt_traced(&server.ip, port) {
-                    Ok(ms) => measured = Some(("raknet", ms)),
-                    Err(why) => {
-                        misses.push(format!("raknet {why}"));
-                        failed = Some("raknet");
-                    }
-                }
-            }
-            if measured.is_none() {
-                match crate::net_probe::tcp_rtt_traced(&server.ip, &crate::net_probe::TCP_PROBE_PORTS)
-                {
-                    Ok(ms) => measured = Some(("tcp", ms)),
-                    Err(why) => {
-                        misses.push(format!("tcp {why}"));
-                        failed = Some("tcp");
-                    }
-                }
-            }
-            let mut rtt = measured.map(|(_, ms)| ms);
-            let mut source = measured.map(|(method, _)| method);
+            let mut rtt = measured.map(|o| o.ms);
+            let mut source = measured.map(|o| o.via);
             if rtt.is_none() {
                 // Only ever a cache read here: the HTTP fallback is started on its own
                 // thread, so it can never stall this probe or the in-flight flag with it.
@@ -1226,11 +1205,7 @@ fn log_ping_probe(
     misses: &[String],
 ) {
     let target = format!("{}:{port}", server.ip);
-    let line = match (rtt, source) {
-        (Some(ms), Some(source)) => format!("overlay: ping probe {target} -> {ms} ms ({source})"),
-        (Some(ms), None) => format!("overlay: ping probe {target} -> {ms} ms"),
-        (None, _) => format!("overlay: ping probe {target} -> none ({})", misses.join("; ")),
-    };
+    let line = crate::net_probe::probe_line(&target, rtt, source, misses);
     let write = PING_PROBE_LOGGED
         .lock()
         .map(|mut last| {

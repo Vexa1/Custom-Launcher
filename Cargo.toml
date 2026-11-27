@@ -1,6 +1,6 @@
 [package]
 name = "creblox"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "CREBLOX — a fast native Roblox launcher with an in-game HUD overlay for macOS"

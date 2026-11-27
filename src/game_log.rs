@@ -47,22 +47,33 @@ fn looks_like_ip(s: &str) -> bool {
 ///
 /// Private addresses are skipped: the RCC server in these lines is always a `10.x`
 /// datacenter address that can neither be geolocated nor pinged from a home network.
-fn public_addr_in_line(line: &str) -> Option<(String, u16)> {
+fn addr_in_line(line: &str, accept: impl Fn(&str) -> bool) -> Option<(String, u16)> {
     for token in line.split(|c: char| {
-        c.is_whitespace()
-            || c == ','
-            || c == '|'
-            || c == ':'
-            || c == '='
-            || c == '['
-            || c == ']'
+        c.is_whitespace() || c == ',' || c == '|' || c == ':' || c == '=' || c == '[' || c == ']'
     }) {
-        if !looks_like_ip(token) || is_private_ip(token) {
+        if !looks_like_ip(token) || !accept(token) {
             continue;
         }
         return Some((token.to_string(), port_for(line, token)));
     }
     None
+}
+
+fn public_addr_in_line(line: &str) -> Option<(String, u16)> {
+    addr_in_line(line, |ip| !is_private_ip(ip))
+}
+
+fn is_loopback_ip(ip: &str) -> bool {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// A loopback candidate (`127.0.0.1`, `::1`): used only when the log names nothing public.
+fn loopback_addr_in_line(line: &str) -> Option<(String, u16)> {
+    addr_in_line(line, is_loopback_ip)
 }
 
 /// The port written next to `ip`: `ip:port`, `ip|port`, `[ip]:port`, or `Port = N`.
@@ -90,32 +101,44 @@ fn port_for(line: &str, ip: &str) -> u16 {
         .unwrap_or(0)
 }
 
+/// The spellings the desktop client actually writes on a network line, macOS included:
+///   [FLog::Network] serverId: 128.116.1.2|53640          <- the canonical one
+///   [FLog::Output] Connection accepted from 128.116.1.2|53640
+///   [FLog::Network] UDMUX Address = 128.116.1.2, Port = 53640
+///   [FLog::Output] Connecting to UDMUX server 128.116.1.2:53640, and RCC server 10.x
+///   [FLog::Output] Connecting to 128.116.1.2:53640
+const NETWORK_MARKERS: [&str; 7] = [
+    "serverid",
+    "udmux address",
+    "udmux server",
+    "connection accepted from",
+    "connected to",
+    "connecting to",
+    "raknet",
+];
+
 fn addr_from_network_lines(text: &str) -> Option<(String, u16)> {
-    // The spellings the desktop client actually writes, macOS included:
-    //   [FLog::Network] serverId: 128.116.1.2|53640          <- the canonical one
-    //   [FLog::Output] Connection accepted from 128.116.1.2|53640
-    //   [FLog::Network] UDMUX Address = 128.116.1.2, Port = 53640
-    //   [FLog::Output] Connecting to UDMUX server 128.116.1.2:53640, and RCC server 10.x
-    //   [FLog::Output] Connecting to 128.116.1.2:53640
-    const MARKERS: [&str; 7] = [
-        "serverid",
-        "udmux address",
-        "udmux server",
-        "connection accepted from",
-        "connected to",
-        "connecting to",
-        "raknet",
-    ];
+    network_line_addr(text, public_addr_in_line)
+}
+
+/// The newest network line's loopback address, used only as the last resort: a log that names
+/// no public server is a local one, and pinging the local endpoint it names is a real
+/// measurement of that session instead of a permanent `-- ms`.
+fn loopback_from_network_lines(text: &str) -> Option<(String, u16)> {
+    network_line_addr(text, loopback_addr_in_line)
+}
+
+fn network_line_addr(text: &str, pick: fn(&str) -> Option<(String, u16)>) -> Option<(String, u16)> {
     // The whole chunk, not the last 600 lines: the connect line is written once when the
     // session starts, and a long session pushes it arbitrarily far back. Lowercased once
     // rather than per line - this runs twice a second while a game is live. Digits, dots
     // and ports survive lowercasing, so scanning the lowered copy is enough.
     let lower = text.to_ascii_lowercase();
     lower.lines().rev().find_map(|line| {
-        if !MARKERS.iter().any(|m| line.contains(m)) {
+        if !NETWORK_MARKERS.iter().any(|m| line.contains(m)) {
             return None;
         }
-        public_addr_in_line(line)
+        pick(line)
     })
 }
 
@@ -134,6 +157,9 @@ fn udmux_addr_after(text: &str) -> Option<(String, u16)> {
 /// LAN / loopback / link-local addresses. The client writes its local UDMUX relay address
 /// on some network lines; resolving that with GeoIP gives "Unknown location" and a ping to
 /// nothing, so such candidates are skipped in favour of the real public server address.
+/// Loopback is the one address that is accepted after every public candidate is gone (see
+/// `loopback_from_network_lines`), because a log naming only `127.0.0.1` is a local server:
+/// RFC1918 datacenter addresses stay skipped, since those are never the game endpoint.
 fn is_private_ip(ip: &str) -> bool {
     match ip.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(v4)) => {
@@ -189,7 +215,15 @@ pub fn extract_server_info_from_log(text: &str) -> Option<ServerInfo> {
             line.rsplit_once(" at ")
                 .and_then(|(_, addr)| public_addr_in_line(addr))
         })
-        .or_else(|| addr_from_network_lines(tail))?;
+        .or_else(|| addr_from_network_lines(tail))
+        // Nothing public anywhere in this log: a loopback address is the only server it
+        // names (a local session or a simulated one). Measuring that endpoint is the honest
+        // number for the row; when nothing listens, the probe reports the failed path.
+        .or_else(|| loopback_from_network_lines(tail))
+        .or_else(|| {
+            line.rsplit_once(" at ")
+                .and_then(|(_, addr)| loopback_addr_in_line(addr))
+        })?;
     Some(ServerInfo {
         ip,
         port,

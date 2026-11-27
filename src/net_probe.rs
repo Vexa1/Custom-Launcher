@@ -97,7 +97,7 @@ pub fn udp_rtt_traced(ip: &str, port: u16) -> Result<u32, String> {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                return Err(timeout())
+                return Err(timeout());
             }
             Err(e) => return Err(format!("recv failed ({e})")),
         };
@@ -238,6 +238,70 @@ fn tcp_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
+/// Which tier produced a number, and that number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbeOutcome {
+    /// `icmp`, `raknet` or `tcp`.
+    pub via: &'static str,
+    pub ms: u32,
+}
+
+/// Why one whole probe run had no number: the tier the chain gave up on, plus one reason per
+/// tier in the order they were tried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeMiss {
+    /// The last tier tried, which is what the HUD names after `-- ms`.
+    pub last: &'static str,
+    pub reasons: Vec<String>,
+}
+
+/// Runs every network tier in the shipping order and returns the first number, or every
+/// reason it had none.
+///
+/// This is the exact chain the overlay runs on its probe thread (an integration test in
+/// `vm-tests` drives it against local mock relays), so the order cannot drift between what
+/// ships and what is tested: ICMP, then the RakNet unconnected ping, then a TCP handshake.
+/// `tcp_ports` is passed in so the caller chooses what an edge can accept; the overlay uses
+/// [`TCP_PROBE_PORTS`].
+pub fn probe_server(ip: &str, port: u16, tcp_ports: &[u16]) -> Result<ProbeOutcome, ProbeMiss> {
+    let mut reasons = Vec::new();
+    match icmp_rtt_traced(ip) {
+        Ok(ms) => return Ok(ProbeOutcome { via: "icmp", ms }),
+        Err(why) => reasons.push(format!("icmp {why}")),
+    }
+    match udp_rtt_traced(ip, port) {
+        Ok(ms) => return Ok(ProbeOutcome { via: "raknet", ms }),
+        Err(why) => reasons.push(format!("raknet {why}")),
+    }
+    match tcp_rtt_traced(ip, tcp_ports) {
+        Ok(ms) => return Ok(ProbeOutcome { via: "tcp", ms }),
+        Err(why) => reasons.push(format!("tcp {why}")),
+    }
+    Err(ProbeMiss {
+        last: "tcp",
+        reasons,
+    })
+}
+
+/// The one `log.txt` line per probe run: the target, the result, and - when there is no
+/// number - every tier's reason. Kept next to [`probe_server`] so the log text a support
+/// report quotes is the same text the integration test asserts.
+pub fn probe_line(
+    target: &str,
+    rtt: Option<u32>,
+    source: Option<&str>,
+    misses: &[String],
+) -> String {
+    match (rtt, source) {
+        (Some(ms), Some(source)) => format!("overlay: ping probe {target} -> {ms} ms ({source})"),
+        (Some(ms), None) => format!("overlay: ping probe {target} -> {ms} ms"),
+        (None, _) => format!(
+            "overlay: ping probe {target} -> none ({})",
+            misses.join("; ")
+        ),
+    }
+}
+
 /// `time=30.4 ms` (macOS), `time=30ms` / `time<1ms` (Windows).
 pub fn parse_ping_time(text: &str) -> Option<u32> {
     let idx = text.find("time")?;
@@ -251,4 +315,3 @@ pub fn parse_ping_time(text: &str) -> Option<u32> {
     let ms = num.parse::<f32>().ok()?;
     Some(ms.round().max(1.0) as u32)
 }
-

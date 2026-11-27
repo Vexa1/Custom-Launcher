@@ -35,6 +35,12 @@ cargo test --locked --manifest-path vm-tests/Cargo.toml --test stub_drift
 echo "== vm-tests: real party + server-hop code on this host"
 cargo test --locked --manifest-path vm-tests/Cargo.toml
 
+# End-to-end overlay + ping pipeline: a replayed Roblox log, mock UDMUX/UDMUX-style relays on
+# loopback, the shipping probe chain, the real panels JSON written atomically, and the HUD
+# rendered from those bytes to vm-tests/artifacts/overlay_live_ping.png.
+echo "== vm-tests: overlay + ping pipeline end to end (mock UDMUX relay, panels file, PNG)"
+cargo test --locked --manifest-path vm-tests/Cargo.toml --test overlay_ping_e2e
+
 # Headless UI screenshots: real egui, a software rasterizer, PNGs in vm-tests/artifacts/.
 # The same test is the layout check (clipping, overlap, text fit, hit targets, contrast).
 # A UI change is not done until these images have been looked at - see AGENTS.md.

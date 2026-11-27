@@ -104,6 +104,36 @@ fn a_private_only_log_has_no_server_to_ping() {
     );
 }
 
+/// A log that names no public address at all is a local session (the end-to-end overlay test
+/// drives one): measuring the loopback endpoint it names beats a permanent `-- ms`.
+#[test]
+fn a_loopback_only_log_names_its_local_server() {
+    let log = "\
+2026-11-27T09:00:00.000Z,1.000000,0001,6 [FLog::Output] Joining game 'job' place 1818 at [10.12.2.219]:63976
+2026-11-27T09:00:00.100Z,1.100000,0001,7 [FLog::Network] UDMUX Address = 127.0.0.1, Port = 53640
+2026-11-27T09:00:00.200Z,1.200000,0001,6 [FLog::Output] Connecting to 127.0.0.1:53640
+";
+    let info = extract_server_info_from_log(log).expect("the local server is the only candidate");
+    assert_eq!(info.ip, "127.0.0.1");
+    assert_eq!(info.port, 53640);
+    assert_eq!(info.job_id, "job");
+    assert_eq!(info.place_id, 1818);
+}
+
+/// The loopback fallback must never beat a real relay: a session log carries both while the
+/// client talks to a local proxy, and the public address is the one that measures the game.
+#[test]
+fn a_public_relay_still_wins_over_a_loopback_line() {
+    let log = "\
+2026-11-27T09:00:00.000Z,1.000000,0001,6 [FLog::Output] Joining game 'job' place 1818 at [10.12.2.219]:63976
+2026-11-27T09:00:00.100Z,1.100000,0001,7 [FLog::Network] UDMUX Address = 127.0.0.1, Port = 53640
+2026-11-27T09:00:00.200Z,1.200000,0001,7 [FLog::Network] UDMUX Address = 128.116.45.33, Port = 63976
+";
+    let info = extract_server_info_from_log(log).expect("the public relay");
+    assert_eq!(info.ip, "128.116.45.33");
+    assert_eq!(info.port, 63976);
+}
+
 #[test]
 fn an_unquoted_join_banner_counts_as_a_play_session() {
     let log = "\
