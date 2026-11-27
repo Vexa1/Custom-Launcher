@@ -39,25 +39,65 @@ pub fn zip_checksum(notes: &str, zip_url: &str, from_asset: bool) -> Option<Stri
     }
 }
 
-/// Whether a `.zip` asset name is the one this platform's in-app updater should take. Windows
-/// looks for the x64 build; macOS takes the project archive.
-pub fn prefers_zip_asset(name: &str, windows: bool) -> bool {
+/// A macOS release archive: `CREBLOX-<version>-update.zip` (or the full project zip), never the
+/// Windows build.
+///
+/// `CREBLOX-<version>-windows-x64.zip` also contains "creblox", so the Windows build is excluded
+/// by name and by the `.zip` requirement, or a Mac would try to install an archive it cannot run.
+pub fn is_macos_zip(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
+    lower.ends_with(".zip")
+        && !lower.contains("windows")
+        && (lower.contains("creblox") || lower.contains("macos"))
+}
+
+/// A Windows release archive: only the x64 build, keyed on `windows`.
+pub fn is_windows_zip(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".zip") && lower.contains("windows")
+}
+
+/// Whether a `.zip` name is the one this platform's in-app updater should take. Windows looks
+/// for the x64 build; macOS takes the project archive.
+pub fn prefers_zip_asset(name: &str, windows: bool) -> bool {
     if windows {
-        lower.contains("windows")
+        is_windows_zip(name)
     } else {
-        // `CREBLOX-<version>-windows-x64.zip` also contains "creblox", so the Windows build has
-        // to be excluded by name or a Mac would download an exe it cannot run.
-        !lower.contains("windows") && (lower.contains("creblox") || lower.contains("macos"))
+        is_macos_zip(name)
     }
 }
 
-/// The first zip link in a release body, preferring this platform's build.
+/// One release asset as GitHub lists it: file name, download URL and size in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZipAsset<'a> {
+    pub name: &'a str,
+    pub url: &'a str,
+    pub size: u64,
+}
+
+/// The release asset this platform may install, scanning in the order GitHub lists them.
+///
+/// The Windows job attaches `CREBLOX-<version>-windows-x64.zip` next to the macOS archives, and
+/// clients that shipped before that change install the first zip asset they see. So the foreign
+/// build is skipped here, not merely ordered last: a Mac that took the Windows zip would try to
+/// swap in an .exe, and a Windows client that took the macOS overlay would unzip a source tree
+/// instead of a launcher. `None` means this release has no build for this platform, so the caller
+/// falls back to a zip link written into the notes.
+pub fn pick_zip_asset<'a>(assets: &[ZipAsset<'a>], windows: bool) -> Option<ZipAsset<'a>> {
+    assets
+        .iter()
+        .copied()
+        .find(|asset| prefers_zip_asset(asset.name, windows))
+}
+
+/// The zip link in a release body that this platform can install.
 ///
 /// macOS publishes the small update overlay next to the full project zip and wants the overlay,
 /// so an in-app update downloads ~347 KB instead of ~677 KB. Windows wants its own x64 build.
+/// A link for the other platform is skipped and never used as a fallback: there is no archive in
+/// a body that both systems could install, so falling back would only download a broken update.
 pub fn pick_zip_url(text: &str, windows: bool) -> Option<String> {
-    let mut first: Option<String> = None;
+    let mut macos_other: Option<String> = None;
     for token in text.split_whitespace() {
         let Some(start) = token.find("https://") else {
             continue;
@@ -66,21 +106,32 @@ pub fn pick_zip_url(text: &str, windows: bool) -> Option<String> {
             token[start..].trim_end_matches([')', ']', '}', '>', '.', ',', ';', '`', '"', '\'']);
         let lower = candidate.to_ascii_lowercase();
         let path = lower.split(['?', '#']).next().unwrap_or("");
-        if !path.ends_with(".zip") {
-            continue;
-        }
         let file = path.rsplit('/').next().unwrap_or(path);
-        let wanted = if windows {
-            file.contains("windows")
-        } else {
-            file.contains("update") && !file.contains("full")
-        };
-        if wanted {
-            return Some(candidate.to_string());
-        }
-        if first.is_none() {
-            first = Some(candidate.to_string());
+        if windows {
+            if is_windows_zip(file) {
+                return Some(candidate.to_string());
+            }
+        } else if is_macos_zip(file) {
+            if file.contains("update") && !file.contains("full") {
+                return Some(candidate.to_string());
+            }
+            if macos_other.is_none() {
+                macos_other = Some(candidate.to_string());
+            }
         }
     }
-    first
+    if windows {
+        None
+    } else {
+        macos_other
+    }
+}
+
+/// The body-listed archive for this platform and the SHA-256 its download must match, exactly as
+/// the release parser applies them. `None` means the notes have no archive this platform can
+/// install, which is how a tag without a Windows build reads as "no update".
+pub fn notes_zip(notes: &str, windows: bool) -> Option<(String, Option<String>)> {
+    let url = pick_zip_url(notes, windows)?;
+    let sum = zip_checksum(notes, &url, false);
+    Some((url, sum))
 }

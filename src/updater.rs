@@ -19,6 +19,16 @@ use crate::theme::{apply_theme, install_fonts, theme_accent};
 pub const CREBLOX_REPO: &str = "Vexa1/Custom-Launcher";
 pub const CREBLOX_RELEASES_URL: &str = "https://github.com/Vexa1/Custom-Launcher/releases";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Which archive this build may install is fixed at compile time, so a macOS binary has no code
+/// path that accepts `CREBLOX-<version>-windows-x64.zip` and a Windows binary none that accepts
+/// the macOS overlay. Non-Apple/Windows hosts only compile the module for `vm-tests`-style reads.
+#[cfg(target_os = "macos")]
+const WINDOWS_BUILD: bool = false;
+#[cfg(windows)]
+const WINDOWS_BUILD: bool = true;
+#[cfg(not(any(target_os = "macos", windows)))]
+const WINDOWS_BUILD: bool = false;
 #[cfg(target_os = "macos")]
 const UPDATE_TOKEN_SERVICE: &str = "CREBLOX Update Token";
 
@@ -182,12 +192,6 @@ pub fn classify_update_kind(remote: &str, current: &str, title: &str, notes: &st
     }
 }
 
-/// Finds the first HTTPS `.zip` link in release notes. Release bodies use both bare
-/// URLs and Markdown links, so trailing punctuation is stripped.
-fn find_zip_url(text: &str) -> Option<String> {
-    crate::release_links::pick_zip_url(text, cfg!(target_os = "windows"))
-}
-
 pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<CrebloxRelease> {
     if v["draft"].as_bool().unwrap_or(false) {
         return None;
@@ -215,7 +219,7 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
     let kind = classify_update_kind(&tag_name, current_version, &title, &notes);
 
     let mut chosen_exe: Option<(String, String, u64, bool)> = None;
-    let mut chosen_zip: Option<(String, String, u64, bool)> = None;
+    let mut zip_assets: Vec<crate::release_links::ZipAsset> = Vec::new();
     let mut hotfix_url: Option<String> = None;
     if let Some(assets) = v["assets"].as_array() {
         for a in assets {
@@ -231,16 +235,11 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
                 continue;
             }
             if lower.ends_with(".zip") {
-                // Only this platform's own build may be taken from the assets. A Windows zip
-                // sitting next to the macOS archive must not replace it: a Mac cannot run a
-                // .exe payload, and older clients take the first zip asset they see.
-                if !crate::release_links::prefers_zip_asset(name, cfg!(target_os = "windows")) {
-                    continue;
-                }
-                if chosen_zip.is_none() {
-                    let size = a["size"].as_u64().unwrap_or(0);
-                    chosen_zip = Some((url.to_string(), name.to_string(), size, true));
-                }
+                zip_assets.push(crate::release_links::ZipAsset {
+                    name,
+                    url,
+                    size: a["size"].as_u64().unwrap_or(0),
+                });
                 continue;
             }
             // macOS builds are distributed as an app bundle / zip from the
@@ -268,14 +267,20 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
         Some((u, n, sz, _)) => (Some(u), Some(n), sz),
         None => (None, None, 0),
     };
-    // The current release flow publishes an update zip link in the release body
-    // (GitHub assets need a paid storage key), so fall back to scanning the body.
-    let has_asset_zip = chosen_zip.is_some();
-    let (zip_url, zip_name, zip_size) = match chosen_zip {
-        Some((u, n, sz, _)) => (Some(u), Some(n), sz),
-        None => match find_zip_url(&notes) {
-            Some(u) => {
-                let name = u
+    // Which archive belongs to this platform is `release_links`' rule, so the VM tests cover it
+    // instead of it living in the JSON parser. Assets come first; the notes are the documented
+    // fallback for the macOS overlay. A foreign build is ignored, never used as a fallback.
+    let chosen_zip = crate::release_links::pick_zip_asset(&zip_assets, WINDOWS_BUILD);
+    let (zip_url, zip_name, zip_size, zip_sha256) = match chosen_zip {
+        Some(asset) => (
+            Some(asset.url.to_string()),
+            Some(asset.name.to_string()),
+            asset.size,
+            crate::release_links::zip_checksum(&notes, asset.url, true),
+        ),
+        None => match crate::release_links::notes_zip(&notes, WINDOWS_BUILD) {
+            Some((url, sha256)) => {
+                let name = url
                     .rsplit('/')
                     .next()
                     .unwrap_or("creblox-update.zip")
@@ -283,14 +288,19 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
                     .next()
                     .unwrap_or("creblox-update.zip")
                     .to_string();
-                (Some(u), Some(name), 0)
+                (Some(url), Some(name), 0, sha256)
             }
-            None => (None, None, 0),
+            None => (None, None, 0, None),
         },
     };
-    let zip_sha256 = zip_url
-        .as_deref()
-        .and_then(|url| crate::release_links::zip_checksum(&notes, url, has_asset_zip));
+
+    // A Windows tag with neither a zip nor an .exe has nothing this machine can install: report
+    // it as no update instead of offering a download that cannot work. macOS always keeps the
+    // overlay link, so its older releases stay updatable.
+    #[cfg(windows)]
+    if zip_url.is_none() && exe_url.is_none() {
+        return None;
+    }
 
     Some(CrebloxRelease {
         version: normalized_ver,

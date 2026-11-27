@@ -166,12 +166,34 @@ makes the tag):
 - `body:` the notes from §3.2
 - `make_latest: "true"` **only for this new release**
 
-Notes on the tooling:
+Then the Windows job attaches its build:
 
+- **Assets are used, but only the job attaches them.** `.github/workflows/build-windows.yml`
+  builds `CREBLOX-<ver>-windows-x64.zip`, then uploads `release/CREBLOX-<ver>-update.zip` (the
+  macOS overlay from §3.4, which must already be committed) followed by the Windows zip, and
+  appends this to the end of the notes:
+
+  ```text
+  macOS update (release asset): https://github.com/Vexa1/Custom-Launcher/releases/download/v<ver>/CREBLOX-<ver>-update.zip
+  sha256 <hash>
+  Windows x64: https://github.com/Vexa1/Custom-Launcher/releases/download/v<ver>/CREBLOX-<ver>-windows-x64.zip
+  sha256 <hash>
+  ```
+
+  The full archive is not attached; it stays a `release/` link on `main`. The job refuses a tag
+  that does not match `Cargo.toml`, and skips the notes edit when the Windows URL is already
+  listed, so a re-dispatch is safe.
+- **macOS assets must be uploaded first, Windows last.** Clients that shipped before 0.5.5
+  install the first zip *asset* they see. Current clients ignore a foreign zip by name
+  (`release_links::pick_zip_asset`), but the workflow's upload order is what protects the older
+  ones — keep macOS first.
+- Dispatch the job after tagging with `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT` (`ref: main`,
+  `inputs: {"release_tag": "v<ver>"}`), and wait for it to finish: the Windows asset does not
+  exist until the run succeeds, so §3.6 cannot pass before then.
 - Up to 8 release updates per request; batch them.
 - `GITHUB_UPLOAD_RELEASE_ASSET` rejects local paths ("file key does not belong to this project or
-  session"), and this project does not use release assets anyway. Do not try to attach the zips to
-  the release; link them from `release/` on `main` as in §1.
+  session"); the workflow's own token is the only thing that attaches an asset. Do not try to
+  upload one by hand.
 - Markdown links inside the body are fine — the updater strips trailing punctuation.
 
 ### 3.6 Verify the release (do not skip)
@@ -196,9 +218,33 @@ b=json.load(sys.stdin)['body']
 u=next(t.strip('()') for t in b.split() if t.startswith('https://') and '.zip' in t)
 print('first zip:', u)
 print('hash on that line:', re.search(r'[0-9a-f]{64}', b.split(u)[1].split(chr(10))[0]).group(0))"
+
+# 4. the Windows job attached its zip, after the macOS archives
+curl -s https://api.github.com/repos/Vexa1/Custom-Launcher/releases/latest \
+  | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for a in d['assets']:
+    print(a['size'], a['name'], a['browser_download_url'])"
+
+# 5. replay the real selection rule against the actual asset list
+curl -s https://api.github.com/repos/Vexa1/Custom-Launcher/releases/latest \
+  | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for plat in ('macos','windows'):
+    pick = next((a['name'] for a in d['assets']
+                 if a['name'].lower().endswith('.zip')
+                 and ('windows' in a['name'].lower() if plat == 'windows'
+                      else 'windows' not in a['name'].lower()
+                      and ('creblox' in a['name'].lower() or 'macos' in a['name'].lower()))), None)
+    print(plat, '->', pick)"
 ```
 
-The last check must show `...-update.zip` first and the hash printed for *that* file.
+The third check must show `...-update.zip` first and the hash printed for *that* file. The fifth
+must print the macOS archive for `macos` and `CREBLOX-<ver>-windows-x64.zip` for `windows` —
+never the same file, and never a platform's zip missing from its own line. Download the Windows
+asset and check its size and SHA-256 against the notes before calling the release done.
 
 Also confirm the release is public: the repository `Vexa1/Custom-Launcher` is **public**
 (flipped during the audit), so anonymous `curl`/raw downloads must return `200` without a token.
@@ -245,18 +291,39 @@ Format, in this order:
 <short manual install/update instruction, ending with: user data in ~/Library/Application Support/CREBLOX is never touched>
 ```
 
-How the parser reads it (`src/updater.rs`):
+The Windows job appends its own `macOS update (release asset):` / `Windows x64:` lines with the
+`sha256` on the following line (§3.5). Those are appended, not substituted: the `### Downloads`
+block above stays the one you write, and the asset lines only add the identical archives under
+their release URLs, which the parser prefers on both platforms.
 
-- `find_zip_url` (`:186`): first token containing `https://` whose path ends in `.zip`, trailing
-  `) ] } > . , ; \` " '` stripped. It **prefers a filename containing `update`** (and not `full`),
-  otherwise the first zip found. Notes may use bare URLs or Markdown links.
-- `find_sha256_for` (`:223`): the 64-hex token **on the same line as the chosen URL**, else the
-  first 64-hex token after it, else the first in the body. This is why the hash must sit on the
-  download's own line.
-- `parse_github_release_update` (`:231`): drafts ignored; tag must be semver-newer than the running
-  version; body is the notes; `assets` are scanned for a hotfix JSON only.
-- `install_update_zip` (`:636`) / `find_update_root` (`:567`): the extracted folder is located by
-  its contents (a `Cargo.toml` plus `scripts/update-macos.sh`), not by an assumed folder name.
+How the parser reads it (`src/updater.rs`, platform rules in `src/release_links.rs`):
+
+- **Assets first, notes second.** `release_links::pick_zip_asset` walks `assets` in GitHub's order
+  and takes the first `.zip` that is this platform's build (`is_windows_zip`: ends `.zip` and
+  contains `windows`; `is_macos_zip`: ends `.zip`, contains `creblox`/`macos` and not `windows`).
+  Every other zip is ignored, not installed, so the Windows asset cannot break a Mac. No usable
+  asset means the notes are scanned instead.
+- **The two platforms never borrow each other's link.** The parser picks its platform through
+  `#[cfg(target_os = …)]` (`WINDOWS_BUILD` in `src/updater.rs`), and `pick_zip_url` skips a link
+  for the other OS instead of falling back to it: a body with only the Windows zip gives macOS
+  nothing (`None`), and vice versa. The notes' `...-update.zip` stays first for pre-0.5.5 macOS
+  installs, which read the first zip they see.
+- **Windows without an archive is "no update".** On Windows a release with neither a platform zip
+  nor an `.exe` makes `parse_github_release_update` return `None`, so the window says the build is
+  current instead of offering a download that cannot work.
+- `release_links::pick_zip_url` (the notes fallback): first `https://` token whose path ends in
+  `.zip`, trailing `) ] } > . , ; \` " '` stripped. It **prefers a filename containing `update`**
+  (and not `full`), otherwise the first zip found. Notes may use bare URLs or Markdown links.
+- `release_links::zip_checksum`: an asset zip is verified only against a 64-hex token near its own
+  URL (the same line, else the text after it) and stays unverified when the notes do not print its
+  hash; a body link may print its hash anywhere. This is why every download's hash must sit on its
+  own line.
+- `parse_github_release_update`: drafts ignored; tag must be semver-newer than the running
+  version; body is the notes; `assets` are scanned for a hotfix JSON, the platform zip above and,
+  on Windows only, a `.exe` fallback.
+- `install_update_zip` / `find_update_root`: the extracted folder is located by its contents (a
+  `Cargo.toml` plus `scripts/update-macos.sh`), not by an assumed folder name. On Windows the zip
+  is read by `src/zip_update.rs`, which pulls out `creblox.exe` and checks it is an x64 GUI PE.
 
 Writing rules:
 
@@ -381,6 +448,7 @@ The repository was audited end to end; it came back clean and must stay that way
 [ ] zips moved to release/CREBLOX-<ver>-{update,full}.zip; hashes and sizes recorded
 [ ] committed "release: <ver> archives" and pushed to main via cloud_git
 [ ] GitHub release v<ver> created on main, make_latest true only for this one
+[ ] Windows job dispatched, green, and its zip attached after the macOS archives
 [ ] both raw URLs return 200 with the exact byte sizes
 [ ] /releases/latest returns v<ver>, not draft
 [ ] first zip in the body is the update archive, hash on the same line matches

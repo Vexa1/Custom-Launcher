@@ -247,19 +247,96 @@ fn the_windows_zip_is_picked_on_windows_and_the_overlay_on_macos() {
 }
 
 #[test]
-fn without_a_platform_build_the_first_zip_link_is_used() {
-    let notes = format!("Full build: {MAC_FULL_URL}\nUpdate: {MAC_UPDATE_URL}");
+fn a_body_without_this_platforms_archive_offers_no_update() {
+    let macos_only = format!("Full build: {MAC_FULL_URL}\nUpdate: {MAC_UPDATE_URL}");
 
     assert_eq!(
-        release_links::pick_zip_url(&notes, true).as_deref(),
-        Some(MAC_FULL_URL),
-        "Windows falls back to the first link instead of inventing one"
+        release_links::pick_zip_url(&macos_only, true),
+        None,
+        "Windows never falls back to a macOS overlay"
+    );
+    assert_eq!(
+        release_links::notes_zip(&macos_only, true),
+        None,
+        "no Windows archive means no Windows update, not a foreign one"
     );
     assert_eq!(
         release_links::pick_zip_url("no links here", true),
         None,
         "a body without downloads has nothing to offer"
     );
+}
+
+#[test]
+fn a_multi_os_release_body_gives_each_platform_only_its_own_archive() {
+    // The shape the Windows job appends: both archives listed, each with its own SHA-256, the
+    // macOS update first so pre-0.5.5 installs (which take the first zip) keep working.
+    let notes = release_notes();
+
+    let macos = release_links::notes_zip(&notes, false).expect("a macOS archive");
+    assert_eq!(macos.0, MAC_UPDATE_URL);
+    assert_eq!(macos.1.as_deref(), Some(MAC_HASH));
+    assert!(
+        !macos.0.to_ascii_lowercase().contains("windows") && !macos.0.ends_with(".exe"),
+        "a Mac must never be handed the Windows build: {}",
+        macos.0
+    );
+
+    let windows = release_links::notes_zip(&notes, true).expect("a Windows archive");
+    assert_eq!(windows.0, WINDOWS_URL);
+    assert_eq!(windows.1.as_deref(), Some(WIN_HASH));
+    assert!(
+        windows.0.to_ascii_lowercase().contains("windows"),
+        "Windows must only accept its own x64 build: {}",
+        windows.0
+    );
+
+    assert_ne!(macos.0, windows.0, "the two platforms get different files");
+    assert_ne!(macos.1, windows.1, "each archive keeps its own checksum");
+}
+
+#[test]
+fn the_macos_archive_wins_even_when_a_windows_zip_is_listed_first() {
+    let notes = format!(
+        "Windows x64: {WINDOWS_URL} sha256 {WIN_HASH}\n\n\
+         macOS update: {MAC_UPDATE_URL} sha256 {MAC_HASH}"
+    );
+
+    assert_eq!(
+        release_links::notes_zip(&notes, false).map(|(url, _)| url).as_deref(),
+        Some(MAC_UPDATE_URL)
+    );
+    assert_eq!(
+        release_links::notes_zip(&notes, true).map(|(url, _)| url).as_deref(),
+        Some(WINDOWS_URL)
+    );
+}
+
+#[test]
+fn a_foreign_archive_is_never_a_notes_fallback() {
+    let windows_only = format!("Windows x64: {WINDOWS_URL}\nsha256 {WIN_HASH}");
+    let macos_only = format!("Update: {MAC_UPDATE_URL}\nsha256 {MAC_HASH}");
+
+    assert_eq!(
+        release_links::notes_zip(&windows_only, false),
+        None,
+        "a macOS build must not download the Windows zip"
+    );
+    assert_eq!(
+        release_links::notes_zip(&macos_only, true),
+        None,
+        "a Windows build must not download the macOS overlay"
+    );
+}
+
+#[test]
+fn an_exe_link_is_not_a_macos_archive() {
+    let notes = "Download: https://github.com/Vexa1/Custom-Launcher/releases/download/v0.5.5/creblox.exe";
+
+    assert_eq!(release_links::pick_zip_url(notes, false), None);
+    assert_eq!(release_links::notes_zip(notes, false), None);
+    assert!(!release_links::is_macos_zip("creblox.exe"));
+    assert!(!release_links::is_windows_zip("creblox.exe"));
 }
 
 #[test]
@@ -281,6 +358,67 @@ fn asset_names_are_chosen_per_platform() {
     assert!(!release_links::prefers_zip_asset(windows, false));
     assert!(release_links::prefers_zip_asset(macos, false));
     assert!(!release_links::prefers_zip_asset(macos, true));
+}
+
+fn asset<'a>(name: &'a str, url: &'a str, size: u64) -> release_links::ZipAsset<'a> {
+    release_links::ZipAsset { name, url, size }
+}
+
+#[test]
+fn a_foreign_zip_asset_is_ignored_not_merely_ordered_last() {
+    // The Windows job attaches its zip next to the macOS archives. Clients that shipped before
+    // that install the first zip asset they see, so the rule has to be "ignore", never "prefer".
+    let release = [
+        asset("CREBLOX-0.5.5-windows-x64.zip", WINDOWS_URL, 8_773_620),
+        asset("CREBLOX-0.5.5-update.zip", MAC_UPDATE_URL, 398_986),
+    ];
+
+    assert_eq!(
+        release_links::pick_zip_asset(&release, false).map(|a| a.url),
+        Some(MAC_UPDATE_URL),
+        "a Mac must skip the .exe zip even when it is listed first"
+    );
+    assert_eq!(
+        release_links::pick_zip_asset(&release, true).map(|a| a.url),
+        Some(WINDOWS_URL),
+        "Windows must skip the macOS overlay"
+    );
+}
+
+#[test]
+fn the_first_usable_asset_wins() {
+    let release = [
+        asset("CREBLOX-0.5.5-update.zip", MAC_UPDATE_URL, 398_986),
+        asset("CREBLOX-0.5.5-full.zip", MAC_FULL_URL, 730_944),
+    ];
+
+    // The overlay is published first so the in-app update stays small.
+    let picked = release_links::pick_zip_asset(&release, false).expect("a macOS build");
+    assert_eq!(picked.name, "CREBLOX-0.5.5-update.zip");
+    assert_eq!(picked.size, 398_986, "the size comes from the asset");
+}
+
+#[test]
+fn a_release_without_this_platforms_asset_picks_nothing() {
+    let mac_only = [asset("CREBLOX-0.5.5-update.zip", MAC_UPDATE_URL, 398_986)];
+    let windows_only = [asset("CREBLOX-0.5.5-windows-x64.zip", WINDOWS_URL, 8_773_620)];
+
+    // None is what makes the updater fall back to the notes link instead of installing a build
+    // the platform cannot run.
+    assert_eq!(release_links::pick_zip_asset(&mac_only, true), None);
+    assert_eq!(release_links::pick_zip_asset(&windows_only, false), None);
+    assert_eq!(release_links::pick_zip_asset(&[], false), None);
+}
+
+#[test]
+fn only_zip_assets_are_candidates() {
+    let notes = [asset("creblox-0.5.5-notes.txt", "https://example.com/notes.txt", 10)];
+
+    assert_eq!(
+        release_links::pick_zip_asset(&notes, false),
+        None,
+        "a name alone is not an updatable archive"
+    );
 }
 
 #[test]
