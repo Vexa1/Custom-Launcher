@@ -4,6 +4,7 @@
 mod api;
 mod app;
 mod auth;
+mod avatar_anim;
 mod avatar_sync;
 mod chart_feed;
 mod avatar_3d;

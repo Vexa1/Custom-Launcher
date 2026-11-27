@@ -2,6 +2,7 @@
 // Real-time 3D Roblox Avatar parser, loader, and GPU-accelerated egui renderer
 
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+use crate::avatar_anim::{AnimPlayer, AnimationKind, Part, Pose, Skeleton, PART_COUNT};
 use crate::avatar_sync::MeshStore;
 use serde_json::Value;
 use std::io::Read;
@@ -63,6 +64,9 @@ pub struct AvatarTriangle {
     pub texture_index: Option<usize>,
     pub base_color: Color32,
     pub normal: [f32; 3],
+    /// Rig part this triangle belongs to (`Part` index, 255 = unclassified until bounds are
+    /// known). Drives the per-limb transform during an animation.
+    pub part: u8,
 }
 
 /// Parsed 3D model with normalized coordinates
@@ -75,6 +79,8 @@ pub struct Avatar3DModel {
     pub texture_hashes: Vec<String>,
     /// Content hash of the OBJ this model was built from (changes whenever the avatar changes).
     pub obj_hash: String,
+    /// Joint pivots derived from each limb's bounding box.
+    pub skeleton: Skeleton,
 }
 
 /// Loaded texture data ready for egui
@@ -156,6 +162,8 @@ pub struct Avatar3DState {
     pub reload_queued: bool,
     /// The next load follows an avatar edit: wait until Roblox serves the *new* model.
     pub expect_change: bool,
+    /// Click-to-play animation preview. Costs nothing while stopped.
+    pub anim: AnimPlayer,
 }
 
 /// Radians of rotation per dragged pixel.
@@ -182,6 +190,7 @@ impl Default for Avatar3DState {
             loaded_user_id: None,
             reload_queued: false,
             expect_change: false,
+            anim: AnimPlayer::default(),
         }
     }
 }
@@ -266,7 +275,10 @@ pub fn parse_avatar_3d(
     let mut normals: Vec<[f32; 3]> = Vec::new();
 
     let mut current_mtl_idx = 0usize;
+    let mut current_part: Option<Part> = None;
+    let mut object_part: Option<Part> = None;
     let mut triangles: Vec<AvatarTriangle> = Vec::new();
+    let mut triangle_parts: Vec<Option<Part>> = Vec::new();
 
     let mut min_pos = [f32::MAX, f32::MAX, f32::MAX];
     let mut max_pos = [f32::MIN, f32::MIN, f32::MIN];
@@ -325,6 +337,11 @@ pub fn parse_avatar_3d(
             if let Some(pos) = materials.iter().position(|m| m.name == mtl_name) {
                 current_mtl_idx = pos;
             }
+            // Roblox's avatar OBJ names its materials after the R15/R6 body part.
+            current_part = Part::from_name(mtl_name).or(object_part);
+        } else if line.starts_with("o ") || line.starts_with("g ") {
+            let name = line[2..].trim();
+            object_part = Part::from_name(name);
         } else if line.starts_with("f ") {
             let face_tokens: Vec<&str> = line.split_whitespace().skip(1).collect();
             if face_tokens.len() < 3 {
@@ -428,11 +445,13 @@ pub fn parse_avatar_3d(
                     }
                 }
 
+                triangle_parts.push(current_part);
                 triangles.push(AvatarTriangle {
                     v: [v0_tri, v1, v2],
                     texture_index: tex_idx,
                     base_color: base_col,
                     normal: fnorm,
+                    part: current_part.map(|p| p.index() as u8).unwrap_or(255),
                 });
             }
         }
@@ -451,13 +470,56 @@ pub fn parse_avatar_3d(
     let extent_y = (max_pos[1] - min_pos[1]).max(1.0);
     let scale = 2.0 / extent_y;
 
+    // Materials without a part name fall back to the centroid's height band and side.
+    for (tri, part) in triangles.iter_mut().zip(triangle_parts.iter()) {
+        if let Some(p) = part {
+            tri.part = p.index() as u8;
+            continue;
+        }
+        let c = [
+            (tri.v[0].pos[0] + tri.v[1].pos[0] + tri.v[2].pos[0]) / 3.0,
+            (tri.v[0].pos[1] + tri.v[1].pos[1] + tri.v[2].pos[1]) / 3.0,
+            (tri.v[0].pos[2] + tri.v[1].pos[2] + tri.v[2].pos[2]) / 3.0,
+        ];
+        tri.part = Part::from_position(c, min_pos, max_pos).index() as u8;
+    }
+    let skeleton = build_skeleton(&triangles, center, extent_y);
+
     Ok(Avatar3DModel {
         triangles,
         center,
         scale,
         texture_hashes,
         obj_hash: String::new(),
+        skeleton,
     })
+}
+
+/// Derives each joint's anatomical pivot from the vertices of the limb it starts.
+///
+/// The pivot is the centre of the joint-facing face of the part: the hips for the lower torso,
+/// the waist for the upper torso, the neck for the head, shoulders for upper arms, elbows,
+/// wrists, hips, knees and ankles. Rotating a part about that point keeps it socketed in its
+/// parent, which is what stops the limbs from detaching mid-animation.
+fn build_skeleton(triangles: &[AvatarTriangle], center: [f32; 3], extent_y: f32) -> Skeleton {
+    let mut bounds: [Option<([f32; 3], [f32; 3])>; PART_COUNT] = [None; PART_COUNT];
+    for tri in triangles {
+        let idx = tri.part as usize;
+        if idx >= PART_COUNT {
+            continue;
+        }
+        for v in &tri.v {
+            if let Some((min, max)) = &mut bounds[idx] {
+                for a in 0..3 {
+                    min[a] = min[a].min(v.pos[a]);
+                    max[a] = max[a].max(v.pos[a]);
+                }
+            } else {
+                bounds[idx] = Some((v.pos, v.pos));
+            }
+        }
+    }
+    Skeleton::from_part_bounds(&bounds, center, extent_y)
 }
 
 /// Fetch avatar 3D data from Roblox thumbnails API and CDN
@@ -719,6 +781,7 @@ struct RasterKey {
     height: u32,
     obj_hash: String,
     tri_count: usize,
+    anim_frame: u32,
     textures: Vec<(String, [usize; 2])>,
 }
 
@@ -743,6 +806,8 @@ pub fn render_avatar_3d_mesh(
     zoom: f32,
     viewport_rect: Rect,
     textures_ready: bool,
+    pose: &Pose,
+    anim_frame: u32,
 ) {
     if viewport_rect.width() < 2.0 || viewport_rect.height() < 2.0 {
         return;
@@ -780,6 +845,7 @@ pub fn render_avatar_3d_mesh(
         height: height as u32,
         obj_hash: model.obj_hash.clone(),
         tri_count: model.triangles.len(),
+        anim_frame,
         textures: textures
             .iter()
             .map(|t| (t.hash.clone(), t.image.size))
@@ -797,7 +863,9 @@ pub fn render_avatar_3d_mesh(
     let handle = match cached {
         Some(handle) => handle,
         None => {
-            let image = rasterize_avatar(model, textures, yaw, pitch, zoom, width, height);
+            let image = rasterize_avatar(
+                model, textures, yaw, pitch, zoom, width, height, pose, anim_frame,
+            );
             let existing = RASTER_CACHE.with(|c| c.borrow().as_ref().map(|(_, h)| h.clone()));
             let handle = match existing {
                 Some(mut handle) => {
@@ -842,6 +910,7 @@ fn sample_texture(img: &egui::ColorImage, u: f32, v: f32) -> Color32 {
     Color32::from_rgb(c.r(), c.g(), c.b())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rasterize_avatar(
     model: &Avatar3DModel,
     textures: &[LoadedTexture],
@@ -850,6 +919,8 @@ fn rasterize_avatar(
     zoom: f32,
     width: usize,
     height: usize,
+    pose: &Pose,
+    anim_frame: u32,
 ) -> egui::ColorImage {
     let mut pixels = vec![Color32::TRANSPARENT; width * height];
     let mut zbuf = vec![f32::INFINITY; width * height];
@@ -868,6 +939,13 @@ fn rasterize_avatar(
 
     // Material texture indices point into `texture_hashes`; resolve them by hash so a texture
     // that failed to download cannot shift every later texture onto the wrong body part.
+    // Striking the pose: one hierarchical FK pass, then each triangle is carried by its limb.
+    let transforms = if anim_frame == 0 {
+        None
+    } else {
+        Some(model.skeleton.transforms(pose))
+    };
+
     let lookup: Vec<Option<&LoadedTexture>> = model
         .texture_hashes
         .iter()
@@ -880,11 +958,20 @@ fn rasterize_avatar(
         let mut persp = [0.0f32; 3];
         let mut view = [[0.0f32; 3]; 3];
 
+        let limb = transforms
+            .as_ref()
+            .and_then(|t| t.get(tri.part as usize))
+            .copied();
+
         for i in 0..3 {
             let v = &tri.v[i];
-            let px = (v.pos[0] - model.center[0]) * model.scale;
-            let py = (v.pos[1] - model.center[1]) * model.scale;
-            let pz = (v.pos[2] - model.center[2]) * model.scale;
+            let pos = match limb {
+                Some(m) => m.transform_point(v.pos),
+                None => v.pos,
+            };
+            let px = (pos[0] - model.center[0]) * model.scale;
+            let py = (pos[1] - model.center[1]) * model.scale;
+            let pz = (pos[2] - model.center[2]) * model.scale;
 
             let rx = px * cos_y + pz * sin_y;
             let rz = -px * sin_y + pz * cos_y;
@@ -920,8 +1007,16 @@ fn rasterize_avatar(
         let has_tex = tex.is_some();
 
         let mut colors = [[0.0f32; 3]; 3];
+        let normal = match limb {
+            Some(m) => m.transform_dir(tri.normal),
+            None => tri.normal,
+        };
         for i in 0..3 {
             let v = &tri.v[i];
+            let vnormal = match limb {
+                Some(m) => m.transform_dir(v.normal),
+                None => v.normal,
+            };
             let base = if has_tex {
                 None
             } else if v.color != Color32::WHITE {
@@ -930,7 +1025,7 @@ fn rasterize_avatar(
                 Some(tri.base_color)
             };
             let c = shade_studio_vertex(
-                view[i], v.normal, tri.normal, cos_y, sin_y, cos_p, sin_p, base,
+                view[i], vnormal, normal, cos_y, sin_y, cos_p, sin_p, base,
             );
             colors[i] = [c.r() as f32, c.g() as f32, c.b() as f32];
         }
@@ -1039,6 +1134,15 @@ pub fn render_avatar_viewport(
     let (rect, resp) = ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
+    // Animation preview: advance one tick and ask for the next frame *only* while a clip is
+    // actually playing in the 3D viewport. Stopped, 2D mode or another page = no repaint at
+    // all, so the preview costs 0% CPU when idle.
+    if state.is_3d && state.model.is_some() && state.anim.needs_repaint() {
+        let dt = ui.input(|i| i.stable_dt);
+        state.anim.advance(dt);
+        ui.ctx().request_repaint();
+    }
+
     // 1. Studio backdrop gradient
     let top_col = if dark_mode {
         Color32::from_rgb(28, 33, 44)
@@ -1098,6 +1202,8 @@ pub fn render_avatar_viewport(
     let has_3d_model = state.model.is_some();
 
     let textures_ready = state.pending_textures.is_empty();
+    let pose = state.anim.pose();
+    let anim_frame = state.anim.frame_index();
     if let (true, Some(model)) = (state.is_3d, state.model.as_ref()) {
         render_avatar_3d_mesh(
             &painter,
@@ -1108,6 +1214,8 @@ pub fn render_avatar_viewport(
             state.zoom,
             rect,
             textures_ready,
+            &pose,
+            anim_frame,
         );
     } else {
         // Fallback to high-resolution 2D avatar preview.
@@ -1211,6 +1319,7 @@ pub fn render_avatar_viewport(
                         .min_size(Vec2::new(32.0, 24.0));
                     if ui.add(btn_2d).clicked() {
                         state.is_3d = false;
+                        state.anim.stop();
                     }
 
                     // 3D toggle button
@@ -1270,6 +1379,59 @@ pub fn render_avatar_viewport(
             state.yaw = DEFAULT_YAW;
             state.pitch = DEFAULT_PITCH;
             state.zoom = 1.0;
+        }
+
+        // Play / Stop the animation preview. Clicking an animation item picks the clip; this
+        // pill pauses and resumes it without leaving the viewport.
+        let playing = state.anim.is_playing();
+        let can_play = state.is_3d && state.model.is_some();
+        let pill_fill = if dark_mode {
+            Color32::from_rgba_unmultiplied(18, 22, 30, 220)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+        };
+        let pill_stroke = Stroke::new(
+            1.0,
+            if dark_mode {
+                Color32::from_rgb(50, 58, 76)
+            } else {
+                Color32::from_rgb(205, 212, 224)
+            },
+        );
+        let pill_text = if playing {
+            Color32::from_rgb(255, 120, 120)
+        } else if can_play {
+            Color32::from_rgb(0, 190, 120)
+        } else if dark_mode {
+            Color32::from_rgb(110, 118, 134)
+        } else {
+            Color32::from_rgb(150, 158, 172)
+        };
+        let play_btn = egui::Button::new(
+            egui::RichText::new(if playing { "❚❚ Stop" } else { "▶ Play" })
+                .size(11.5)
+                .strong()
+                .color(pill_text),
+        )
+        .fill(pill_fill)
+        .stroke(pill_stroke)
+        .corner_radius(14)
+        .min_size(Vec2::new(28.0, 26.0));
+        let tip = match (state.anim.kind(), playing) {
+            (Some(kind), true) => format!("Stop the {} preview", kind.label()),
+            (Some(kind), false) => format!("Play the {} preview", kind.label()),
+            (None, _) => "Click an animation item to preview it here".to_string(),
+        };
+        let play_resp = ui.add_enabled(can_play, play_btn).on_hover_text(tip);
+        if play_resp.clicked() {
+            if state.anim.kind().is_some() {
+                state.anim.toggle();
+            } else {
+                state.anim.play(AnimationKind::Idle);
+            }
+            if state.anim.is_playing() {
+                ui.ctx().request_repaint();
+            }
         }
     });
 

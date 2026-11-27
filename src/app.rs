@@ -5957,6 +5957,15 @@ impl eframe::App for Creblox {
                         st.wearing = wearing;
                     }
                     self.avatar_err = None;
+                    // Animation items preview immediately on the 3D avatar, on top of the
+                    // normal equip sync.
+                    if let Some(kind) = crate::avatar_anim::AnimationKind::from_asset(
+                        item.asset_type_id,
+                        &item.asset_type_name,
+                    ) {
+                        self.avatar_3d.anim.play(kind);
+                        self.ctx.request_repaint();
+                    }
                     self.status = if equipped {
                         format!("Equipped {}", item.name)
                     } else {
