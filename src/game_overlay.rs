@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use crate::api::{games_by_places, lookup_server_location};
 use crate::auth::data_dir;
 use crate::fastflags::{FastFlagsConfig, build_client_app_settings};
+use crate::overlay_spec;
 use crate::types::Settings;
 
 pub const OVERLAY_WINDOW_FLAG: &str = "--overlay-window";
@@ -157,7 +158,7 @@ impl OverlayConfig {
                         Value::String(t) => t.clone(),
                         other => other.to_string(),
                     };
-                    shorten(&format!("{k} = {val}"), 52)
+                    overlay_spec::shorten(&format!("{k} = {val}"), 52)
                 })
                 .collect();
             FlagsPanelCfg {
@@ -218,15 +219,6 @@ impl OverlayConfig {
             || self.image.is_some()
             || self.crosshair.is_some()
     }
-}
-
-fn shorten(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -307,9 +299,12 @@ impl OverlayManager {
             }
             return;
         }
+        // Seed from the server the watcher already reported: starting the overlay mid-session
+        // must not cost the player a tick of "Server info unavailable".
+        let known_server = LAST_SERVER.lock().ok().and_then(|g| g.clone());
         let shared = Arc::new(Mutex::new(Shared {
             cfg,
-            server: None,
+            server: known_server,
             server_since: Instant::now(),
             locations: HashMap::new(),
             game_info: None,
@@ -322,6 +317,9 @@ impl OverlayManager {
             .name("creblox-overlay".to_string())
             .spawn(move || run_loop(thread_shared));
         if let Ok(thread) = thread {
+            if let Ok(mut slot) = LIVE.lock() {
+                *slot = Some(Arc::downgrade(&shared));
+            }
             self.running = Some(Running { shared, thread });
         }
     }
@@ -329,19 +327,7 @@ impl OverlayManager {
     /// Tells the overlays which server the game joined: `(ip, job id, place id)`.
     pub fn set_server(&mut self, server: Option<ServerData>) {
         self.reap();
-        let Some(r) = &self.running else {
-            return;
-        };
-        let new = server;
-        if let Ok(mut g) = r.shared.lock() {
-            if g.server != new {
-                g.server = new;
-                g.server_since = Instant::now();
-                g.game_info = None;
-                g.dirty = true;
-                g.rev = g.rev.wrapping_add(1);
-            }
-        }
+        publish_server(server);
     }
 
     /// Puts the running overlay into (or out of) interactive position editing.
@@ -365,6 +351,9 @@ impl OverlayManager {
 
     /// Asks the overlays to close without blocking the caller.
     pub fn stop(&mut self) {
+        if let Ok(mut slot) = LIVE.lock() {
+            *slot = None;
+        }
         if let Some(r) = self.running.take() {
             if let Ok(mut g) = r.shared.lock() {
                 g.stop = true;
@@ -380,6 +369,9 @@ impl OverlayManager {
 
     /// Closes the overlays and waits until the overlay window process is gone.
     pub fn stop_and_wait(&mut self) {
+        if let Ok(mut slot) = LIVE.lock() {
+            *slot = None;
+        }
         if let Some(r) = self.running.take() {
             if let Ok(mut g) = r.shared.lock() {
                 g.stop = true;
@@ -398,6 +390,50 @@ impl Drop for OverlayManager {
 // ---------------------------------------------------------------------------
 // Background thread
 // ---------------------------------------------------------------------------
+
+/// The running overlay loop, so the Roblox watcher can hand it the server it just resolved
+/// without going through the launcher window.
+///
+/// The launcher is normally hidden for the whole game (`close_launcher_during_game`, the tray
+/// default), so its event loop is not reading messages while the player is in a match. When the
+/// only path from "watcher found the server" to "the HUD knows the server" was that event loop,
+/// the overlay kept the snapshot it was started with: `Server info unavailable` and `-- ms` for
+/// the entire session. The watcher thread now writes the server straight into this state.
+static LIVE: Mutex<Option<std::sync::Weak<Mutex<Shared>>>> = Mutex::new(None);
+
+/// The last server any thread reported. A newly started overlay window is seeded from it, so it
+/// never has to wait for another change to learn which server the player is already in.
+static LAST_SERVER: Mutex<Option<ServerData>> = Mutex::new(None);
+
+fn publish_server(server: Option<ServerData>) {
+    if let Ok(mut last) = LAST_SERVER.lock() {
+        *last = server.clone();
+    }
+    let Some(shared) = LIVE
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
+    else {
+        return;
+    };
+    let Ok(mut g) = shared.lock() else {
+        return;
+    };
+    if g.server != server {
+        g.server = server;
+        g.server_since = Instant::now();
+        g.game_info = None;
+        g.dirty = true;
+        g.rev = g.rev.wrapping_add(1);
+    }
+}
+
+/// Reports the server the watcher resolved (or `None` when the player left the game).
+///
+/// Safe to call from any thread and at any time: it only updates an overlay that is running.
+pub fn set_live_server(server: Option<ServerData>) {
+    publish_server(server);
+}
 
 fn sleep_unless_stopped(shared: &Arc<Mutex<Shared>>, total: Duration) -> bool {
     let step = Duration::from_millis(100);
@@ -849,16 +885,6 @@ fn find_roblox_pid_by_name() -> Option<u32> {
     None
 }
 
-fn fmt_session(elapsed: Duration) -> String {
-    let secs = elapsed.as_secs();
-    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
-    }
-}
-
 fn run_loop(shared: Arc<Mutex<Shared>>) {
     let dir = data_dir();
     // One spec file per run, so an overlay window that is still shutting down can never read
@@ -909,6 +935,9 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     // What was last written to log.txt, so only changes are logged.
     let mut logged_pid: Option<Option<u32>> = None;
     let mut logged_server: Option<Option<String>> = None;
+    // The `(job, region, ping)` triple last written into the spec, so log.txt gets one
+    // line per resolved server instead of one per tick.
+    let mut logged_spec: Option<(String, String, String)> = None;
 
     loop {
         let (cfg, server, since, locations, game_info, rev) = {
@@ -1062,161 +1091,79 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             None => session_start.elapsed(),
         };
 
-        let mut panels: Vec<Value> = Vec::new();
-
-        // The server panel is drawn even before the server is known. With only this
-        // overlay enabled (the default) an unresolved server used to mean *no panels at
-        // all*, so the overlay window was on screen but completely empty - which looked
-        // exactly like "the overlay does not work".
-        if let Some(sp) = &cfg.server {
-            match &server {
-                Some(s) => {
-                    let visible = sp.duration_secs == 0
-                        || since.elapsed() < Duration::from_secs(sp.duration_secs as u64);
-                    if visible {
-                        let title = match locations.get(&s.ip) {
-                            Some(loc) => format!("Server: {loc}"),
-                            None => "Server: locating...".to_string(),
-                        };
-                        let mut lines = Vec::new();
-                        if sp.show_ip {
-                            lines.push(s.ip.clone());
-                        }
-                        if sp.show_job_id && !s.job_id.is_empty() {
-                            lines.push(format!("Job ID: {}", s.job_id));
-                        }
-                        panels.push(json!({
-                            "id": "server",
-                            "corner": sp.corner,
-                            "title": title,
-                            "lines": lines
-                        }));
-                    }
-                }
-                None => {
-                    // No duration here: this shows until a server is detected, so there is
-                    // always something on screen as soon as the game starts. If the log never
-                    // yields an address, say so instead of spinning on "Detecting..." forever.
-                    let text = if session_start.elapsed() < Duration::from_secs(20) {
-                        "Detecting server..."
-                    } else {
-                        "Server info unavailable"
-                    };
-                    panels.push(json!({
-                        "id": "server",
-                        "corner": sp.corner,
-                        "title": "CREBLOX overlay",
-                        "lines": [text]
-                    }));
-                }
-            }
-        }
-
-        // Position editor with no game running: draw the real HUD with clearly marked
-        // sample numbers, so there is something to drag and the editor is useful before a
-        // session starts. The title says "preview", the values are never presented as live.
-        if cfg.edit && server.is_none() {
-            let corner = cfg.server.as_ref().map(|s| s.corner).unwrap_or(3);
-            panels.push(json!({
-                "id": "preview",
-                "corner": corner,
-                "title": "CREBLOX overlay · preview",
-                "lines": [
-                    "Region: Preview",
-                    "Ping: 42 ms",
-                    "CPU: 12%",
-                    "RAM: 640 MB",
-                    "Flags: Competitive (6)"
-                ]
-            }));
-        }
-
-        if let (Some(gp), Some(s)) = (&cfg.game, &server) {
-            let title = match &game_info {
-                Some((name, _)) => shorten(name, 36),
-                None => "Game".to_string(),
-            };
-            let mut lines = Vec::new();
-            if s.place_id != 0 {
-                lines.push(format!("Place ID {}", s.place_id));
-            }
-            if let Some((_, playing)) = &game_info {
-                lines.push(format!("Playing  {playing}"));
-            }
-            lines.push(format!("In server {}", fmt_session(since.elapsed())));
-            panels.push(json!({"id": "game", "corner": gp.corner, "title": title, "lines": lines}));
-        }
-
-        if let Some(st) = &cfg.stats {
-            let mut lines: Vec<String> = Vec::new();
-            if st.cpu || st.ram {
-                if st.cpu {
-                    lines.push(if usage.have {
-                        format!("CPU      {:.0}%", usage.cpu)
-                    } else {
-                        "CPU      --".to_string()
-                    });
-                }
-                if st.ram {
-                    lines.push(if usage.have {
-                        format!("RAM      {:.0} MB", usage.mem_mb)
-                    } else {
-                        "RAM      --".to_string()
-                    });
-                }
-            }
-            if st.ping {
-                let p = ping_ms.load(Ordering::Relaxed);
-                lines.push(if p == NO_PING {
-                    "Ping     -- ms".to_string()
-                } else {
-                    format!("Ping     {p} ms")
-                });
-            }
-            if let Some(fps) = st.fps_cap {
-                lines.push(format!("FPS cap  {fps}"));
-            }
-            if st.session {
-                lines.push(format!("Session  {}", fmt_session(session_elapsed)));
-            }
-            if st.clock {
-                lines.push(format!("Time     {}", local_clock()));
-            }
-            if !lines.is_empty() {
-                panels.push(json!({
-                    "id": "stats",
-                    "corner": st.corner,
-                    "title": "Roblox stats",
-                    "lines": lines
-                }));
-            }
-        }
-
-        if let Some(fl) = &cfg.flags {
-            let total = fl.flags.len();
-            let mut lines: Vec<String> = fl.flags.iter().take(fl.max_lines).cloned().collect();
-            if total > fl.max_lines {
-                lines.push(format!("+{} more", total - fl.max_lines));
-            }
-            if lines.is_empty() {
-                lines.push("No FastFlags are active".to_string());
-            }
-            panels.push(json!({
-                "id": "flags",
-                "corner": fl.corner,
-                "title": format!("FastFlags {} ({total})", fl.preset),
-                "lines": lines
-            }));
-        }
-
-        let mut spec = json!({
-            "opacity": cfg.opacity,
-            "game_active": cfg.game_active,
-            "offset_x": cfg.offset_x,
-            "offset_y": cfg.offset_y,
-            "edit": cfg.edit,
-            "panels": panels
+        // The assembly itself lives in `overlay_spec`, where `vm-tests` can assert the exact
+        // bytes the HUD receives; this maps the live state onto it.
+        let server_panel = cfg.server.as_ref().map(|sp| overlay_spec::ServerPanel {
+            corner: sp.corner,
+            duration_secs: sp.duration_secs,
+            show_ip: sp.show_ip,
+            show_job_id: sp.show_job_id,
         });
+        let stats_panel = cfg.stats.as_ref().map(|st| overlay_spec::StatsPanel {
+            corner: st.corner,
+            cpu: st.cpu,
+            ram: st.ram,
+            ping: st.ping,
+            session: st.session,
+            clock: st.clock,
+            fps_cap: st.fps_cap,
+        });
+        let flags_panel = cfg.flags.as_ref().map(|fl| overlay_spec::FlagsPanel {
+            corner: fl.corner,
+            max_lines: fl.max_lines,
+            preset: fl.preset.to_string(),
+            flags: fl.flags.clone(),
+        });
+        let game_panel = cfg
+            .game
+            .as_ref()
+            .map(|gp| overlay_spec::GamePanel { corner: gp.corner });
+        let region = server
+            .as_ref()
+            .and_then(|s| locations.get(&s.ip))
+            .map(String::as_str);
+        let rtt = match ping_ms.load(Ordering::Relaxed) {
+            NO_PING => None,
+            p => Some(p),
+        };
+        let panels = overlay_spec::build(
+            &overlay_spec::Panels {
+                server: server_panel.as_ref(),
+                stats: stats_panel.as_ref(),
+                flags: flags_panel.as_ref(),
+                game: game_panel.as_ref(),
+            },
+            &overlay_spec::Live {
+                server: server.as_ref().map(|s| overlay_spec::LiveServer {
+                    ip: s.ip.as_str(),
+                    job_id: s.job_id.as_str(),
+                    place_id: s.place_id,
+                }),
+                server_age_secs: match &server {
+                    Some(_) => since.elapsed().as_secs(),
+                    None => 0,
+                },
+                session_secs: session_elapsed.as_secs(),
+                detect_secs: session_start.elapsed().as_secs(),
+                region,
+                ping_ms: rtt,
+                game: game_info
+                    .as_ref()
+                    .map(|(name, playing)| (name.as_str(), Some(*playing))),
+                cpu_pct: usage.have.then_some(usage.cpu),
+                ram_mb: usage.have.then_some(usage.mem_mb),
+                clock: local_clock(),
+                edit_preview: cfg.edit,
+            },
+        );
+        let mut spec = overlay_spec::spec_json(
+            cfg.opacity,
+            cfg.game_active,
+            cfg.offset_x,
+            cfg.offset_y,
+            cfg.edit,
+            panels,
+        );
         if let Some(img) = &cfg.image {
             spec["image"] = json!({
                 "path": img.path,
@@ -1244,6 +1191,25 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         if text != last_text {
             write_spec(&spec_path, &text);
             last_text = text;
+            // One line when the panels start describing a real server: the overlay window
+            // logs its own `spec loaded (...)`, so the pair is what shows a resolved server
+            // reached the HUD instead of the snapshot it opened with.
+            let resolved = server.as_ref().map(|s| {
+                (
+                    format!("{}:{}", s.job_id, s.place_id),
+                    region.unwrap_or("locating...").to_string(),
+                    rtt.map(|p| p.to_string())
+                        .unwrap_or_else(|| "--".to_string()),
+                )
+            });
+            if resolved != logged_spec {
+                if let Some((_, loc, ms)) = &resolved {
+                    crate::auth::log(&format!(
+                        "overlay: updated panels spec with server {loc} ({ms} ms)"
+                    ));
+                }
+                logged_spec = resolved;
+            }
         }
         // Clear only the wake this tick consumed. A change that arrived while the spec
         // above was being built bumped `rev`; keeping `dirty` set makes the sleep below

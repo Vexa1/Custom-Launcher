@@ -12,6 +12,7 @@ mod game_log;
 mod sha256;
 mod game_overlay;
 mod net_probe;
+mod overlay_spec;
 mod overlay_window;
 mod party;
 mod party_server;

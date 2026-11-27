@@ -23,6 +23,9 @@ pub mod game_log;
 #[path = "../../src/net_probe.rs"]
 pub mod net_probe;
 
+#[path = "../../src/overlay_spec.rs"]
+pub mod overlay_spec;
+
 #[path = "../../src/party.rs"]
 pub mod party;
 

@@ -1128,6 +1128,18 @@ pub fn start_roblox_watcher(
                     )),
                 }
                 last_sent_server = Some(active_server.clone());
+                // Straight into the running overlay's state, not only into a window message:
+                // the launcher is hidden for the whole game, so its event loop is not reading
+                // messages and the HUD kept the snapshot it opened with (the "Server info
+                // unavailable" / "-- ms" that never cleared).
+                crate::game_overlay::set_live_server(active_server.as_ref().map(|s| {
+                    crate::game_overlay::ServerData {
+                        ip: s.ip.clone(),
+                        port: s.port,
+                        job_id: s.job_id.clone(),
+                        place_id: s.place_id,
+                    }
+                }));
                 let _ = tx.send(Msg::RobloxServerUpdated(active_server));
                 ctx.request_repaint();
             }
