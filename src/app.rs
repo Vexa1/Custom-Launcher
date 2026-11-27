@@ -4963,12 +4963,11 @@ impl eframe::App for Creblox {
                 if let Some(result) = crate::game_overlay::take_position_result() {
                     self.overlay_editing = false;
                     if result.confirmed {
-                        self.settings.overlay_offset_x = result.offset_x;
-                        self.settings.overlay_offset_y = result.offset_y;
+                        self.settings.overlay_panels = result.panels;
                         save_settings(&self.settings);
                         self.status = format!(
-                            "HUD position saved ({}, {})",
-                            result.offset_x, result.offset_y
+                            "HUD positions saved ({} panels)",
+                            self.settings.overlay_panels.len()
                         );
                     } else {
                         self.status = "HUD position unchanged".to_string();

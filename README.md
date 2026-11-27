@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.16
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.17
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -220,10 +220,11 @@ condition that kept the window hidden.
 (`app.rs:4056` only skips the start when editing is off), makes the window accept clicks
 (`setIgnoresMouseEvents:NO`, `makeKeyAndOrderFront:`), and draws the real HUD with a
 `CREBLOX overlay · preview` panel of **sample** values - clearly labelled, never presented as
-live - so there is something to drag. Drag anywhere on the HUD, `⏎`/Confirm saves the offset
-to `settings.json` and hands input back to the game (`setIgnoresMouseEvents:YES`), `Esc`
-reverts. The dashed 1 px frame, edge guides, live `x, y` readout and Reset/Confirm pills are
-drawn in `overlay_window.rs::paint_edit`.
+live - so there is something to place. Every card has its own dashed box and its own drag
+hitbox: move one and only that card moves. `Enter`/Confirm saves every panel's position to
+`settings.json` and hands input back to the game (`setIgnoresMouseEvents:YES`), `Esc` reverts.
+The per-panel outlines, the active card's accent border, edge guides, its live `x, y` readout
+and the Reset/Confirm bar are drawn in `overlay_window.rs::paint_edit`.
 
 #### The frozen event loop, and the two panels that never got data (fixed in 0.4.25)
 
@@ -317,19 +318,24 @@ The transitions are one pure table in `window_lifecycle.rs`, asserted in `vm-tes
 
 1. **Menu bar → Edit Overlay Position…** (same entry in the Windows tray menu). The overlay
    opens even when no game is running, so the HUD can be placed any time.
-2. The HUD becomes draggable: click-through is switched off, a dashed hairline frames it,
-   the live `X, Y` offset is shown, guides appear near screen edges, and **Reset** /
-   **Confirm** pills sit under it. It is clamped to the visible area, so it cannot be lost
-   off-screen (`clamp_offset`, `overlay_window.rs:1337`).
-3. **Confirm** (or Return) saves the offset to `settings.json` (`overlay_offset_x` /
-   `overlay_offset_y`), restores click-through and non-activating behaviour, and puts the
-   tray item back. **Esc** reverts to the last saved position.
+2. Every HUD card gets its own dashed box and its own drag hitbox: `CREBLOX OVERLAY`, the
+   preview card, `ROBLOX STATS`, the FastFlags card and the game card all move independently.
+   The card under the pointer (or being dragged) gets a crisp accent border, the bar shows its
+   id and live `X, Y` offset, and guides appear near screen edges. Each card is clamped to the
+   visible area on its own, so none can be lost off-screen.
+3. **Confirm** (or Enter) saves **every** panel's position to `settings.json`
+   (`overlay_panels`, one `{id, x, y}` per card), rewrites `overlay-panels-<id>.json` with
+   those offsets, restores click-through and non-activating behaviour, and puts the tray
+   item back. **Esc** reverts to the last saved positions; **Reset** puts every card back in
+   its corner slot.
 
-Only an offset from the corner is stored, never an absolute screen position, so the HUD stays
-anchored across resolution and display changes. The editor lives in `paint_edit`
-(`overlay_window.rs:1133`); the answer travels back to the launcher through
-`overlay-position.json` (`take_position_result`, `game_overlay.rs:437`) because the overlay
-process owns the pointer while the launcher owns the config.
+Only an offset from each panel's own corner is stored, never an absolute screen position, so
+the HUD stays anchored across resolution and display changes. A panel with no saved entry
+sits in its corner slot, already stacked clear of the others; a pre-0.5.17 settings file with
+one `overlay_offset_x`/`overlay_offset_y` has that offset folded into the server card. The
+editor lives in `paint_edit` (`overlay_window.rs`); the answer travels back to the launcher
+through `overlay-position.json` (`take_position_result`, `game_overlay.rs`) because the
+overlay process owns the pointer while the launcher owns the config.
 
 #### Why the overlay costs almost nothing
 
@@ -489,7 +495,7 @@ to reach CREBLOX without leaving the session.
 | Close Roblox | `TrayState.roblox_running` | Calls `kill_all_roblox_processes` (`roblox_process.rs:932`) — the same function Settings uses — **on a worker thread**, reporting the count back through `Msg::RobloxKilled`, so a tray click cannot stall the window while the kills run. Disabled when no player process is alive. macOS menu only; Windows keeps the action in Settings. |
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
-| Edit Overlay Position… | — | Opens the on-screen HUD editor: drag it, then Confirm (⏎) or Esc. Disabled while the editor is open, and when every overlay is off. |
+| Edit Overlay Position… | — | Opens the on-screen HUD editor: every card has its own dashed box and drags on its own; Confirm (Enter) saves them all, Esc reverts, Reset restores the corner slots. Disabled while the editor is open, and when every overlay is off. |
 | Dock icon (click) | — | Reopens a window you hid yourself (Hide to Menu Bar, `Cmd+H`). While CREBLOX is tucked in the menu bar for a game there is no Dock icon and no automatic restore: **Open CREBLOX** is the way back. See [Window lifecycle](#window-lifecycle). |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
 

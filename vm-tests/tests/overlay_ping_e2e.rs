@@ -242,8 +242,6 @@ fn the_pipeline_from_a_roblox_log_to_a_rendered_live_ping() {
     let before = overlay_spec::spec_json(
         0.9,
         true,
-        0,
-        0,
         false,
         overlay_spec::build(
             &Panels {
@@ -268,8 +266,6 @@ fn the_pipeline_from_a_roblox_log_to_a_rendered_live_ping() {
     let after = overlay_spec::spec_json(
         0.9,
         true,
-        0,
-        0,
         false,
         overlay_spec::build(
             &Panels {
@@ -473,8 +469,6 @@ fn a_filtered_datacenter_relay_gets_its_ping_without_probing_it() {
     let text = overlay_spec::spec_json(
         0.9,
         true,
-        0,
-        0,
         false,
         overlay_spec::build(
             &Panels {

@@ -333,6 +333,33 @@ pub fn set_crosshair(spec: &mut Value, crosshair: Option<Value>) {
     }
 }
 
+/// The panel positions the editor reported, or the legacy single offset folded into the
+/// server card.
+///
+/// Before per-panel positions there was one offset for the whole stack. An old settings file
+/// still loads, and its saved spot moves the card that used to own the stack instead of being
+/// dropped on the floor.
+pub fn parse_panel_offsets(v: &Value, legacy_x: i16, legacy_y: i16) -> Vec<PanelOffset> {
+    match v.as_array() {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|p| {
+                Some(PanelOffset {
+                    id: p["id"].as_str()?.to_string(),
+                    x: p["x"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+                    y: p["y"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+                })
+            })
+            .collect(),
+        None if legacy_x != 0 || legacy_y != 0 => vec![PanelOffset {
+            id: "server".to_string(),
+            x: legacy_x,
+            y: legacy_y,
+        }],
+        None => Vec::new(),
+    }
+}
+
 /// The `Ping` row: the live game-server RTT, or `-- ms` with the path that failed.
 ///
 /// `Ping     -- ms (tcp)` is the same fact `log.txt` records, shown where the player is
@@ -359,20 +386,40 @@ pub fn write_atomic(path: &std::path::Path, text: &str) -> bool {
     std::fs::rename(&tmp, path).is_ok()
 }
 
+/// One HUD panel's position, in points from its own corner anchor.
+///
+/// Every panel moves on its own: the server card, the stats card and the rest each carry one
+/// of these in `settings.json` and in `overlay-panels-<id>.json`. `0, 0` is the panel's corner
+/// slot, which is already stacked against the other panels in that corner.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PanelOffset {
+    pub id: String,
+    pub x: i16,
+    pub y: i16,
+}
+
+/// Writes every panel's saved `(x, y)` into the panels JSON the overlay window reads.
+///
+/// A panel with no saved entry is written as `0, 0`, so the overlay never has to guess. The
+/// values are clamped to the range the editor can produce - a hand-edited settings file can
+/// then never park a card a million points off-screen.
+pub fn apply_panel_offsets(panels: &mut [Value], offsets: &[PanelOffset]) {
+    for panel in panels {
+        let id = panel["id"].as_str().unwrap_or_default().to_string();
+        let found = offsets.iter().rev().find(|o| o.id == id);
+        let (x, y) = found
+            .map(|o| (o.x.clamp(-8000, 8000), o.y.clamp(-8000, 8000)))
+            .unwrap_or((0, 0));
+        panel["offset_x"] = json!(x);
+        panel["offset_y"] = json!(y);
+    }
+}
+
 /// The whole file the overlay window reads.
-pub fn spec_json(
-    opacity: f32,
-    game_active: bool,
-    offset_x: i16,
-    offset_y: i16,
-    edit: bool,
-    panels: Vec<Value>,
-) -> Value {
+pub fn spec_json(opacity: f32, game_active: bool, edit: bool, panels: Vec<Value>) -> Value {
     json!({
         "opacity": opacity,
         "game_active": game_active,
-        "offset_x": offset_x,
-        "offset_y": offset_y,
         "edit": edit,
         "panels": panels
     })

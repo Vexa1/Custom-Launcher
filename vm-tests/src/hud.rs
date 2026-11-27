@@ -32,6 +32,45 @@ const GAP: f32 = 8.0;
 const PAD: f32 = 12.0;
 const ROW_H: f32 = 17.0;
 
+// `overlay_window::paint_edit`: the draggable-card outline and the active-card accent.
+const ACCENT: Color32 = Color32::from_rgb(120, 170, 255);
+
+fn outline() -> Color32 {
+    Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+}
+
+/// A dashed rectangle, exactly the pattern the shipping editor paints.
+fn dashed_rect(painter: &egui::Painter, frame: Rect, color: Color32, px: f32) {
+    let dash = 6.0;
+    let stroke = Stroke::new(px, color);
+    let mut x = frame.left();
+    while x < frame.right() {
+        let end = (x + dash).min(frame.right());
+        painter.line_segment(
+            [Pos2::new(x, frame.top()), Pos2::new(end, frame.top())],
+            stroke,
+        );
+        painter.line_segment(
+            [Pos2::new(x, frame.bottom()), Pos2::new(end, frame.bottom())],
+            stroke,
+        );
+        x += dash * 2.0;
+    }
+    let mut y = frame.top();
+    while y < frame.bottom() {
+        let end = (y + dash).min(frame.bottom());
+        painter.line_segment(
+            [Pos2::new(frame.left(), y), Pos2::new(frame.left(), end)],
+            stroke,
+        );
+        painter.line_segment(
+            [Pos2::new(frame.right(), y), Pos2::new(frame.right(), end)],
+            stroke,
+        );
+        y += dash * 2.0;
+    }
+}
+
 /// One HUD line split into a muted micro-label and a tabular value, as `overlay_window` does.
 struct Row {
     /// Already tracked (uppercase with U+2009), like `Panel::rows` in the shipping window.
@@ -95,6 +134,23 @@ fn tone(label: &str, value: &str) -> Option<Color32> {
 /// Draws the HUD `spec` over a game-like backdrop and registers every text box, so the layout
 /// rules (`Probe::problems`) can reject a clipped or overlapping HUD.
 pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value, now_ms: u64) {
+    draw_impl(ui, probe, spec, now_ms, None)
+}
+
+/// The position editor, mirrored from `overlay_window::paint_edit`: a dashed box around every
+/// card, an accent box on `active` and the bottom bar with that card's live `(x, y)`, the drag
+/// hint and Reset / Confirm.
+pub fn draw_edit(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value, now_ms: u64, active: &str) {
+    draw_impl(ui, probe, spec, now_ms, Some(active))
+}
+
+fn draw_impl(
+    ui: &mut egui::Ui,
+    probe: &mut Probe,
+    spec: &Value,
+    now_ms: u64,
+    edit: Option<&str>,
+) {
     let area = ui.max_rect();
     let painter = ui.painter().clone();
     for i in 0..160 {
@@ -125,6 +181,8 @@ pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value, now_ms: u64) {
     let Some(panels) = spec["panels"].as_array() else {
         return;
     };
+    // Every card's final rect, for the editor's bar and its active-panel outline.
+    let mut placed: Vec<(String, Rect)> = Vec::with_capacity(panels.len());
     for (pi, panel) in panels.iter().enumerate() {
         let title = tracked(panel["title"].as_str().unwrap_or(""));
         // Live rows are formatted here, exactly as `overlay_window::tick_timers` does it: the
@@ -203,9 +261,33 @@ pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value, now_ms: u64) {
             area.bottom() - size.y - MARGIN - used[corner]
         };
         used[corner] += size.y + GAP;
-        let rect = Rect::from_min_size(Pos2::new(x, y), size);
+        // Each card carries its own offset, exactly like `overlay_window::relayout`.
+        let offset = Vec2::new(
+            panel["offset_x"].as_f64().unwrap_or(0.0) as f32,
+            panel["offset_y"].as_f64().unwrap_or(0.0) as f32,
+        );
+        let rect = Rect::from_min_size(Pos2::new(x + offset.x, y + offset.y), size);
         let panel_id = format!("hud.panel.{pi}");
+        let panel_key = panel["id"].as_str().unwrap_or_default().to_string();
+        placed.push((panel_key.clone(), rect));
         probe.widget(panel_id.clone(), rect, false);
+        if let Some(active) = edit {
+            let is_active = active == panel_key;
+            dashed_rect(
+                &painter,
+                rect.expand(4.0),
+                if is_active { ACCENT } else { outline() },
+                px,
+            );
+            if is_active {
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(8),
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Outside,
+                );
+            }
+        }
 
         let alpha = (opacity * 255.0).round() as u8;
         let surface = Color32::from_rgba_unmultiplied(SURFACE.r(), SURFACE.g(), SURFACE.b(), alpha);
@@ -290,4 +372,135 @@ pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value, now_ms: u64) {
             }
         }
     }
+
+    let Some(active) = edit else {
+        return;
+    };
+    let Some((_, panel_rect)) = placed.iter().find(|(id, _)| id == active) else {
+        return;
+    };
+    let panel_rect = *panel_rect;
+    let offset_x = panels
+        .iter()
+        .find(|p| p["id"].as_str() == Some(active))
+        .and_then(|p| p["offset_x"].as_i64())
+        .unwrap_or(0);
+    let offset_y = panels
+        .iter()
+        .find(|p| p["id"].as_str() == Some(active))
+        .and_then(|p| p["offset_y"].as_i64())
+        .unwrap_or(0);
+
+    // The same measured bar as `overlay_window::paint_edit`: every part starts where the one
+    // before it ends, so the hint can never land on the Reset pill.
+    let readout = format!("{active}  {offset_x}, {offset_y}");
+    let readout_g = painter.layout_no_wrap(readout.clone(), FontId::monospace(11.5), VALUE);
+    let pad = 10.0;
+    let gap = 10.0;
+    let btn_w = 60.0;
+    let confirm_w = 78.0;
+    let bar_h = 36.0;
+    let label_font = FontId::proportional(10.0);
+    let fixed = pad + readout_g.size().x + gap + gap + btn_w + 6.0 + confirm_w + pad;
+    let room = (area.width() - 16.0).max(120.0);
+    let mut hint = "drag · Enter save · Esc cancel";
+    let mut hint_g = painter.layout_no_wrap(hint.to_string(), label_font.clone(), LABEL);
+    if fixed + hint_g.size().x > room {
+        hint = "drag · Enter save";
+        hint_g = painter.layout_no_wrap(hint.to_string(), label_font.clone(), LABEL);
+    }
+    if fixed + hint_g.size().x > room {
+        hint = "drag · Enter";
+        hint_g = painter.layout_no_wrap(hint.to_string(), label_font.clone(), LABEL);
+    }
+    let bar_w = (fixed + hint_g.size().x).min(room);
+    let below = panel_rect.max.y + 12.0;
+    let bar_y = if below + bar_h <= area.max.y - 8.0 {
+        below
+    } else {
+        (panel_rect.min.y - 12.0 - bar_h).max(area.min.y + 8.0)
+    };
+    let bar_x = panel_rect.min.x.clamp(
+        area.min.x + 8.0,
+        (area.max.x - bar_w - 8.0).max(area.min.x + 8.0),
+    );
+    let bar = Rect::from_min_size(Pos2::new(bar_x, bar_y), Vec2::new(bar_w, bar_h));
+    painter.rect_filled(bar, CornerRadius::same(8), SURFACE);
+    painter.rect_stroke(
+        bar,
+        CornerRadius::same(8),
+        Stroke::new(px, HAIRLINE),
+        egui::StrokeKind::Inside,
+    );
+    probe.widget("hud.edit.bar", bar, false);
+
+    let confirm = Rect::from_min_size(
+        Pos2::new(bar.right() - pad - confirm_w, bar.top() + 5.0),
+        Vec2::new(confirm_w, bar_h - 10.0),
+    );
+    let reset = Rect::from_min_size(
+        Pos2::new(confirm.left() - 6.0 - btn_w, bar.top() + 5.0),
+        Vec2::new(btn_w, bar_h - 10.0),
+    );
+    let readout_pos = Pos2::new(bar.left() + pad, bar.center().y);
+    let hint_pos = Pos2::new(readout_pos.x + readout_g.size().x + gap, bar.center().y);
+    painter.text(
+        readout_pos,
+        egui::Align2::LEFT_CENTER,
+        &readout,
+        FontId::monospace(11.5),
+        VALUE,
+    );
+    painter.text(
+        hint_pos,
+        egui::Align2::LEFT_CENTER,
+        hint,
+        label_font,
+        LABEL,
+    );
+    probe.text(
+        "hud.edit.readout",
+        Rect::from_min_size(
+            Pos2::new(readout_pos.x, bar.center().y - readout_g.size().y / 2.0),
+            readout_g.size(),
+        ),
+        readout_g.size(),
+    );
+    probe.text(
+        "hud.edit.hint",
+        Rect::from_min_size(
+            Pos2::new(hint_pos.x, bar.center().y - hint_g.size().y / 2.0),
+            hint_g.size(),
+        ),
+        hint_g.size(),
+    );
+    for (rect, label) in [(reset, "Reset"), (confirm, "Confirm")] {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+        );
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(6),
+            Stroke::new(px, HAIRLINE),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(11.0),
+            VALUE,
+        );
+        let id = format!("hud.edit.{}", label.to_ascii_lowercase());
+        let measured = painter
+            .layout_no_wrap(label.to_string(), FontId::proportional(11.0), VALUE)
+            .size();
+        probe.text(id.clone(), rect, measured);
+        probe.widget(id, rect, true);
+        probe.contrast(format!("hud.edit.{}", label.to_ascii_lowercase()), VALUE, SURFACE);
+    }
+    probe.contrast("hud.edit.readout", VALUE, SURFACE);
+    probe.contrast("hud.edit.hint", LABEL, SURFACE);
 }

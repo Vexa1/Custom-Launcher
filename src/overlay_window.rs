@@ -614,6 +614,11 @@ struct Panel {
     /// Unix-ms anchor of this panel's live timer (`joined_at_unix_ms`), when it has one.
     /// The launcher writes it once per session; the seconds come from the clock here.
     started_at_ms: Option<u64>,
+    /// Where this panel is drawn, in points from its own corner anchor. The editor moves
+    /// exactly one of these when the user drags one card.
+    offset: egui::Vec2,
+    /// The launcher's saved position for this panel: what Reset and Esc go back to.
+    saved: egui::Vec2,
 }
 
 /// One laid-out row, in game-window coordinates. Built once per spec / scale change; the
@@ -864,16 +869,15 @@ struct OverlayWindowApp {
     /// The launcher says a game session is being played (not just the Roblox menu).
     /// Kept true when the spec does not say, so older specs still show.
     game_active: bool,
-    /// Position from `settings.json`, as the launcher sent it.
-    saved_offset: egui::Vec2,
-    /// Live position: the saved one, or the one being dragged right now.
-    offset: egui::Vec2,
     /// Interactive position editing is on.
     edit: bool,
     /// The user already confirmed/cancelled; ignore the stale `edit: true` in the spec until
     /// the launcher has caught up, otherwise the next spec reload would re-enter edit mode.
     edit_done: bool,
-    dragging: bool,
+    /// The panel being dragged right now, by id (`None` when nothing is moving).
+    dragging: Option<String>,
+    /// The panel under the pointer, by id: it gets the accent outline.
+    hovering: Option<String>,
     /// The window accepts mouse input (edit mode only).
     interactive: bool,
     /// Laid-out panels, in game-window space.
@@ -884,9 +888,6 @@ struct OverlayWindowApp {
     spec_gen: u64,
     /// Window-local origin of the layout (non-zero while the window is trimmed to the HUD).
     shift: egui::Vec2,
-    /// Cached `X, Y` readout, rebuilt only when the rounded offset actually changes.
-    readout: String,
-    readout_at: (i32, i32),
 }
 
 impl OverlayWindowApp {
@@ -916,18 +917,15 @@ impl OverlayWindowApp {
             roblox_running: false,
             session_active: false,
             game_active: true,
-            saved_offset: egui::Vec2::ZERO,
-            offset: egui::Vec2::ZERO,
             edit: false,
             edit_done: false,
-            dragging: false,
+            dragging: None,
+            hovering: None,
             interactive: false,
             layout: Vec::new(),
             layout_stamp: None,
             spec_gen: 0,
             shift: egui::Vec2::ZERO,
-            readout: String::from("0, 0"),
-            readout_at: (0, 0),
         }
     }
 
@@ -970,23 +968,24 @@ impl OverlayWindowApp {
         self.opacity = spec["opacity"].as_f64().unwrap_or(0.9).clamp(0.2, 1.0) as f32;
         self.game_active = spec["game_active"].as_bool().unwrap_or(true);
         self.spec_gen = self.spec_gen.wrapping_add(1);
-        // Where the launcher thinks the HUD sits. Ignored while the user drags: the spec is
-        // rewritten whenever anything but the clock changes, and taking the saved value
-        // again would snap the HUD back under the pointer mid-drag.
-        self.saved_offset = vec2(
-            spec["offset_x"].as_f64().unwrap_or(0.0) as f32,
-            spec["offset_y"].as_f64().unwrap_or(0.0) as f32,
-        );
+        // Positions of the cards the user is moving right now. The launcher rewrites this
+        // file while the editor is open, so they are carried across the reload below -
+        // snapping to the saved values would drop a card out from under the pointer.
+        let live_offsets: Vec<(String, egui::Vec2)> = if self.edit {
+            self.panels
+                .iter()
+                .map(|p| (p.id.clone(), p.offset))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let edit = spec["edit"].as_bool().unwrap_or(false);
         if !edit {
             self.edit = false;
             self.edit_done = false;
-            self.offset = self.saved_offset;
         } else if !self.edit && !self.edit_done {
-            // Entered from the tray: start from the saved position.
+            // Entered from the tray: every card starts where it was last saved.
             self.edit = true;
-            self.offset = self.saved_offset;
-            self.readout_at = (i32::MIN, i32::MIN);
         }
         self.panels = spec["panels"]
             .as_array()
@@ -1013,6 +1012,10 @@ impl OverlayWindowApp {
                         let started_at_ms = p["joined_at_unix_ms"]
                             .as_u64()
                             .filter(|_| lines.iter().any(|l| overlay_spec::has_elapsed(l)));
+                        let offset = vec2(
+                            p["offset_x"].as_f64().unwrap_or(0.0) as f32,
+                            p["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                        );
                         Panel {
                             id: p["id"].as_str().unwrap_or("").to_string(),
                             corner: p["corner"].as_u64().unwrap_or(3).min(3) as u8,
@@ -1021,11 +1024,20 @@ impl OverlayWindowApp {
                             rows,
                             lines,
                             started_at_ms,
+                            offset,
+                            saved: offset,
                         }
                     })
                     .collect()
             })
             .unwrap_or_default();
+        if self.edit {
+            for panel in &mut self.panels {
+                if let Some((_, live)) = live_offsets.iter().find(|(id, _)| *id == panel.id) {
+                    panel.offset = *live;
+                }
+            }
+        }
         self.image = spec
             .get("image")
             .filter(|i| i.is_object())
@@ -1432,19 +1444,27 @@ impl OverlayWindowApp {
             }
             let panel_size = vec2(width, height);
 
+            // The corner slot first (already stacked clear of the panels in that corner),
+            // then this panel's own offset: the spot the user dragged just this card to.
             let corner = panel.corner.min(3) as usize;
-            let x = if corner % 2 == 1 {
+            let base_x = if corner % 2 == 1 {
                 area.right() - panel_size.x - margin
             } else {
                 area.left() + margin
             };
-            let y = if corner < 2 {
+            let base_y = if corner < 2 {
                 area.top() + title_bar + margin + used[corner]
             } else {
                 area.bottom() - panel_size.y - margin - used[corner]
             };
             used[corner] += panel_size.y + gap;
-            let rect = Rect::from_min_size(pos2(snap_px(x, ppp), snap_px(y, ppp)), panel_size);
+            let rect = Rect::from_min_size(
+                pos2(
+                    snap_px(base_x + panel.offset.x, ppp),
+                    snap_px(base_y + panel.offset.y, ppp),
+                ),
+                panel_size,
+            );
 
             let mut cursor_y = rect.top() + pad;
             let title = title.map(|g| {
@@ -1516,7 +1536,8 @@ impl OverlayWindowApp {
             Color32::from_rgba_unmultiplied(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2, alpha);
         let value_color =
             Color32::from_rgba_unmultiplied(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2, alpha);
-        let shift = self.offset - self.shift;
+        // Rects already carry their own offsets; the window only needs the origin trim.
+        let shift = -self.shift;
         let radius = CornerRadius::same(8);
 
         for panel in &self.layout {
@@ -1556,129 +1577,194 @@ impl OverlayWindowApp {
         }
     }
 
-    /// The position editor: dashed outline, edge guides, live pixel readout and the
-    /// Confirm / Reset pills. Also the only place that mutates `offset`.
+    /// The position editor: one dashed outline per panel, an accent border on the panel under
+    /// the pointer or being dragged, its live `(x, y)` in the readout, and Reset / Confirm.
+    /// Also the only place that moves a panel.
     fn paint_edit(&mut self, ui: &egui::Ui) {
-        let ppp = ui.ctx().pixels_per_point().max(0.5);
-        let px = 1.0 / ppp;
-        let painter = ui.painter();
-        let view = ui.max_rect();
-        let union = self.layout_union();
-        if union.is_negative() {
+        if self.layout.is_empty() {
             return;
         }
-        let local = union.translate(self.offset - self.shift);
-
-        // Grab anywhere on the HUD itself.
-        let grab = ui.interact(
-            local.expand(6.0),
-            ui.scope_id().with("creblox-hud-grab"),
-            egui::Sense::drag(),
-        );
-        if grab.dragged() {
-            self.offset += grab.drag_delta();
-            self.dragging = true;
-            self.clamp_offset();
-            ui.ctx().request_repaint();
-        } else {
-            self.dragging = false;
-        }
-        if grab.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-
-        let outline = Color32::from_rgba_unmultiplied(255, 255, 255, 170);
+        let ppp = ui.ctx().pixels_per_point().max(0.5);
+        let px = 1.0 / ppp;
+        let view = ui.max_rect();
+        let painter = ui.painter();
+        let surface =
+            Color32::from_rgba_unmultiplied(SURFACE_RGB.0, SURFACE_RGB.1, SURFACE_RGB.2, 240);
         let hairline = Color32::from_rgba_unmultiplied(255, 255, 255, 60);
-        let surface = Color32::from_rgba_unmultiplied(SURFACE_RGB.0, SURFACE_RGB.1, SURFACE_RGB.2, 240);
         let text_color = Color32::from_rgb(VALUE_RGB.0, VALUE_RGB.1, VALUE_RGB.2);
+        let muted = Color32::from_rgb(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2);
+        let outline = Color32::from_rgba_unmultiplied(255, 255, 255, 150);
+        let accent = Color32::from_rgb(120, 170, 255);
 
-        // Dashed hairline around the HUD: unmistakably "editing", still quiet.
-        let frame = local.expand(4.0);
-        let dash = 6.0;
-        let mut x = frame.left();
-        while x < frame.right() {
-            let end = (x + dash).min(frame.right());
-            painter.line_segment(
-                [pos2(x, frame.top()), pos2(end, frame.top())],
-                Stroke::new(px, outline),
+        // One hitbox per panel: dragging a card moves only that card.
+        let mut hits: Vec<(usize, String, egui::Response)> = Vec::with_capacity(self.layout.len());
+        for (i, panel) in self.layout.iter().enumerate() {
+            let id = self
+                .panels
+                .get(i)
+                .map(|p| p.id.clone())
+                .unwrap_or_else(|| format!("panel-{i}"));
+            let response = ui.interact(
+                panel.rect.translate(-self.shift),
+                ui.scope_id().with(("creblox-hud-panel", i)),
+                egui::Sense::drag(),
             );
-            painter.line_segment(
-                [pos2(x, frame.bottom()), pos2(end, frame.bottom())],
-                Stroke::new(px, outline),
-            );
-            x += dash * 2.0;
+            hits.push((i, id, response));
         }
-        let mut y = frame.top();
-        while y < frame.bottom() {
-            let end = (y + dash).min(frame.bottom());
-            painter.line_segment(
-                [pos2(frame.left(), y), pos2(frame.left(), end)],
-                Stroke::new(px, outline),
-            );
-            painter.line_segment(
-                [pos2(frame.right(), y), pos2(frame.right(), end)],
-                Stroke::new(px, outline),
-            );
-            y += dash * 2.0;
+        self.hovering = None;
+        self.dragging = None;
+        let mut moved = false;
+        for (i, id, response) in &hits {
+            if response.hovered() || response.dragged() {
+                self.hovering = Some(id.clone());
+            }
+            if response.dragged() {
+                self.dragging = Some(id.clone());
+                let delta = response.drag_delta();
+                if let (Some(b), Some(layout), Some(panel)) =
+                    (self.bounds, self.layout.get(*i), self.panels.get_mut(*i))
+                {
+                    // Clamp this card's own rect, so no panel can leave the game window.
+                    let min = layout.rect.min + delta;
+                    let size = layout.rect.size();
+                    let clamped = pos2(
+                        min.x.clamp(0.0, (b.w as f32 - size.x).max(0.0)),
+                        min.y.clamp(0.0, (b.h as f32 - size.y).max(0.0)),
+                    );
+                    panel.offset += delta + (clamped - min);
+                }
+                moved = true;
+            }
+        }
+        if moved {
+            // The layout carries the offsets, so it has to be built again next frame.
+            self.spec_gen = self.spec_gen.wrapping_add(1);
+            ui.ctx().request_repaint();
+        }
+        match (&self.dragging, &self.hovering) {
+            (Some(_), _) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing),
+            (None, Some(_)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
+            (None, None) => {}
         }
 
-        // Edge guides while the HUD is close to a screen edge.
+        let active = self.dragging.clone().or_else(|| self.hovering.clone());
+        let mut active_rect = view;
+        for (i, id, _) in &hits {
+            let Some(panel) = self.layout.get(*i) else {
+                continue;
+            };
+            let rect = panel.rect.translate(-self.shift);
+            let is_active = active.as_deref() == Some(id.as_str());
+            if is_active {
+                active_rect = rect;
+            }
+            self.paint_dashed(
+                painter,
+                rect.expand(4.0),
+                if is_active { accent } else { outline },
+                px,
+            );
+            if is_active {
+                // Crisp accent border on the card itself, next to the dashed "draggable" box.
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(8),
+                    Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
+            }
+        }
+
+        // Edge guides for the active card, while it is close to a screen edge.
         let snap = 8.0;
         let guide = Color32::from_rgba_unmultiplied(120, 170, 255, 200);
         let edges = [
-            (local.left() - view.left(), view.left()),
-            (view.right() - local.right(), view.right()),
-            (local.top() - view.top(), view.top()),
-            (view.bottom() - local.bottom(), view.bottom()),
+            (active_rect.left() - view.left(), view.left(), true),
+            (view.right() - active_rect.right(), view.right(), true),
+            (active_rect.top() - view.top(), view.top(), false),
+            (view.bottom() - active_rect.bottom(), view.bottom(), false),
         ];
-        if edges[0].0.abs() < snap {
-            painter.line_segment(
-                [pos2(edges[0].1 + px * 0.5, view.top()), pos2(edges[0].1 + px * 0.5, view.bottom())],
-                Stroke::new(px, guide),
-            );
-        }
-        if edges[1].0.abs() < snap {
-            painter.line_segment(
-                [pos2(edges[1].1 - px * 0.5, view.top()), pos2(edges[1].1 - px * 0.5, view.bottom())],
-                Stroke::new(px, guide),
-            );
-        }
-        if edges[2].0.abs() < snap {
-            painter.line_segment(
-                [pos2(view.left(), edges[2].1 + px * 0.5), pos2(view.right(), edges[2].1 + px * 0.5)],
-                Stroke::new(px, guide),
-            );
-        }
-        if edges[3].0.abs() < snap {
-            painter.line_segment(
-                [pos2(view.left(), edges[3].1 - px * 0.5), pos2(view.right(), edges[3].1 - px * 0.5)],
-                Stroke::new(px, guide),
-            );
+        for (distance, at, vertical) in edges {
+            if distance.abs() >= snap {
+                continue;
+            }
+            let stroke = Stroke::new(px, guide);
+            if vertical {
+                painter.line_segment(
+                    [pos2(at + px * 0.5, view.top()), pos2(at + px * 0.5, view.bottom())],
+                    stroke,
+                );
+            } else {
+                painter.line_segment(
+                    [pos2(view.left(), at + px * 0.5), pos2(view.right(), at + px * 0.5)],
+                    stroke,
+                );
+            }
         }
 
-        let rounded = (self.offset.x.round() as i32, self.offset.y.round() as i32);
-        if rounded != self.readout_at {
-            self.readout_at = rounded;
-            self.readout.clear();
-            let _ = std::fmt::Write::write_fmt(
-                &mut self.readout,
-                format_args!("{}, {}", rounded.0, rounded.1),
-            );
-        }
+        // Readout: the active card's id and its live position.
+        let shown = active
+            .as_ref()
+            .and_then(|id| self.panels.iter().find(|p| &p.id == id))
+            .or_else(|| self.panels.first());
+        let (readout, readout_w) = match shown {
+            Some(p) => {
+                let text = format!(
+                    "{}  {}, {}",
+                    p.id,
+                    p.offset.x.round() as i32,
+                    p.offset.y.round() as i32
+                );
+                let galley =
+                    painter.layout_no_wrap(text, FontId::monospace(11.5), text_color);
+                (galley.text().to_string(), galley.size().x)
+            }
+            None => (String::new(), 0.0),
+        };
 
-        // Action bar: readout on the left, Reset and Confirm on the right.
-        let bar_h = 30.0;
-        let bar_w = 300.0;
-        let below = local.max.y + 12.0;
+        // The bar is as wide as its parts, and each part starts where the measured one before
+        // it ends: the readout, the hint, Reset and Confirm can never overlap.
+        let pad = 10.0;
+        let gap = 10.0;
+        let btn_w = 60.0;
+        let confirm_w = 78.0;
+        // 36 with a 5 px inset leaves a 26 px pill: a real hit target, not a hairline.
+        let bar_h = 36.0;
+        let label_font = FontId::proportional(10.0);
+        let fixed = pad + readout_w + gap + gap + btn_w + 6.0 + confirm_w + pad;
+        let room = (view.width() - 16.0).max(120.0);
+        // Words, not glyphs: the default egui font has no ↵, so a symbol hint renders as a
+        // tofu box on a stock install.
+        let mut hint = "drag · Enter save · Esc cancel";
+        let mut hint_w = painter
+            .layout_no_wrap(hint.to_string(), label_font.clone(), muted)
+            .size()
+            .x;
+        if fixed + hint_w > room {
+            hint = "drag · Enter save";
+            hint_w = painter
+                .layout_no_wrap(hint.to_string(), label_font.clone(), muted)
+                .size()
+                .x;
+        }
+        if fixed + hint_w > room {
+            hint = "drag · Enter";
+            hint_w = painter
+                .layout_no_wrap(hint.to_string(), label_font.clone(), muted)
+                .size()
+                .x;
+        }
+        let bar_w = (fixed + hint_w).min(room);
+        let below = active_rect.max.y + 12.0;
         let bar_y = if below + bar_h <= view.max.y - 8.0 {
             below
         } else {
-            (local.min.y - 12.0 - bar_h).max(view.min.y + 8.0)
+            (active_rect.min.y - 12.0 - bar_h).max(view.min.y + 8.0)
         };
-        let bar_x = local
-            .min
-            .x
-            .clamp(view.min.x + 8.0, (view.max.x - bar_w - 8.0).max(view.min.x + 8.0));
+        let bar_x = active_rect.min.x.clamp(
+            view.min.x + 8.0,
+            (view.max.x - bar_w - 8.0).max(view.min.x + 8.0),
+        );
         let bar = Rect::from_min_size(pos2(bar_x, bar_y), vec2(bar_w, bar_h));
         painter.rect_filled(bar, CornerRadius::same(8), surface);
         painter.rect_stroke(
@@ -1689,27 +1775,31 @@ impl OverlayWindowApp {
         );
 
         let confirm = Rect::from_min_size(
-            pos2(bar.right() - 8.0 - 78.0, bar.top() + 5.0),
-            vec2(78.0, bar_h - 10.0),
+            pos2(bar.right() - pad - confirm_w, bar.top() + 5.0),
+            vec2(confirm_w, bar_h - 10.0),
         );
         let reset = Rect::from_min_size(
-            pos2(confirm.left() - 6.0 - 60.0, bar.top() + 5.0),
-            vec2(60.0, bar_h - 10.0),
+            pos2(confirm.left() - 6.0 - btn_w, bar.top() + 5.0),
+            vec2(btn_w, bar_h - 10.0),
         );
+        let readout_pos = pos2(bar.left() + pad, bar.center().y);
+        let hint_pos = pos2(readout_pos.x + readout_w + gap, bar.center().y);
         painter.text(
-            pos2(bar.left() + 10.0, bar.center().y),
+            readout_pos,
             egui::Align2::LEFT_CENTER,
-            &self.readout,
+            &readout,
             FontId::monospace(11.5),
             text_color,
         );
-        painter.text(
-            pos2(bar.left() + 10.0 + 74.0, bar.center().y),
-            egui::Align2::LEFT_CENTER,
-            "drag · ⏎ save · esc cancel",
-            FontId::proportional(10.0),
-            Color32::from_rgb(LABEL_RGB.0, LABEL_RGB.1, LABEL_RGB.2),
-        );
+        if hint_pos.x + hint_w <= reset.left() - 4.0 {
+            painter.text(
+                hint_pos,
+                egui::Align2::LEFT_CENTER,
+                hint,
+                label_font,
+                muted,
+            );
+        }
         for (rect, label) in [(reset, "Reset"), (confirm, "Confirm")] {
             painter.rect_filled(
                 rect,
@@ -1752,7 +1842,11 @@ impl OverlayWindowApp {
             )
         });
         if reset_clicked {
-            self.offset = self.saved_offset;
+            // Reset is the default layout: every card back in its own corner slot.
+            for panel in &mut self.panels {
+                panel.offset = egui::Vec2::ZERO;
+            }
+            self.spec_gen = self.spec_gen.wrapping_add(1);
         }
         if confirm_clicked || enter {
             self.finish_edit(true);
@@ -1761,37 +1855,57 @@ impl OverlayWindowApp {
         }
     }
 
-    /// Keeps the HUD fully inside the game window, so it can never be dragged off-screen.
-    fn clamp_offset(&mut self) {
-        let Some(b) = self.bounds else {
-            return;
-        };
-        let union = self.layout_union();
-        if union.is_negative() {
-            return;
+    /// A dashed rectangle: the editor's "this card can be moved" outline.
+    fn paint_dashed(&self, painter: &egui::Painter, frame: Rect, color: Color32, px: f32) {
+        let dash = 6.0;
+        let mut x = frame.left();
+        while x < frame.right() {
+            let end = (x + dash).min(frame.right());
+            painter.line_segment(
+                [pos2(x, frame.top()), pos2(end, frame.top())],
+                Stroke::new(px, color),
+            );
+            painter.line_segment(
+                [pos2(x, frame.bottom()), pos2(end, frame.bottom())],
+                Stroke::new(px, color),
+            );
+            x += dash * 2.0;
         }
-        let view_w = b.w as f32;
-        let view_h = b.h as f32;
-        let min = union.min + self.offset;
-        let max_x = (view_w - union.width()).max(0.0);
-        let max_y = (view_h - union.height()).max(0.0);
-        let clamped = pos2(min.x.clamp(0.0, max_x), min.y.clamp(0.0, max_y));
-        self.offset = clamped - union.min;
+        let mut y = frame.top();
+        while y < frame.bottom() {
+            let end = (y + dash).min(frame.bottom());
+            painter.line_segment(
+                [pos2(frame.left(), y), pos2(frame.left(), end)],
+                Stroke::new(px, color),
+            );
+            painter.line_segment(
+                [pos2(frame.right(), y), pos2(frame.right(), end)],
+                Stroke::new(px, color),
+            );
+            y += dash * 2.0;
+        }
     }
 
-    /// Ends the edit session: saves (or reverts) the position and hands input back to the game.
+    /// Ends the edit session: saves (or reverts) every panel's position and hands input back
+    /// to the game.
     fn finish_edit(&mut self, confirmed: bool) {
         if confirmed {
-            self.saved_offset = self.offset;
+            for panel in &mut self.panels {
+                panel.saved = panel.offset;
+            }
         } else {
-            self.offset = self.saved_offset;
+            for panel in &mut self.panels {
+                panel.offset = panel.saved;
+            }
         }
+        self.spec_gen = self.spec_gen.wrapping_add(1);
         self.write_result(confirmed);
         self.edit = false;
         // The spec still says `edit: true` until the launcher reads the answer; without this
         // the next reload (the session timer ticks every second) would re-open the editor.
         self.edit_done = true;
-        self.dragging = false;
+        self.dragging = None;
+        self.hovering = None;
         if self.interactive {
             self.interactive = false;
             tweak_overlay_window(false);
@@ -1801,12 +1915,22 @@ impl OverlayWindowApp {
     /// Leaves the answer for the launcher, atomically so a half-written file is never read.
     fn write_result(&self, confirmed: bool) {
         let path = self.spec_path.with_file_name("overlay-position.json");
-        let body = format!(
-            "{{\"state\":\"{}\",\"offset_x\":{},\"offset_y\":{}}}",
-            if confirmed { "confirmed" } else { "cancelled" },
-            self.offset.x.round() as i32,
-            self.offset.y.round() as i32
-        );
+        let panels: Vec<Value> = self
+            .panels
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "x": p.offset.x.round() as i32,
+                    "y": p.offset.y.round() as i32
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "state": if confirmed { "confirmed" } else { "cancelled" },
+            "panels": panels
+        })
+        .to_string();
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, body).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
@@ -1976,7 +2100,7 @@ impl eframe::App for OverlayWindowApp {
         // while the HUD is up and one while it is hidden. The old build had a 150 ms repaint
         // plus a 400 ms heartbeat thread, i.e. ~9 full transparent composites a second
         // whether anything had changed or not.
-        let interval = if self.edit || self.dragging {
+        let interval = if self.edit || self.dragging.is_some() {
             Duration::from_millis(16)
         } else if let Some(ms) = tick {
             Duration::from_millis(ms.clamp(1, 1000))

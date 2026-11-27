@@ -49,7 +49,7 @@ fn spec_for(toggles: HudToggles, crosshair: bool) -> String {
         },
         &resolved(),
     );
-    let mut spec = overlay_spec::spec_json(0.9, true, 0, 0, false, panels);
+    let mut spec = overlay_spec::spec_json(0.9, true, false, panels);
     overlay_spec::set_crosshair(
         &mut spec,
         crosshair.then(|| {
@@ -121,7 +121,7 @@ fn spec(live: &Live) -> String {
         },
         live,
     );
-    overlay_spec::spec_json(0.9, true, 0, 0, false, panels).to_string()
+    overlay_spec::spec_json(0.9, true, false, panels).to_string()
 }
 
 /// The launcher writes an anchor and a token, never a formatted clock: the overlay window is

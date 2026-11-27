@@ -66,10 +66,10 @@ pub struct Settings {
     pub overlay_opacity: f32,
     pub overlay_show_ip: bool,
     pub overlay_show_job_id: bool,
-    /// Where the user dragged the in-game HUD, in points from its corner anchor.
-    /// Written by the tray's "Edit Overlay Position" mode; `0, 0` is the corner itself.
-    pub overlay_offset_x: i16,
-    pub overlay_offset_y: i16,
+    /// Where the user dragged each in-game HUD panel, in points from that panel's corner
+    /// anchor. Written by the tray's "Edit Overlay Position" mode; a missing panel sits in
+    /// its corner slot, which is already stacked clear of the others.
+    pub overlay_panels: Vec<crate::overlay_spec::PanelOffset>,
     /// Show the "Connected server" badge in the launcher window.
     pub show_server_badge: bool,
     /// Bring the launcher to the front when you leave a game.
@@ -190,8 +190,7 @@ impl Default for Settings {
             overlay_stats_fps_cap: true,
             overlay_flags_enabled: false,
             overlay_flags_corner: 0,
-            overlay_offset_x: 0,
-            overlay_offset_y: 0,
+            overlay_panels: Vec::new(),
             overlay_flags_max_lines: 12,
             overlay_game_enabled: false,
             overlay_game_corner: 2,

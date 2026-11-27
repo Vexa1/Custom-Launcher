@@ -115,9 +115,9 @@ pub struct OverlayConfig {
     /// but hides itself, so sitting in the Roblox menu never shows panels over it.
     pub game_active: bool,
     pub opacity: f32,
-    /// Where the user parked the HUD, in points from its corner anchor.
-    pub offset_x: i16,
-    pub offset_y: i16,
+    /// Where the user parked each HUD panel, in points from that panel's corner anchor.
+    /// A panel with no entry sits in its corner slot, stacked clear of the others.
+    pub panel_offsets: Vec<overlay_spec::PanelOffset>,
     /// Interactive position editing: the overlay becomes draggable and stops being
     /// click-through until the user confirms or cancels on the HUD itself.
     pub edit: bool,
@@ -207,8 +207,7 @@ impl OverlayConfig {
             // drivers only build a config while a game is actually running.
             game_active: true,
             opacity: s.overlay_opacity.clamp(0.2, 1.0),
-            offset_x: s.overlay_offset_x,
-            offset_y: s.overlay_offset_y,
+            panel_offsets: s.overlay_panels.clone(),
             edit: false,
             server,
             stats,
@@ -636,8 +635,8 @@ pub fn position_result_path() -> std::path::PathBuf {
 /// What the user did in the position editor.
 pub struct PositionResult {
     pub confirmed: bool,
-    pub offset_x: i16,
-    pub offset_y: i16,
+    /// Every panel's final position, ready to be stored in `settings.json`.
+    pub panels: Vec<overlay_spec::PanelOffset>,
 }
 
 /// Reads and removes the editor's answer. `None` while the user is still dragging.
@@ -649,8 +648,11 @@ pub fn take_position_result() -> Option<PositionResult> {
     let v: Value = serde_json::from_str(&text).ok()?;
     Some(PositionResult {
         confirmed: v["state"].as_str() == Some("confirmed"),
-        offset_x: v["offset_x"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
-        offset_y: v["offset_y"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+        panels: overlay_spec::parse_panel_offsets(
+            &v["panels"],
+            v["offset_x"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+            v["offset_y"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+        ),
     })
 }
 
@@ -1525,7 +1527,7 @@ fn build_spec(g: &Shared) -> Value {
     // the counting, so the file only changes when something other than the clock does.
     let now_ms = overlay_spec::unix_ms_now();
     let joined_at_unix_ms = g.joined_at_ms.unwrap_or(g.session_started_ms);
-    let panels = overlay_spec::build(
+    let mut panels = overlay_spec::build(
         &overlay_spec::Panels {
             server: server_panel.as_ref(),
             stats: stats_panel.as_ref(),
@@ -1557,14 +1559,8 @@ fn build_spec(g: &Shared) -> Value {
             edit_preview: cfg.edit,
         },
     );
-    let mut spec = overlay_spec::spec_json(
-        cfg.opacity,
-        cfg.game_active,
-        cfg.offset_x,
-        cfg.offset_y,
-        cfg.edit,
-        panels,
-    );
+    overlay_spec::apply_panel_offsets(&mut panels, &cfg.panel_offsets);
+    let mut spec = overlay_spec::spec_json(cfg.opacity, cfg.game_active, cfg.edit, panels);
     if let Some(img) = &cfg.image {
         spec["image"] = json!({
             "path": img.path,
