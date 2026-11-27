@@ -1,9 +1,11 @@
 name: build-windows
 
 # The Windows x64 launcher, built the way users get it: one double-clickable exe with the GUI
-# subsystem, so no console window ever appears. Pushing a v* tag also attaches
-# CREBLOX-<version>-windows-x64.zip to that release, which is what the in-app Windows
-# self-update downloads.
+# subsystem, so no console window ever appears. Dispatching this workflow with `release_tag`
+# attaches CREBLOX-<version>-windows-x64.zip to that release, which is what the in-app Windows
+# self-update downloads. Pushing a v* tag only builds and tests: exactly one run may ever
+# attach, because two uploads racing with --clobber would leave the notes' SHA-256 describing
+# bytes that a later upload replaced.
 on:
   push:
     branches: [main]
@@ -108,7 +110,10 @@ jobs:
           Get-FileHash $zip -Algorithm SHA256 | ForEach-Object { "sha256 $($_.Hash)" }
 
       - name: Attach the zips to the release
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        # Dispatch only: a tag push builds and tests, never uploads. Two attaching runs would
+        # race each other's upload and notes edit, and the notes would end up quoting a hash
+        # that no longer matches the attached zip.
+        if: inputs.release_tag != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

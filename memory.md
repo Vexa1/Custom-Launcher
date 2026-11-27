@@ -187,9 +187,12 @@ Then the Windows job attaches its build:
   install the first zip *asset* they see. Current clients ignore a foreign zip by name
   (`release_links::pick_zip_asset`), but the workflow's upload order is what protects the older
   ones — keep macOS first.
-- Dispatch the job after tagging with `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT` (`ref: main`,
-  `inputs: {"release_tag": "v<ver>"}`), and wait for it to finish: the Windows asset does not
-  exist until the run succeeds, so §3.6 cannot pass before then.
+- Dispatch the job after tagging with `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT` (`ref: main`, `inputs: {"release_tag": "v<ver>"}`), and wait for it to finish: the Windows asset does not exist until the run succeeds, so §3.6 cannot pass before then.
+- Only the dispatched run attaches anything: pushing the tag builds and tests but never
+  uploads (`if: inputs.release_tag != ''`). Do not re-enable tag-push attaching — in 0.5.7 a
+  tag-push run and the dispatched run both uploaded with `--clobber`, so the notes ended up
+  quoting the hash of bytes the other upload had already replaced. After every release,
+  compare the hash on the `Windows x64:` line with the asset's `digest` in the API response.
 - Up to 8 release updates per request; batch them.
 - `GITHUB_UPLOAD_RELEASE_ASSET` rejects local paths ("file key does not belong to this project or
   session"); the workflow's own token is the only thing that attaches an asset. Do not try to

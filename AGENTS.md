@@ -71,6 +71,12 @@ The workflow must keep compiling `creblox.exe` with the GUI subsystem
 `src/main.rs`, checked as PE subsystem 2 in the job), running `cargo test` on the Windows
 runner, and packaging exactly `CREBLOX-<ver>-windows-x64.zip`.
 
+Only a dispatched run attaches an asset (`workflow_dispatch`, input `release_tag: v<ver>`). A
+tag push builds and tests but never uploads: two attaching runs would race each other's upload
+and notes edit, and the notes would end up quoting a hash for bytes that a later upload had
+already replaced. After any release, the hash printed for the Windows line must equal the
+attached asset's `digest` — check it, do not assume the run and the notes agree.
+
 # Windows self-update: the rules the tests enforce
 
 - The release parser takes the asset named exactly `CREBLOX-<version>-windows-x64.zip`
