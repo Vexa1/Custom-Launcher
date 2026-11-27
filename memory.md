@@ -15,7 +15,7 @@ re-deriving any of it. Read this before touching `Cargo.toml`, `release/`, or a 
 
 ## 1. The shape of a CREBLOX release (read this first)
 
-There are **no GitHub release assets**. Every live release has `"assets": []`. What actually ships is:
+While Windows is paused a release attaches **no GitHub release assets** (`"assets": []`, as every pre-0.5.5 release and every release from now on has); the macOS-era-through-0.5.14 releases do carry the two zips the old workflow uploaded. What actually ships is:
 
 | Piece | Where it lives | Who reads it |
 |---|---|---|
@@ -166,7 +166,12 @@ makes the tag):
 - `body:` the notes from §3.2
 - `make_latest: "true"` **only for this new release**
 
-Then the Windows job attaches its build:
+**Windows is paused (see `AGENTS.md`).** Do not dispatch `build-windows`, do not wait for it, and
+do not attach or mention `CREBLOX-<ver>-windows-x64.zip`. The two macOS archives from §3.4 are the
+whole release; on Windows the updater reads that as "no update", which is the accepted behaviour
+while the platform is parked.
+
+What the job does when Windows is turned back on:
 
 - **Assets are used, but only the job attaches them.** `.github/workflows/build-windows.yml`
   builds `CREBLOX-<ver>-windows-x64.zip`, then uploads `release/CREBLOX-<ver>-update.zip` (the
@@ -187,7 +192,7 @@ Then the Windows job attaches its build:
   install the first zip *asset* they see. Current clients ignore a foreign zip by name
   (`release_links::pick_zip_asset`), but the workflow's upload order is what protects the older
   ones — keep macOS first.
-- Dispatch the job after tagging with `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT` (`ref: main`, `inputs: {"release_tag": "v<ver>"}`), and wait for it to finish: the Windows asset does not exist until the run succeeds, so §3.6 cannot pass before then.
+- Dispatch the job after tagging with `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT` (`ref: main`, `inputs: {"release_tag": "v<ver>"}`), and wait for it to finish: the Windows asset does not exist until the run succeeds.
 - Only the dispatched run attaches anything: pushing the tag builds and tests but never
   uploads (`if: inputs.release_tag != ''`). Do not re-enable tag-push attaching — in 0.5.7 a
   tag-push run and the dispatched run both uploaded with `--clobber`, so the notes ended up
@@ -222,15 +227,17 @@ u=next(t.strip('()') for t in b.split() if t.startswith('https://') and '.zip' i
 print('first zip:', u)
 print('hash on that line:', re.search(r'[0-9a-f]{64}', b.split(u)[1].split(chr(10))[0]).group(0))"
 
-# 4. the Windows job attached its zip, after the macOS archives
+# 4. the release's assets: none expected while Windows is paused (the macOS archives are
+#    raw links on main, not assets)
 curl -s https://api.github.com/repos/Vexa1/Custom-Launcher/releases/latest \
   | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for a in d['assets']:
-    print(a['size'], a['name'], a['browser_download_url'])"
+    print(a['size'], a['name'], a['browser_download_url'])
+print('assets:', len(d['assets']))"
 
-# 5. replay the real selection rule against the actual asset list
+# 5. the macOS selection rule still finds its own archive in that asset list
 curl -s https://api.github.com/repos/Vexa1/Custom-Launcher/releases/latest \
   | python3 -c "
 import json,sys
@@ -245,9 +252,9 @@ for plat in ('macos','windows'):
 ```
 
 The third check must show `...-update.zip` first and the hash printed for *that* file. The fifth
-must print the macOS archive for `macos` and `CREBLOX-<ver>-windows-x64.zip` for `windows` —
-never the same file, and never a platform's zip missing from its own line. Download the Windows
-asset and check its size and SHA-256 against the notes before calling the release done.
+must print the macOS archive for `macos`, and `None` for `windows` while it is paused (no zip of
+that name is attached, and the parser must not fall back to the macOS one). Do not look for,
+download or verify a Windows asset - there is none to check.
 
 Also confirm the release is public: the repository `Vexa1/Custom-Launcher` is **public**
 (flipped during the audit), so anonymous `curl`/raw downloads must return `200` without a token.
@@ -294,10 +301,12 @@ Format, in this order:
 <short manual install/update instruction, ending with: user data in ~/Library/Application Support/CREBLOX is never touched>
 ```
 
-The Windows job appends its own `macOS update (release asset):` / `Windows x64:` lines with the
-`sha256` on the following line (§3.5). Those are appended, not substituted: the `### Downloads`
-block above stays the one you write, and the asset lines only add the identical archives under
-their release URLs, which the parser prefers on both platforms.
+**The body is exactly the block above while Windows is paused** — no `Windows x64:` line, no
+`windows-x64.zip` URL, no hash for one. When Windows is turned back on, the Windows job appends
+its own `macOS update (release asset):` / `Windows x64:` lines with the `sha256` on the following
+line (§3.5). Those are appended, not substituted: the `### Downloads` block above stays the one
+you write, and the asset lines only add the identical archives under their release URLs, which
+the parser prefers on both platforms.
 
 How the parser reads it (`src/updater.rs`, platform rules in `src/release_links.rs`):
 
@@ -451,7 +460,7 @@ The repository was audited end to end; it came back clean and must stay that way
 [ ] zips moved to release/CREBLOX-<ver>-{update,full}.zip; hashes and sizes recorded
 [ ] committed "release: <ver> archives" and pushed to main via cloud_git
 [ ] GitHub release v<ver> created on main, make_latest true only for this one
-[ ] Windows job dispatched, green, and its zip attached after the macOS archives
+[ ] no Windows job dispatched, no Windows zip attached or mentioned (Windows is paused)
 [ ] both raw URLs return 200 with the exact byte sizes
 [ ] /releases/latest returns v<ver>, not draft
 [ ] first zip in the body is the update archive, hash on the same line matches

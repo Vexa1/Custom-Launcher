@@ -1,5 +1,10 @@
 name: build-windows
 
+# PAUSED: Windows is not part of releases right now. Do not dispatch this workflow, wait on it,
+# or attach its zip - a release is the macOS archives only (see AGENTS.md, "Releases: macOS
+# only until Windows is turned back on"). The job is kept working so turning it back on is a
+# dispatch, not a port.
+
 # The Windows x64 launcher, built the way users get it: one double-clickable exe with the GUI
 # subsystem, so no console window ever appears. Dispatching this workflow with `release_tag`
 # attaches CREBLOX-<version>-windows-x64.zip to that release, which is what the in-app Windows

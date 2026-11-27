@@ -5,8 +5,8 @@ Do not read the same file more than once per task unless it has been modified. I
 Every fix or update you implement must be **fully released** before you finish your turn.
 Never leave fixes sitting only in local commits: bump the version (`Cargo.toml`, `README.md`,
 `Cargo.lock`), package the release archives, push `main`, publish the GitHub Release with the
-assets attached and their byte size + SHA-256 in the notes, and verify every release check -
-including the Windows workflow artifact - before calling the work finished. Committed but
+macOS archives linked and their byte size + SHA-256 in the notes, and verify every release
+check - see the macOS-only release gate below - before calling the work finished. Committed but
 unreleased work is unfinished work, and it is never the end of a turn.
 
 # Automated VM verification (zero release overhead)
@@ -54,27 +54,48 @@ cargo test --manifest-path vm-tests/Cargo.toml --test shots
 
 `vm-tests/artifacts/` is gitignored, and none of this is part of a release build.
 
-# Releases: a release is not done until Windows is attached
+# Releases: macOS only until Windows is turned back on
 
-Every fix above ends in a release: bump, package, push, publish, verify - in the same turn,
-not "later". CREBLOX ships macOS **and** Windows 10/11 from this tree. `memory.md` is the step-by-step
-runbook; this is the gate that decides whether a release exists.
+**Windows is paused on purpose.** Until the user explicitly says to bring it back, a release is
+the macOS archives and nothing else:
+
+- Do not dispatch `.github/workflows/build-windows.yml`, wait on it, or gate a release on it.
+- Do not attach or require `CREBLOX-<ver>-windows-x64.zip`, and do not print a size or SHA-256
+  for it in the notes. A release without it is complete, not broken.
+- Do not describe a release as blocked, incomplete, or in progress because the Windows job has
+  not run. Those sentences must disappear from the workflow, not just from your head.
+
+The Windows code, its tests, and the workflow itself stay in the tree and keep working: turning
+Windows back on is a dispatch, not a port. `scripts/verify.sh` still type-checks the Windows
+target, because that catches `#[cfg(windows)]` breakage on any developer machine; it is a compile
+check, not a release gate.
+
+Every fix above still ends in a release: bump, package, push, publish, verify - in the same turn,
+not "later". `memory.md` is the step-by-step runbook; this is the gate that decides whether a
+release exists.
 
 A release is complete only when all of these are true:
 
 1. `Cargo.toml` and `README.md` carry the new version, and `Cargo.lock` is committed with it.
 2. `release/CREBLOX-<ver>-update.zip` and `release/CREBLOX-<ver>-full.zip` are committed,
    pushed, and their byte size + SHA-256 are printed in the notes.
-3. The `build-windows` workflow finished **green** on that tag and attached
-   `CREBLOX-<ver>-windows-x64.zip` to the release, with its size and SHA-256 in the notes.
-4. The release's `assets[]` lists `CREBLOX-<ver>-update.zip` first and
-   `CREBLOX-<ver>-windows-x64.zip` second, both with a non-zero size.
-5. The release is published (not a draft) and is the repository's latest.
+3. No `build-windows` run was required, and no Windows asset is attached or mentioned.
+4. The release is published (not a draft) and is the repository's latest.
 
-Never call a release done, announce it, or start the next change while the Windows job is
-still running or its zip is missing. The Windows updater installs from that asset, so a missing
-asset means every Windows user is stuck. Re-run the job (`workflow_dispatch`, input
-`release_tag: v<ver>`) or fix the build; do not publish a macOS-only release.
+While Windows is paused, Windows users get no update: the Windows updater treats a release with
+no Windows zip as "no update" (`release_links::is_windows_zip_for`), never as an invitation to
+install the macOS archive. That is the accepted behaviour, so do not add a macOS fallback for it.
+
+## Turning Windows back on (the contract, kept for that day)
+
+When the user asks for Windows releases again, restore these as release requirements:
+
+- The `build-windows` workflow finished **green** on that tag and attached
+  `CREBLOX-<ver>-windows-x64.zip` to the release, with its size and SHA-256 in the notes.
+- The release's `assets[]` lists `CREBLOX-<ver>-update.zip` first and
+  `CREBLOX-<ver>-windows-x64.zip` second, both with a non-zero size.
+- Never call a release done while the Windows job is running or its zip is missing. Re-run the
+  job (`workflow_dispatch`, input `release_tag: v<ver>`) or fix the build.
 
 The workflow must keep compiling `creblox.exe` with the GUI subsystem
 (`#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]` in

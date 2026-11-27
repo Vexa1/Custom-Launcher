@@ -620,30 +620,30 @@ scripts/package-release.sh
 scripts/package-release-macos.sh
 ```
 
-### Releasing (macOS + Windows)
+### Releasing (macOS only for now)
 
 **Every fix or update must be fully released before the change is finished.** Never leave a
 fix sitting only in local commits: bump the version, package the archives, push `main`,
-publish the GitHub Release with its assets and SHA-256 hashes, and verify every release check
-(including the Windows workflow artifact) in the same turn. Committed-but-unreleased work is
-unfinished work.
+publish the GitHub Release with its archives and SHA-256 hashes, and verify every release check
+in the same turn. Committed-but-unreleased work is unfinished work.
 
-`memory.md` is the full runbook. A release exists only when **both** platforms are on it:
+**Windows is paused until further notice.** Releases carry the macOS archives only: the
+`build-windows` workflow is not dispatched, not waited on, and not a release gate, and no
+`CREBLOX-<ver>-windows-x64.zip` is packaged, attached or listed in the notes. The Windows code
+paths and the workflow stay in the tree, so bringing it back is a dispatch rather than a port
+(`AGENTS.md` keeps the exact contract for that day).
+
+`memory.md` is the full runbook. A release is:
 
 1. Bump `Cargo.toml` / `README.md`, refresh `Cargo.lock`, and package the macOS archives with
    `scripts/package-release.sh`; commit `release/CREBLOX-<ver>-update.zip` and
    `release/CREBLOX-<ver>-full.zip` and push `main`.
 2. Create the GitHub release for tag `v<ver>` with the notes (byte size + SHA-256 per archive,
    update archive linked first).
-3. Wait for the `build-windows` job to finish green. It builds `creblox.exe`, runs the unit
-   tests and the `update_zip` suite on Windows, packages
-   `CREBLOX-<ver>-windows-x64.zip`, attaches it to the release and appends its URL + `sha256`
-   to the notes.
-4. Verify the release before calling it done: the raw archives return `200` at the printed
-   sizes, `assets[]` lists the macOS update first and the Windows zip second, and the Windows
-   zip's own SHA-256 matches the line in the notes. A release that is missing its Windows zip
-   is broken for every Windows user — re-run the job (`workflow_dispatch` with
-   `release_tag: v<ver>`), never ship it as is.
+3. Verify the release before calling it done: the raw archives return `200` at the printed
+   sizes, `/releases/latest` is this tag and not a draft, and the first zip in the notes is the
+   update archive with a hash that matches the file. No Windows asset is expected, so its
+   absence is not a failure.
 
 `MACOSX_DEPLOYMENT_TARGET` is pinned to `10.15` in `.cargo/config.toml`, so
 `MACOSX_DEPLOYMENT_TARGET=10.15 cargo check` and a bare `cargo check` are equivalent (an
