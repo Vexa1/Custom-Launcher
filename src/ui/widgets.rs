@@ -185,16 +185,27 @@ pub fn game_stats_row(
         );
         // Tabular figures: the rating and player count must not shift the line as they
         // change while the feed scrolls.
+        // Pre-formatted when the game arrived; the fallback covers hand-built games.
+        let rating = if g.rating_text.is_empty() {
+            g.rating()
+        } else {
+            g.rating_text.clone()
+        };
         ui.label(
-            RichText::new(g.rating())
+            RichText::new(rating)
                 .font(crate::theme::font_tabular(text_size))
                 .color(stat_color),
         );
+        let count = if g.players_text.is_empty() {
+            compact(g.playing)
+        } else {
+            g.players_text.clone()
+        };
         let tail = if g.playing > 0 {
             if compact_stats {
-                format!("  {}", compact(g.playing))
+                format!("  {count}")
             } else {
-                format!("  {} playing", compact(g.playing))
+                format!("  {count} playing")
             }
         } else if !compact_stats {
             "  Rating".to_string()
@@ -488,6 +499,13 @@ pub fn grid_card_width(ui: &egui::Ui) -> f32 {
         .floor()
 }
 
+/// What a drawn grid reports back to its page.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GridView {
+    /// The grid's end is within about two rows of the viewport: fetch the next page now.
+    pub near_end: bool,
+}
+
 pub fn wide_grid_with_width(
     ui: &mut egui::Ui,
     games: &[Game],
@@ -496,7 +514,7 @@ pub fn wide_grid_with_width(
     playtime: &HashMap<u64, crate::playtime::GamePlay>,
     w: f32,
     acts: &mut Vec<Action>,
-) {
+) -> GridView {
     let gap = 14.0;
     let avail = ui.available_width();
     let cols = (((avail + gap + 0.5) / (w + gap)).floor() as usize).max(1);
@@ -506,17 +524,29 @@ pub fn wide_grid_with_width(
     let row_id = ui.scope_id().with(("wide_grid_row_h", cols, w.to_bits()));
     let cached_h = ui.ctx().data(|d| d.get_temp::<f32>(row_id));
     let clip = ui.clip_rect();
+    let gap = 8.0;
+    // Before the first row has been measured, use the card's known image height plus its text
+    // rows: an unmeasured grid must not build every card in a 10,000-game feed on its first
+    // frame. The estimate is replaced by the measured height immediately after.
+    let row_h = cached_h.unwrap_or((w * 9.0 / 16.0).floor() + 52.0);
+    let top_row = ui.cursor().top();
+    let row_count = games.chunks(cols).count();
+    let visible = crate::chart_feed::visible_rows(
+        clip.top(),
+        clip.bottom(),
+        top_row,
+        row_h,
+        gap,
+        row_count,
+    );
     let mut measured = cached_h;
     for (idx, row) in games.chunks(cols).enumerate() {
         if idx > 0 {
-            ui.add_space(8.0);
+            ui.add_space(gap);
         }
-        let top = ui.cursor().top();
-        if let Some(h) = cached_h {
-            if top + h < clip.top() - 40.0 || top > clip.bottom() + 40.0 {
-                ui.add_space(h);
-                continue;
-            }
+        if !visible.contains(&idx) {
+            ui.add_space(row_h);
+            continue;
         }
         // horizontal_top (Align::Min) keeps every card aligned cleanly along its top edge
         let r = ui.horizontal_top(|ui| {
@@ -535,6 +565,13 @@ pub fn wide_grid_with_width(
             ui.ctx().data_mut(|d| d.insert_temp(row_id, h));
         }
     }
+    // The cursor now sits at the bottom of the grid's content. When that is no further than a
+    // couple of rows below the viewport, the next page is worth starting now.
+    let row_h = measured.or(cached_h).unwrap_or(0.0);
+    let content_bottom = ui.cursor().top();
+    GridView {
+        near_end: row_h > 0.0 && content_bottom <= clip.bottom() + row_h * 2.5,
+    }
 }
 
 pub fn wide_grid(
@@ -544,9 +581,21 @@ pub fn wide_grid(
     preview: Option<CardPreview<'_>>,
     playtime: &HashMap<u64, crate::playtime::GamePlay>,
     acts: &mut Vec<Action>,
-) {
+) -> GridView {
     let w = grid_card_width(ui);
-    wide_grid_with_width(ui, games, wide, preview, playtime, w, acts);
+    wide_grid_with_width(ui, games, wide, preview, playtime, w, acts)
+}
+
+/// A grid that also says whether its end is close enough to prefetch the next page.
+pub fn wide_grid_info(
+    ui: &mut egui::Ui,
+    games: &[Game],
+    wide: &HashMap<u64, String>,
+    preview: Option<CardPreview<'_>>,
+    playtime: &HashMap<u64, crate::playtime::GamePlay>,
+    acts: &mut Vec<Action>,
+) -> GridView {
+    wide_grid(ui, games, wide, preview, playtime, acts)
 }
 
 /// Turns a vertical mouse wheel into sideways movement for the horizontal rows below.

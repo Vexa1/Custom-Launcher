@@ -4,6 +4,7 @@
 mod api;
 mod app;
 mod auth;
+mod chart_feed;
 mod avatar_3d;
 mod companion;
 mod discord_rpc;

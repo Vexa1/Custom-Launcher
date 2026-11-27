@@ -13,6 +13,7 @@ use crate::types::{
     GamePassItem, Msg, OmniHome, OutfitItem, PaletteColor, PlayerBadge, Profile, ResolvedGameLink,
     SavedSyncData, ServerItem, Sort, User, UserSearchPage,
 };
+use crate::chart_feed::{ChartError, SortsPage, game_from_explore, parse_sorts_page};
 use crate::video_preview;
 
 pub fn agent() -> &'static ureq::Agent {
@@ -396,23 +397,6 @@ pub fn str_of(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
-pub fn game_from_explore(v: &Value) -> Option<Game> {
-    if v["isSponsored"].as_bool() == Some(true) {
-        return None;
-    }
-    Some(Game {
-        universe_id: v["universeId"].as_u64()?,
-        place_id: v["rootPlaceId"].as_u64()?,
-        name: v["name"].as_str()?.to_string(),
-        creator: str_of(&v["creatorName"]),
-        creator_verified: v["creatorHasVerifiedBadge"].as_bool().unwrap_or(false),
-        playing: v["playerCount"].as_u64().unwrap_or(0),
-        up: v["totalUpVotes"].as_u64().unwrap_or(0),
-        down: v["totalDownVotes"].as_u64().unwrap_or(0),
-        description: str_of(&v["description"]),
-    })
-}
-
 static SID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn mix64(mut x: u64) -> u64 {
@@ -517,16 +501,18 @@ pub fn fetch_omni_home(sid: &str, cookie: &str) -> Result<OmniHome, String> {
     })
 }
 
-pub fn fetch_sorts(sid: &str, cookie: Option<&str>) -> Result<Vec<Sort>, String> {
+pub fn fetch_sorts(sid: &str, cookie: Option<&str>) -> Result<SortsPage, String> {
     let mut out = Vec::new();
-    let mut token = String::new();
+    let mut next_token: Option<String> = None;
     let mut explore_err = None;
+    // The opening sync walks a few pages so the feed has plenty to show before the first
+    // scroll; everything after that is prefetched on demand by `fetch_sorts_more`.
     for page in 0..3 {
         let mut url = format!(
             "https://apis.roblox.com/explore-api/v1/get-sorts?sessionId={sid}&device=computer&country=all"
         );
-        if !token.is_empty() {
-            url.push_str(&format!("&sortsPageToken={}", enc(&token)));
+        if let Some(token) = &next_token {
+            url.push_str(&format!("&sortsPageToken={}", enc(token)));
         }
         let v = match auth_get_json(&url, cookie) {
             Ok(v) => v,
@@ -536,27 +522,17 @@ pub fn fetch_sorts(sid: &str, cookie: Option<&str>) -> Result<Vec<Sort>, String>
             }
             Err(_) => break,
         };
-        for s in v["sorts"].as_array().into_iter().flatten() {
-            if s["contentType"].as_str() != Some("Games") {
-                continue;
-            }
-            let games: Vec<Game> = s["games"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(game_from_explore)
-                .collect();
-            let title = str_of(&s["sortDisplayName"]);
-            if !games.is_empty()
-                && !out
-                    .iter()
-                    .any(|x: &Sort| x.title.eq_ignore_ascii_case(&title))
+        let decoded = parse_sorts_page(&v);
+        for sort in decoded.sorts {
+            if !out
+                .iter()
+                .any(|x: &Sort| x.title.eq_ignore_ascii_case(&sort.title))
             {
-                out.push(Sort { title, games });
+                out.push(sort);
             }
         }
-        token = str_of(&v["nextSortsPageToken"]);
-        if token.is_empty() {
+        next_token = decoded.next;
+        if next_token.is_none() {
             break;
         }
     }
@@ -606,7 +582,51 @@ pub fn fetch_sorts(sid: &str, cookie: Option<&str>) -> Result<Vec<Sort>, String>
             return Err(e);
         }
     }
-    Ok(out)
+    Ok(SortsPage {
+        sorts: out,
+        next: next_token,
+    })
+}
+
+/// One more page of the explore cursor, for the charts feed's prefetch.
+///
+/// A `429` is handed back as [`ChartError::rate_limited`] with the server's own wait, so the
+/// page can show a quiet notice and a Retry link instead of retrying in a loop.
+pub fn fetch_sorts_more(
+    sid: &str,
+    cookie: Option<&str>,
+    token: &str,
+) -> Result<SortsPage, ChartError> {
+    let url = format!(
+        "https://apis.roblox.com/explore-api/v1/get-sorts?sessionId={sid}&device=computer&country=all&sortsPageToken={}",
+        enc(token)
+    );
+    let mut req = agent().get(&url);
+    if let Some(c) = cookie {
+        req = req.set("Cookie", &format!(".ROBLOSECURITY={c}"));
+    }
+    let v = match req.call() {
+        Ok(resp) => resp
+            .into_json::<Value>()
+            .map_err(|e| ChartError::other(e.to_string()))?,
+        Err(ureq::Error::Status(429, resp)) => {
+            return Err(ChartError::rate_limited(retry_after_secs(&resp)))
+        }
+        Err(ureq::Error::Status(code, _)) => return Err(ChartError::other(format!("HTTP {code}"))),
+        Err(e) => return Err(ChartError::other(e.to_string())),
+    };
+    Ok(parse_sorts_page(&v))
+}
+
+/// The server's own wait, in seconds, from a throttled response.
+fn retry_after_secs(resp: &ureq::Response) -> u64 {
+    resp.header("Retry-After")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| {
+            resp.header("x-ratelimit-reset")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(5)
 }
 
 pub fn search_games(q: &str, sid: &str) -> Result<Vec<Game>, String> {
@@ -691,22 +711,23 @@ pub fn games_by_universe(ids: &[u64]) -> Vec<Game> {
                 let Some(id) = g["id"].as_u64() else { continue };
                 let place_id = g["rootPlaceId"].as_u64().unwrap_or(0);
                 remember_place_universe(place_id, id);
-                by_id.insert(
-                    id,
-                    Game {
-                        universe_id: id,
-                        place_id,
-                        name: str_of(&g["name"]),
-                        creator: str_of(&g["creator"]["name"]),
-                        creator_verified: g["creator"]["hasVerifiedBadge"]
-                            .as_bool()
-                            .unwrap_or(false),
-                        playing: g["playing"].as_u64().unwrap_or(0),
-                        up: 0,
-                        down: 0,
-                        description: str_of(&g["description"]),
-                    },
-                );
+                let mut game = Game {
+                    universe_id: id,
+                    place_id,
+                    name: str_of(&g["name"]),
+                    creator: str_of(&g["creator"]["name"]),
+                    creator_verified: g["creator"]["hasVerifiedBadge"]
+                        .as_bool()
+                        .unwrap_or(false),
+                    playing: g["playing"].as_u64().unwrap_or(0),
+                    up: 0,
+                    down: 0,
+                    description: str_of(&g["description"]),
+                    ..Game::default()
+                };
+                // Votes arrive in a second response; the label is refreshed after they do.
+                crate::chart_feed::fill_labels(&mut game);
+                by_id.insert(id, game);
             }
         }
         if let Some(v) = votes_json {
@@ -3787,17 +3808,22 @@ pub fn load_sorts_cache() -> Vec<Sort> {
                 .into_iter()
                 .flatten()
                 .filter_map(|g| {
-                    Some(Game {
-                        universe_id: g["u"].as_u64()?,
-                        place_id: g["p"].as_u64().unwrap_or(0),
-                        name: g["n"].as_str().unwrap_or_default().to_string(),
-                        creator: g["c"].as_str().unwrap_or_default().to_string(),
-                        creator_verified: g["cv"].as_bool().unwrap_or(false),
-                        playing: g["pl"].as_u64().unwrap_or(0),
-                        up: g["up"].as_u64().unwrap_or(0),
-                        down: g["dn"].as_u64().unwrap_or(0),
-                        description: String::new(),
-                    })
+                    {
+                        let mut game = Game {
+                            universe_id: g["u"].as_u64()?,
+                            place_id: g["p"].as_u64().unwrap_or(0),
+                            name: g["n"].as_str().unwrap_or_default().to_string(),
+                            creator: g["c"].as_str().unwrap_or_default().to_string(),
+                            creator_verified: g["cv"].as_bool().unwrap_or(false),
+                            playing: g["pl"].as_u64().unwrap_or(0),
+                            up: g["up"].as_u64().unwrap_or(0),
+                            down: g["dn"].as_u64().unwrap_or(0),
+                            description: String::new(),
+                            ..Game::default()
+                        };
+                        crate::chart_feed::fill_labels(&mut game);
+                        Some(game)
+                    }
                 })
                 .collect();
             let title = s["title"].as_str().unwrap_or_default().to_string();

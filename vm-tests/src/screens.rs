@@ -371,6 +371,9 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
                 ui.add_space(10.0);
             }
         });
+        ui.add_space(6.0);
+        // The feed footer: it keeps counting up while the cursor keeps returning pages.
+        meta(ui, probe, "charts.footer", "1,250 games loaded \u{2014} keep scrolling");
     });
 }
 

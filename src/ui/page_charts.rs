@@ -111,7 +111,6 @@ impl Creblox {
                     // until this is pressed.
                     self.feed_shuffled = true;
                     self.feed_salt = self.feed_salt.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                    self.feed_rows = 30;
                 }
             });
         });
@@ -205,15 +204,12 @@ impl Creblox {
         });
         if self.chart_min_players != min_players {
             self.chart_min_players = min_players;
-            self.feed_rows = 30;
         }
         if self.chart_min_rating != min_rating {
             self.chart_min_rating = min_rating;
-            self.feed_rows = 30;
         }
         if self.chart_min_visits != min_visits {
             self.chart_min_visits = min_visits;
-            self.feed_rows = 30;
         }
 
         let min_players = self.chart_min_players;
@@ -251,7 +247,6 @@ impl Creblox {
         if sig != self.feed_sig {
             self.feed_sig = sig;
             self.rebuild_feed_pool(min_players, min_rating, min_visits);
-            self.feed_rows = self.feed_rows.max(30);
         }
 
         let matched = self.feed_pool.len();
@@ -270,35 +265,61 @@ impl Creblox {
                             .color(p.muted),
                     );
                 } else {
-                    let shown_n = self.feed_rows.min(matched);
-                    let preview = self.current_card_preview();
-                    wide_grid(
-                        ui,
-                        &self.feed_pool[..shown_n],
-                        &self.wide,
-                        preview,
-                        &self.playtime,
-                        acts,
-                    );
-                    ui.add_space(6.0);
-                    if shown_n < matched {
-                        small_text(
+                    // The grid lays out every row's height but only builds the cards that are
+                    // in the viewport, so 100 games and 10,000 games cost the same per frame.
+                    let grid = {
+                        let preview = self.current_card_preview();
+                        wide_grid_info(
                             ui,
-                            format!(
-                                "{shown_n} of {matched} games \u{2014} keep scrolling for more"
-                            ),
-                        );
-                        let (sentinel, _) =
-                            ui.allocate_exact_size(egui::vec2(1.0, 1.0), Sense::hover());
-                        // Grow only while the end of the feed is on screen. This used to
-                        // also require a wheel delta in that exact frame, which never
-                        // happens once a trackpad fling has settled - the feed stalled.
-                        if ui.is_rect_visible(sentinel) {
-                            self.feed_rows = (self.feed_rows + 24).min(matched);
-                            ui.ctx().request_repaint();
+                            &self.feed_pool,
+                            &self.wide,
+                            preview,
+                            &self.playtime,
+                            acts,
+                        )
+                    };
+                    ui.add_space(6.0);
+
+                    let in_flight = self.chart_feed.in_flight;
+                    let error = self.chart_feed.error.clone();
+                    let wait = self.chart_feed.wait_left(std::time::Instant::now());
+                    let more = self.chart_feed.next.is_some();
+                    let loaded = self.chart_feed.loaded.max(matched);
+                    let mut retry = false;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if in_flight {
+                            // A quiet skeleton row: the page is still usable while it loads.
+                            ui.add(egui::Spinner::new().size(12.0));
+                            small_text(ui, "Loading more games\u{2026}");
+                        } else if let Some(error) = &error {
+                            let note = if wait > 0 {
+                                format!("{error} ({wait}s)")
+                            } else {
+                                error.clone()
+                            };
+                            small_text(ui, note);
+                            if ui
+                                .link(RichText::new("Retry").size(12.0).color(p.text))
+                                .clicked()
+                            {
+                                retry = true;
+                            }
+                        } else if more {
+                            small_text(ui, format!("{loaded} games loaded \u{2014} keep scrolling"));
+                        } else {
+                            small_text(ui, format!("End of chart \u{00b7} {loaded} games"));
                         }
-                    } else {
-                        small_text(ui, format!("All {matched} games loaded"));
+                    });
+                    if retry {
+                        acts.push(Action::ChartRetry);
+                    }
+
+                    // Two rows early, so the next page is usually in place before its cards
+                    // could be seen. `request_chart_more` drops the call when a page is
+                    // already in flight or the cursor is exhausted.
+                    if grid.near_end {
+                        self.request_chart_more();
                     }
                 }
                 if min_visits > 0 && self.game_visits.len() < total {

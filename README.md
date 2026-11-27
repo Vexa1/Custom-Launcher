@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.18
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.19
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -72,7 +72,7 @@ Everything listed here exists in the code today. File references point at the im
 | Feature | How it works |
 |---|---|
 | **Home feed** (`ui/page_home.rs`) | Friends strip (presence dot, "Playing <game>", right-click → *Join game*), first Explore sort as a 6-across grid, "Continue" row from recent games, Favorites row, then every remaining sort as a horizontal row. |
-| **Charts** (`ui/page_charts.rs`) | Topic chips over a full-width grid of the selected sort, with an empty state and a manual refresh control. |
+| **Charts** (`ui/page_charts.rs`) | Every game the explore API will hand over: a cursor-followed, deduplicated grid that keeps loading as you scroll. |
 | **Search** (`ui/page_search.rs`, `api.rs`) | Accepts a game name, a bare Place ID or a pasted Roblox game URL; resolves whichever it is and shows results as cards. |
 | **Game details** (`ui/page_game.rs`) | Media carousel (image thumbnails plus real **animated video previews**), creator + verified badge, maturity, rating and player counts, Play / Favorite / vote, private-server entry, server list with sorting (ping/players), region lookup, game passes, badges and social tabs. |
 | **Video previews** (`video_preview.rs`, `app.rs:2646-2746`) | Game previews are VP8-in-WebM; they are demuxed with `matroska-demuxer`, decoded with `vp8-decoder` on a worker thread, downscaled to RGBA and streamed into an egui texture on hover. Includes a monotonic frame clock and looping. |
@@ -371,6 +371,35 @@ party member's context menu. It is one modal over the current page and it never 
 `vm-tests/tests/inventory.rs` covers the JSON (including badges and cursors), the private and
 429 policies and the LRU/in-flight rules without a network; `screens.rs` renders the populated
 grid and the private empty state as `inventory-*.png`.
+
+#### Game Charts: an endless feed (`chart_feed.rs`, `ui/page_charts.rs`)
+
+Charts is not a fixed list. The explore endpoint answers with a handful of sorts, each carrying
+games, plus a `nextSortsPageToken`; the page follows that token for as long as one comes back
+and shows *"End of chart"* only when the API sends no cursor.
+
+- **Prefetch two rows early.** The grid reports when its bottom is within ~2.5 rows of the
+  viewport (the grid's `GridView::near_end`, from its measured row height), and the page requests
+  the next cursor then. One request is in flight at a time, keyed by the cursor it was started
+  for, so a fling cannot fire the same page twice.
+- **Back-off that never locks up.** A `429` stores the server's own `Retry-After` (clamped
+  1–120 s) and the footer says when it will resume; the feed retries by itself afterwards, and
+  the **Retry** link clears the window immediately. Any other failure keeps its message and
+  waits for that link instead of looping.
+- **No duplicate cards.** `ChartFeed` owns a `HashSet<u64>` of `universe_id`s; a game that
+  arrives again under another sort or page is dropped. A page that only repeats games ends the
+  feed, so a cursor that cycles cannot spin.
+- **Flat cost as the list grows.** `wide_grid` asks `visible_rows` which rows the clip rect can
+  show and builds only those; every other row only reserves its measured height, which keeps
+  the scrollbar honest. The first unmeasured frame uses the card's image height as the row
+  estimate instead of building thousands of cards, and the measured height replaces it at once.
+- **Formatted on arrival.** Player counts and like ratios are written into the game when it is
+  parsed (`fill_labels`), so a drawn card reads strings instead of formatting numbers.
+- Thumbnails are still requested through the launcher's capped loader and
+  `enforce_ram_cache_budget`, so scrolling deep does not grow RAM without bound.
+
+`vm-tests/tests/charts.rs` covers the page decoder, a 1,250-game cursor walk, cross-page and
+cross-sort dedupe, the in-flight/`429` guards and the viewport row window.
 
 #### Why the overlay costs almost nothing
 

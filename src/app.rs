@@ -78,8 +78,8 @@ pub struct Creblox {
     pub profile_cache: HashMap<u64, (FriendProfile, Instant)>,
     /// Set when a section button is clicked, consumed by the page scroll area.
     pub scroll_to_top: bool,
-    /// How many random games the charts feed currently shows (grows as you scroll).
-    pub feed_rows: usize,
+    /// Cursor, dedupe set and back-off for the charts feed's infinite scroll.
+    pub chart_feed: crate::chart_feed::ChartFeed,
     /// Seed of the random game order; "Shuffle" changes it.
     pub feed_salt: u64,
     /// Minimum visit count filter for the games feed.
@@ -418,7 +418,7 @@ impl Creblox {
             feed_sig: 0,
             profile_cache: HashMap::new(),
             scroll_to_top: false,
-            feed_rows: 30,
+            chart_feed: crate::chart_feed::ChartFeed::default(),
             feed_salt: 0x5EED_1234_ABCD_0001,
             chart_min_visits: 0,
             game_visits: HashMap::new(),
@@ -653,6 +653,26 @@ impl Creblox {
             (None, None) => true,
             (None, Some(s)) => s.elapsed() >= interval,
         }
+    }
+
+    /// Prefetches one more charts page when the feed allows it.
+    ///
+    /// The guards matter: an in-flight request, a missing cursor, a `429` window still ticking
+    /// or a scroll that fires every frame all end here, so the same page is never requested
+    /// twice and a throttled API is left alone until its own wait has passed.
+    pub fn request_chart_more(&mut self) {
+        if self.cookie.is_none() || !self.chart_feed.can_fetch(Instant::now()) {
+            return;
+        }
+        let Some(token) = self.chart_feed.next.clone() else {
+            return;
+        };
+        let sid = self.sid.clone();
+        let cookie = self.cookie.clone();
+        self.chart_feed.in_flight = true;
+        self.spawn(move || {
+            Msg::ChartMore(crate::api::fetch_sorts_more(&sid, cookie.as_deref(), &token))
+        });
     }
 
     pub fn sync_sorts(&mut self, force: bool) {
@@ -1298,6 +1318,7 @@ impl Creblox {
         self.active_private_server = None;
         self.pending_discord_launch = None;
         self.sorts = None;
+        self.chart_feed.reset();
         self.recent.clear();
         self.favs.clear();
         self.wide.clear();
@@ -1576,19 +1597,22 @@ impl Creblox {
                     self.last_sorts_sync = Some(Instant::now());
                     self.clear_home_sync_spinner_if_idle();
                     match r {
-                        Ok(s) => {
-                            let ids: Vec<u64> = s
+                        Ok(page) => {
+                            // A fresh sync replaces the catalogue and resets the cursor.
+                            let mut sorts: Vec<Sort> = Vec::new();
+                            self.chart_feed.absorb_initial(&mut sorts, page);
+                            let ids: Vec<u64> = sorts
                                 .iter()
                                 .flat_map(|sort| sort.games.iter().map(|g| g.universe_id))
                                 .collect();
-                            crate::api::save_sorts_cache(&s);
-                            if !s.is_empty() {
-                                if self.chart >= s.len() {
+                            crate::api::save_sorts_cache(&sorts);
+                            if !sorts.is_empty() {
+                                if self.chart >= sorts.len() {
                                     self.chart = 0;
                                 }
-                                self.sorts = Some(Ok(s));
+                                self.sorts = Some(Ok(sorts));
                             } else if self.sorts.is_none() || matches!(self.sorts, Some(Err(_))) {
-                                self.sorts = Some(Ok(s));
+                                self.sorts = Some(Ok(sorts));
                             }
                             self.request_thumbs(ids);
                         }
@@ -1597,6 +1621,32 @@ impl Creblox {
                                 self.sorts = Some(Err(e));
                             }
                         }
+                    }
+                }
+                Msg::ChartMore(r) => {
+                    self.chart_feed.in_flight = false;
+                    if !logged_in {
+                        continue;
+                    }
+                    match r {
+                        Ok(page) => {
+                            let mut sorts = match &self.sorts {
+                                Some(Ok(s)) => s.clone(),
+                                _ => Vec::new(),
+                            };
+                            // Only new `universe_id`s are added, so repeated cards cannot appear.
+                            let fresh = self.chart_feed.absorb(&mut sorts, page);
+                            if !fresh.is_empty() {
+                                crate::api::save_sorts_cache(&sorts);
+                                self.sorts = Some(Ok(sorts));
+                                self.request_thumbs(fresh);
+                            }
+                        }
+                        Err(e) if e.rate_limited => {
+                            self.chart_feed
+                                .note_rate_limit(e.retry_after_secs, Instant::now());
+                        }
+                        Err(e) => self.chart_feed.note_error(e.message),
                     }
                 }
                 Msg::Search(q, r) => {
@@ -5712,6 +5762,10 @@ impl eframe::App for Creblox {
                     }
                 }
                 Action::RefreshGames => self.force_refresh_games(),
+                Action::ChartRetry => {
+                    self.chart_feed.clear_error();
+                    self.request_chart_more();
+                }
                 Action::RefreshMyProfile => {
                     self.my_profile = None;
                     self.my_profile_err = None;

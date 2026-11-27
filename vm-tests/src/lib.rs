@@ -18,6 +18,9 @@ pub mod hud;
 pub mod screens;
 pub mod shots;
 
+#[path = "../../src/chart_feed.rs"]
+pub mod chart_feed;
+
 #[path = "../../src/game_log.rs"]
 pub mod game_log;
 

@@ -237,6 +237,10 @@ pub struct Game {
     pub up: u64,
     pub down: u64,
     pub description: String,
+    /// Card labels, formatted once when the game is parsed (`chart_feed::fill_labels`) so a
+    /// drawn row never formats numbers: `players_text` is "1.2K" and `rating_text` is "87%".
+    pub players_text: String,
+    pub rating_text: String,
 }
 
 impl Game {
@@ -867,6 +871,8 @@ pub enum Action {
     Go(Page),
     GoChart(usize),
     RefreshGames,
+    /// The charts footer's "Retry" link after a failed or rate-limited page.
+    ChartRetry,
     HoverGame(u64),
     Open(Game),
     OpenFriend(User),
@@ -921,7 +927,9 @@ pub enum Action {
 }
 
 pub enum Msg {
-    Sorts(Result<Vec<Sort>, String>),
+    Sorts(Result<crate::chart_feed::SortsPage, String>),
+    /// One more cursor page of the charts feed.
+    ChartMore(Result<crate::chart_feed::SortsPage, crate::chart_feed::ChartError>),
     /// Visit counts for a batch of universes, used by the games feed filter.
     GameVisits(HashMap<u64, u64>),
     Search(String, Result<Vec<Game>, String>),
