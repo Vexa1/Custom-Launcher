@@ -22,7 +22,6 @@ use serde_json::{Value, json};
 use crate::api::{games_by_places, lookup_server_location};
 use crate::auth::data_dir;
 use crate::fastflags::{FastFlagsConfig, build_client_app_settings};
-use crate::roblox_process::enumerate_roblox_processes;
 use crate::types::Settings;
 
 pub const OVERLAY_WINDOW_FLAG: &str = "--overlay-window";
@@ -1008,7 +1007,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
         if cfg.stats.as_ref().is_some_and(|s| s.cpu || s.ram) {
             if last_pid_scan.elapsed() >= Duration::from_secs(3) {
                 last_pid_scan = Instant::now();
-                let (procs, _) = enumerate_roblox_processes();
+                let (procs, _) = crate::roblox_process::enumerate_roblox_processes_cached();
                 roblox_pid = procs
                     .iter()
                     .max_by_key(|p| p.start_ms)

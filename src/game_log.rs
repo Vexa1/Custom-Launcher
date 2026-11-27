@@ -1,7 +1,8 @@
 //! The Roblox client log -> the game server the player is connected to.
 //!
-//! Pure text parsing: no filesystem, no processes, no platform APIs, so the VM test harness
-//! includes this file directly and runs the cases in `vm-tests/tests/roblox_log.rs`.
+//! Pure text parsing and log-file selection: no filesystem, no processes, no platform APIs,
+//! so the VM test harness includes this file directly and runs the cases in
+//! `vm-tests/tests/roblox_log.rs`.
 //!
 //! The overlay pings and geolocates the address found here, which is why every spelling the
 //! client has shipped is accepted: a missed format is a HUD stuck on "Server info unavailable".
@@ -297,4 +298,58 @@ fn place_id_from_marker(text: &str) -> Option<u64> {
     let rest = text[p + "placeid".len()..].trim_start_matches([' ', '=', ':', '"']);
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse::<u64>().ok().filter(|&id| id > 0)
+}
+
+/// One player log in a Roblox logs directory, with the timestamps that identify the session
+/// it belongs to. The caller fills these from a directory listing; everything below is pure
+/// so it is testable without a Roblox install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogFile {
+    pub path: std::path::PathBuf,
+    pub created_ms: u64,
+    pub modified_ms: u64,
+}
+
+/// Whether a file name is a player log rather than a crash handler's log.
+///
+/// Windows logs always carry `_Player_`; macOS logs may not, so there any non-crash
+/// `_last.log` counts and the timestamp scoring below tells the sessions apart.
+pub fn is_player_log_name(name: &str, macos: bool) -> bool {
+    if name.contains("CrashHandler") {
+        return false;
+    }
+    if macos {
+        name.contains("_last.log")
+    } else {
+        name.contains("_Player_") && name.ends_with("_last.log")
+    }
+}
+
+/// The player log written by the process that started at `start_ms`.
+///
+/// The closest creation time wins; a tie goes to the most recently written file. Logs that
+/// predate the process (beyond the client's start-up slack) belong to an earlier session.
+pub fn pick_player_log(files: &[LogFile], start_ms: u64) -> Option<&std::path::Path> {
+    let mut best: Option<(u64, u64, &std::path::Path)> = None;
+    for f in files {
+        if start_ms > 0 {
+            if f.modified_ms + 2_000 < start_ms {
+                continue;
+            }
+            if f.created_ms > 0 && f.created_ms + 4_000 < start_ms {
+                continue;
+            }
+        }
+        let dist = if start_ms > 0 && f.created_ms > 0 {
+            f.created_ms.abs_diff(start_ms)
+        } else {
+            0
+        };
+        if best.as_ref().is_none_or(|(b_dist, b_mod, _)| {
+            dist < *b_dist || (dist == *b_dist && f.modified_ms > *b_mod)
+        }) {
+            best = Some((dist, f.modified_ms, f.path.as_path()));
+        }
+    }
+    best.map(|(_, _, path)| path)
 }

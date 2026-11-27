@@ -257,7 +257,7 @@ pub struct RbxProc {
 }
 
 #[cfg(windows)]
-pub fn enumerate_roblox_processes() -> (Vec<RbxProc>, HashMap<u32, PathBuf>) {
+fn scan_roblox_processes() -> (Vec<RbxProc>, HashMap<u32, PathBuf>) {
     let mut players = Vec::new();
     let mut crash_logs = HashMap::new();
     let self_pid = std::process::id();
@@ -440,7 +440,7 @@ fn mac_process_start_ms(pid: u32) -> u64 {
 }
 
 #[cfg(target_os = "macos")]
-pub fn enumerate_roblox_processes() -> (Vec<RbxProc>, HashMap<u32, PathBuf>) {
+fn scan_roblox_processes() -> (Vec<RbxProc>, HashMap<u32, PathBuf>) {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -567,7 +567,7 @@ pub fn force_kill_roblox_bundle(helpers_only: bool) -> usize {
 
 pub use crate::game_log::{
     extract_active_place_id_from_log, extract_server_info_from_log, inspect_player_log_text,
-    LogSessionState, ServerInfo,
+    is_player_log_name, pick_player_log, LogFile, LogSessionState, ServerInfo,
 };
 
 /// True when a running Roblox player has a *join banner* in its log.
@@ -578,7 +578,8 @@ pub use crate::game_log::{
 /// markers are not recognised left it false for the whole session - which is why the HUD
 /// could never appear at all, however healthy the rest of the pipeline was.
 pub fn session_banner_active() -> bool {
-    let (procs, crash_logs) = enumerate_roblox_processes();
+    // Shares the scan the caller just made (the overlay polls both together).
+    let (procs, crash_logs) = enumerate_roblox_processes_cached();
     if procs.is_empty() {
         return false;
     }
@@ -747,6 +748,59 @@ pub fn roblox_logs_dir() -> Option<PathBuf> {
     )
 }
 
+/// One listing of a Roblox logs directory, shared by every process for a second.
+///
+/// The watcher asks for a log once per Roblox process on every 300 ms tick, and the
+/// directory holds every session's log, so the listing and its `stat` calls used to be
+/// repeated work that only changed when a new session wrote a file. A stale listing costs
+/// at most a tick of delay in finding a brand-new log.
+fn player_logs_in(dir: &Path) -> Arc<Vec<LogFile>> {
+    type Cache = Option<(PathBuf, Instant, Arc<Vec<LogFile>>)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    const TTL: Duration = Duration::from_millis(1_000);
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached_dir, at, files)) = guard.as_ref() {
+            if cached_dir == dir && at.elapsed() < TTL {
+                return Arc::clone(files);
+            }
+        }
+    }
+    let files = Arc::new(scan_log_dir(dir));
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((dir.to_path_buf(), Instant::now(), Arc::clone(&files)));
+    }
+    files
+}
+
+fn scan_log_dir(dir: &Path) -> Vec<LogFile> {
+    let macos = cfg!(target_os = "macos");
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // Cheap name filter first: only a handful of entries get a `stat`.
+        if !is_player_log_name(&name.to_string_lossy(), macos) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        files.push(LogFile {
+            path: entry.path(),
+            created_ms: unix_ms(meta.created().ok()),
+            modified_ms: unix_ms(meta.modified().ok()),
+        });
+    }
+    files
+}
+
+fn unix_ms(t: Option<SystemTime>) -> u64 {
+    t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 pub fn find_player_log_for_proc(
     proc: &RbxProc,
     crash_logs: &HashMap<u32, PathBuf>,
@@ -757,56 +811,8 @@ pub fn find_player_log_for_proc(
             return Some(p.clone());
         }
     }
-    let dir = logs_dir?;
-    let mut best: Option<(u64, u64, PathBuf)> = None;
-    for entry in fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        // Windows logs always carry `_Player_`; macOS logs may not, so there we
-        // accept any non-crash `_last.log` and score it by timestamp below.
-        let player_log = if cfg!(target_os = "macos") {
-            name_str.contains("_last.log") && !name_str.contains("CrashHandler")
-        } else {
-            name_str.contains("_Player_")
-                && name_str.ends_with("_last.log")
-                && !name_str.contains("CrashHandler")
-        };
-        if !player_log {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        let created_ms = meta
-            .created()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .and_then(|d| u64::try_from(d.as_millis()).ok())
-            .unwrap_or(0);
-        let modified_ms = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .and_then(|d| u64::try_from(d.as_millis()).ok())
-            .unwrap_or(0);
-        if proc.start_ms > 0 {
-            if modified_ms + 2_000 < proc.start_ms {
-                continue;
-            }
-            if created_ms > 0 && created_ms + 4_000 < proc.start_ms {
-                continue;
-            }
-        }
-        let dist = if proc.start_ms > 0 && created_ms > 0 {
-            created_ms.abs_diff(proc.start_ms)
-        } else {
-            0
-        };
-        if best.as_ref().is_none_or(|(b_dist, b_mod, _)| {
-            dist < *b_dist || (dist == *b_dist && modified_ms > *b_mod)
-        }) {
-            best = Some((dist, modified_ms, entry.path()));
-        }
-    }
-    best.map(|(_, _, p)| p)
+    let files = player_logs_in(logs_dir?);
+    pick_player_log(files.as_slice(), proc.start_ms).map(|p| p.to_path_buf())
 }
 
 pub fn close_tray_roblox_processes() -> usize {
@@ -1379,26 +1385,37 @@ pub fn restore() -> Result<String, String> {
     Ok("macOS manages Roblox links itself; there is no launcher override to restore.".to_string())
 }
 
-/// Same as [`enumerate_roblox_processes`] but reuses a scan younger than one second.
-/// For UI code that runs every frame (a full process scan per frame is expensive).
-pub fn enumerate_roblox_processes_cached() -> (Vec<RbxProc>, HashMap<u32, PathBuf>) {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    type Cache = Option<(Instant, Vec<RbxProc>)>;
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((at, procs)) = guard.as_ref() {
-            // UI code asks for this every frame; spawning `ps` once a second was
-            // measurable on slow Macs.
-            if at.elapsed() < Duration::from_millis(3000) {
-                return (procs.clone(), HashMap::new());
+type ProcScan = (Vec<RbxProc>, HashMap<u32, PathBuf>);
+
+/// Every Roblox process, plus the crash handlers that point at a log.
+pub fn enumerate_roblox_processes() -> ProcScan {
+    let scan = scan_roblox_processes();
+    // Publish it: the overlay and the launcher window often ask right after the watcher, and
+    // a scan is the most expensive thing this module does.
+    if let Ok(mut cache) = scan_cache().lock() {
+        *cache = Some((Instant::now(), scan.clone()));
+    }
+    scan
+}
+
+fn scan_cache() -> &'static Mutex<Option<(Instant, ProcScan)>> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, ProcScan)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Same as [`enumerate_roblox_processes`] but reuses a scan younger than a second.
+///
+/// The watcher stores every scan it makes, so a UI caller (the overlay polls four times a
+/// second on macOS, where a scan calls `proc_pidpath` for every pid on the machine) usually
+/// gets the watcher's answer instead of paying for a second full scan.
+pub fn enumerate_roblox_processes_cached() -> ProcScan {
+    const TTL: Duration = Duration::from_millis(1_000);
+    if let Ok(guard) = scan_cache().lock() {
+        if let Some((at, scan)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return scan.clone();
             }
         }
     }
-    let (procs, logs) = enumerate_roblox_processes();
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((Instant::now(), procs.clone()));
-    }
-    (procs, logs)
+    enumerate_roblox_processes()
 }

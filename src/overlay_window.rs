@@ -829,6 +829,11 @@ struct OverlayWindowApp {
     applied_bounds: Option<CGRect>,
     last_poll: Instant,
     last_tweak: Option<Instant>,
+    /// The frontmost app and the Roblox window rectangle. Both are OS lookups, so they are
+    /// refreshed on their own slower clock instead of on every poll.
+    last_lookup: Instant,
+    front: Option<(String, i32)>,
+    roblox_window: Option<CGRect>,
     /// Size + modification time of the spec we last parsed.
     last_spec_stamp: Option<(u64, Option<std::time::SystemTime>)>,
     misses: u32,
@@ -890,6 +895,9 @@ impl OverlayWindowApp {
             applied_bounds: None,
             last_poll: Instant::now() - Duration::from_secs(10),
             last_tweak: None,
+            last_lookup: Instant::now() - Duration::from_secs(10),
+            front: None,
+            roblox_window: None,
             last_spec_stamp: None,
             misses: 0,
             missing_specs: 0,
@@ -1052,20 +1060,33 @@ impl OverlayWindowApp {
         self.last_poll = Instant::now();
 
         // Only draw while Roblox is the front app: switching to another window or Space
-        // hides the overlay immediately instead of leaving it floating for a few seconds.
-        let front = frontmost_application();
+        // hides the overlay instead of leaving it floating for a few seconds.
+        //
+        // These two are the expensive half of a poll: `frontmostApplication` goes through
+        // AppKit and `CGWindowListCopyWindowInfo` walks every window on the machine. The
+        // editor and a drag re-poll at frame rate, so asking about seven times a second
+        // (the 150 ms floor below) bought nothing - neither answer changes that fast. They
+        // now share a half-second clock, still twice the cadence of a visible HUD frame.
+        if self.last_lookup.elapsed() >= Duration::from_millis(500) {
+            self.last_lookup = Instant::now();
+            self.front = frontmost_application();
+            self.roblox_window = find_roblox_window();
+        }
+        let front = self.front.clone();
         // Is a game running at all? This is what stops the overlay from appearing over the
         // desktop when nothing was joined, and makes it vanish once the game closes.
         if self.last_proc_check.elapsed() >= Duration::from_millis(1500) {
             self.last_proc_check = Instant::now();
-            let (procs, _) = crate::roblox_process::enumerate_roblox_processes();
+            // Cached: the answer is one tick old at most, and a full scan here ran twice
+            // per poll (`session_banner_active` below scans too).
+            let (procs, _) = crate::roblox_process::enumerate_roblox_processes_cached();
             self.roblox_running = !procs.is_empty();
             // Independent of the launcher: a join banner in the player log is a session.
             self.session_active = crate::roblox_process::session_banner_active();
         }
         // A Roblox window that exists proves the game runs even when the process scan
         // misses it (helper names, sandboxing, permissions).
-        let found = find_roblox_window();
+        let found = self.roblox_window;
         if found.is_some() {
             self.roblox_running = true;
         }

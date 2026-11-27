@@ -5,8 +5,18 @@
 //! geolocates it, so a missed format is a HUD stuck on "Server info unavailable".
 
 use creblox_vm_tests::game_log::{
-    extract_server_info_from_log, inspect_player_log_text, LogSessionState,
+    extract_server_info_from_log, inspect_player_log_text, is_player_log_name, pick_player_log,
+    LogFile, LogSessionState,
 };
+use std::path::{Path, PathBuf};
+
+fn log_file(name: &str, created_ms: u64, modified_ms: u64) -> LogFile {
+    LogFile {
+        path: PathBuf::from(name),
+        created_ms,
+        modified_ms,
+    }
+}
 
 #[test]
 fn udmux_address_line_wins_over_the_private_rcc_address() {
@@ -101,4 +111,86 @@ fn an_unquoted_join_banner_counts_as_a_play_session() {
 ";
     let (state, _) = inspect_player_log_text(log, log.len() as u64);
     assert_eq!(state, LogSessionState::Playing);
+}
+
+#[test]
+fn windows_player_logs_carry_the_player_marker() {
+    assert!(is_player_log_name(
+        "0.618.0.6180600_20260203T040506Z_Player_abc12_last.log",
+        false
+    ));
+    assert!(!is_player_log_name("0.618.0.6180600_Player_abc12.log", false));
+    assert!(!is_player_log_name("studio_last.log", false));
+}
+
+#[test]
+fn macos_player_logs_only_need_the_last_log_suffix() {
+    assert!(is_player_log_name(
+        "2026-02-03T04-05-06_Player_abc12_last.log",
+        true
+    ));
+    assert!(is_player_log_name("2026-02-03T04-05-06_last.log", true));
+}
+
+#[test]
+fn a_crash_handler_log_is_never_a_player_log() {
+    for macos in [true, false] {
+        assert!(!is_player_log_name(
+            "2026-02-03T04-05-06_Player_CrashHandler_last.log",
+            macos
+        ));
+    }
+}
+
+#[test]
+fn the_log_created_closest_to_the_process_start_wins() {
+    let files = [
+        log_file("older_last.log", 1_000_000, 1_100_000),
+        log_file("newer_last.log", 1_000_100, 1_000_200),
+    ];
+    assert_eq!(
+        pick_player_log(&files, 1_000_080),
+        Some(Path::new("newer_last.log"))
+    );
+}
+
+#[test]
+fn a_log_written_after_the_start_beats_an_earlier_one_on_a_tie() {
+    let files = [
+        log_file("stale_last.log", 1_000_000, 1_000_500),
+        log_file("live_last.log", 1_000_000, 1_001_000),
+    ];
+    assert_eq!(
+        pick_player_log(&files, 1_000_200),
+        Some(Path::new("live_last.log"))
+    );
+}
+
+#[test]
+fn logs_from_before_the_process_started_belong_to_an_earlier_session() {
+    let files = [
+        log_file("yesterday_last.log", 900_000, 900_500),
+        log_file("current_last.log", 1_000_000, 1_000_400),
+    ];
+    assert_eq!(
+        pick_player_log(&files, 1_000_000),
+        Some(Path::new("current_last.log"))
+    );
+}
+
+#[test]
+fn an_empty_directory_has_no_log_for_the_process() {
+    assert!(pick_player_log(&[], 1_000_000).is_none());
+}
+
+#[test]
+fn without_a_start_time_the_most_recently_written_log_wins() {
+    let files = [
+        log_file("first_last.log", 1_000_000, 1_000_100),
+        log_file("second_last.log", 900_000, 1_000_900),
+    ];
+    assert_eq!(
+        pick_player_log(&files, 0),
+        Some(Path::new("second_last.log"))
+    );
 }
