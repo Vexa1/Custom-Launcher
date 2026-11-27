@@ -114,7 +114,7 @@ pub fn run() {
     let mut was_playing = false;
     let mut not_playing_polls = 0u32;
     let mut empty_polls = 0u32;
-    let mut last_server: Option<(String, String, u64)> = None;
+    let mut last_server: Option<crate::game_overlay::ServerData> = None;
     let mut last_settings_check = Instant::now();
     let left_game;
 
@@ -136,7 +136,7 @@ pub fn run() {
         let (procs, crash_logs) = enumerate_roblox_processes();
 
         let mut playing = false;
-        let mut server: Option<(String, String, u64)> = None;
+        let mut server: Option<crate::game_overlay::ServerData> = None;
         for p in &procs {
             let Some(log_path) = find_player_log_for_proc(p, &crash_logs, logs_dir.as_deref())
             else {
@@ -151,7 +151,12 @@ pub fn run() {
             {
                 playing = true;
                 if let Some(s) = srv {
-                    server = Some((s.ip, s.job_id, s.place_id));
+                    server = Some(crate::game_overlay::ServerData {
+                        ip: s.ip,
+                        port: s.port,
+                        job_id: s.job_id,
+                        place_id: s.place_id,
+                    });
                 }
             }
         }

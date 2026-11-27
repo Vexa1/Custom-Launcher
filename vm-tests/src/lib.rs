@@ -13,6 +13,12 @@ pub mod auth;
 pub mod roblox_process;
 pub mod types;
 
+#[path = "../../src/game_log.rs"]
+pub mod game_log;
+
+#[path = "../../src/net_probe.rs"]
+pub mod net_probe;
+
 #[path = "../../src/party.rs"]
 pub mod party;
 

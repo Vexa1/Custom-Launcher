@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -231,10 +231,12 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct ServerData {
-    ip: String,
-    job_id: String,
-    place_id: u64,
+pub struct ServerData {
+    pub ip: String,
+    /// RakNet port from the log, `0` when unknown (the probe falls back to its default).
+    pub port: u16,
+    pub job_id: String,
+    pub place_id: u64,
 }
 
 struct Shared {
@@ -326,16 +328,12 @@ impl OverlayManager {
     }
 
     /// Tells the overlays which server the game joined: `(ip, job id, place id)`.
-    pub fn set_server(&mut self, server: Option<(String, String, u64)>) {
+    pub fn set_server(&mut self, server: Option<ServerData>) {
         self.reap();
         let Some(r) = &self.running else {
             return;
         };
-        let new = server.map(|(ip, job_id, place_id)| ServerData {
-            ip,
-            job_id,
-            place_id,
-        });
+        let new = server;
         if let Ok(mut g) = r.shared.lock() {
             if g.server != new {
                 g.server = new;
@@ -756,58 +754,67 @@ impl Usage {
     }
 }
 
-/// Round-trip time in milliseconds to `target` (an IP or a host name), timed with a TCP
-/// handshake on port 443.
-///
-/// Roblox game servers drop ICMP echo requests, so the old `/sbin/ping` probe almost always
-/// came back empty and the overlay showed `Ping --`. A TCP connect to the same machine's
-/// HTTPS port is answered by Roblox's own servers and measures the same network round trip.
-fn tcp_rtt_on(target: &str, port: u16) -> Option<u32> {
-    use std::net::{TcpStream, ToSocketAddrs};
-    let addr = (target, port).to_socket_addrs().ok()?.next()?;
-    let start = Instant::now();
-    match TcpStream::connect_timeout(&addr, Duration::from_millis(1200)) {
-        Ok(_) => Some(start.elapsed().as_millis().clamp(1, 9_999) as u32),
-        Err(_) => None,
+/// True while a probe is running, so the 2 s tick can never stack a second one: a silent
+/// server costs 400 ms of UDP plus up to a second of ICMP, and overlapping threads would
+/// only add sockets and out-of-order results.
+static PING_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// The server already reported as silent, so overlay.log gets one line per host and not one
+/// every two seconds.
+static PING_LOGGED: Mutex<Option<String>> = Mutex::new(None);
+
+/// Measures the live game server, never a web edge: a probe to `www.roblox.com` reported
+/// ~125 ms from New Zealand while the server the player was in (Sydney) answered in ~30 ms.
+/// When the server does not answer at all the row stays `-- ms`.
+fn spawn_ping(ip: String, port: u16, out: Arc<AtomicU32>) {
+    if PING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = thread::Builder::new()
+        .name("creblox-ping".to_string())
+        .spawn(move || {
+            let port = if port == 0 {
+                crate::net_probe::DEFAULT_GAME_PORT
+            } else {
+                port
+            };
+            let rtt = crate::net_probe::udp_rtt(&ip, port)
+                .or_else(|| crate::net_probe::icmp_rtt(&ip));
+            if rtt.is_none() {
+                log_silent_server(&ip, port);
+            }
+            out.store(rtt.unwrap_or(NO_PING), Ordering::Relaxed);
+            PING_IN_FLIGHT.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        PING_IN_FLIGHT.store(false, Ordering::Release);
     }
 }
 
-/// Game servers answer HTTPS on some hosts and plain HTTP on others; try both before
-/// giving up on the TCP probe.
-fn tcp_rtt(target: &str) -> Option<u32> {
-    tcp_rtt_on(target, 443).or_else(|| tcp_rtt_on(target, 80))
-}
-
-/// ICMP fallback for the rare case that TCP is filtered but echo requests are answered.
-fn icmp_rtt(target: &str) -> Option<u32> {
-    let out = Command::new("/sbin/ping")
-        .args(["-c", "1", "-t", "1", target])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let after = text.split("time=").nth(1)?;
-    let num: String = after
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    num.parse::<f32>().ok().map(|ms| ms.round() as u32)
-}
-
-/// Best measurement available: the game server first, then Roblox's web edge, so the panel
-/// shows a real number instead of `--` when a server drops both TCP and ICMP.
-fn measure_ping(target: &str) -> Option<u32> {
-    tcp_rtt(target)
-        .or_else(|| icmp_rtt(target))
-        .or_else(|| tcp_rtt("www.roblox.com"))
-}
-
-fn spawn_ping(target: String, out: Arc<AtomicU32>) {
-    let _ = thread::Builder::new()
-        .name("creblox-ping".to_string())
-        .spawn(move || {
-            out.store(measure_ping(&target).unwrap_or(NO_PING), Ordering::Relaxed);
-        });
+/// One line in overlay.log the first time a host answers neither probe. The HUD can only
+/// show `-- ms`, which is indistinguishable from a broken probe; this records which host
+/// was asked and that it stayed silent, next to the overlay window's own stderr.
+fn log_silent_server(ip: &str, port: u16) {
+    let key = format!("{ip}:{port}");
+    let first = PING_LOGGED
+        .lock()
+        .map(|mut seen| {
+            if seen.as_deref() == Some(key.as_str()) {
+                false
+            } else {
+                *seen = Some(key.clone());
+                true
+            }
+        })
+        .unwrap_or(false);
+    if !first {
+        return;
+    }
+    use std::io::Write;
+    let path = data_dir().join("overlay.log");
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "ping {key}: no reply to UDP ping or ICMP echo");
+    }
 }
 
 /// Newest Roblox player process found by name.
@@ -891,7 +898,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     let session_start = Instant::now();
     let ping_ms = Arc::new(AtomicU32::new(NO_PING));
     let mut last_ping = Instant::now() - Duration::from_secs(60);
-    let mut last_ping_target: Option<String> = None;
+    let mut last_ping_target: Option<(String, u16)> = None;
     let mut roblox_pid: Option<u32> = None;
     let mut last_pid_scan = Instant::now() - Duration::from_secs(60);
     // One syscall per tick instead of a `/bin/ps` fork, and a delta-based CPU figure.
@@ -1021,30 +1028,28 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             // Nothing is being sampled: start clean if it is switched back on.
             usage.reset();
         }
-        // Ping: measured even before the server IP is known (Roblox's web edge is the
-        // fallback), and reset while switching servers so no stale number is shown.
+        // Ping: the live game server only, on the UDP path the game uses. Until the log
+        // yields that server's address the row stays `-- ms`, so it can never show a
+        // number measured against a web API on another continent.
         if let Some(stats) = &cfg.stats {
             if stats.ping {
-                // Always measure something: the game server once its address is known,
-                // Roblox's web edge before that and if the server never answers. Leaving
-                // the row at `--` until the log yields an address is what made the stats
-                // panel look dead while the game was running fine.
                 let target = server
                     .as_ref()
-                    .map(|s| s.ip.clone())
-                    .filter(|ip| !ip.is_empty())
-                    .unwrap_or_else(|| "www.roblox.com".to_string());
-                if last_ping_target.as_deref() != Some(target.as_str()) {
-                    last_ping_target = Some(target.clone());
+                    .map(|s| (s.ip.clone(), s.port))
+                    .filter(|(ip, _)| !ip.is_empty());
+                if last_ping_target != target {
+                    last_ping_target = target.clone();
                     ping_ms.store(NO_PING, Ordering::Relaxed);
                     last_ping = Instant::now() - Duration::from_secs(60);
                 }
-                if last_ping.elapsed() >= Duration::from_secs(2) {
-                    last_ping = Instant::now();
-                    spawn_ping(target, Arc::clone(&ping_ms));
+                if let Some((ip, port)) = target {
+                    if last_ping.elapsed() >= Duration::from_secs(2) {
+                        last_ping = Instant::now();
+                        spawn_ping(ip, port, Arc::clone(&ping_ms));
+                    }
                 }
             } else {
-                // Ping is off: drop the target so switching it back on shows `--` until
+                // Ping is off: drop the target so switching it back on shows `-- ms` until
                 // the first real measurement instead of a number from minutes ago.
                 last_ping_target = None;
                 ping_ms.store(NO_PING, Ordering::Relaxed);
@@ -1164,7 +1169,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             if st.ping {
                 let p = ping_ms.load(Ordering::Relaxed);
                 lines.push(if p == NO_PING {
-                    "Ping     --".to_string()
+                    "Ping     -- ms".to_string()
                 } else {
                     format!("Ping     {p} ms")
                 });

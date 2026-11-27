@@ -4492,10 +4492,14 @@ impl Creblox {
             || self.active_roblox_place_id.is_some()
             || (self.roblox_running && launched_recently);
         self.game_overlay.start(cfg);
-        let server = self
-            .server_info
-            .as_ref()
-            .map(|i| (i.ip.clone(), i.job_id.clone(), i.place_id));
+        let server = self.server_info.as_ref().map(|i| {
+            crate::game_overlay::ServerData {
+                ip: i.ip.clone(),
+                port: i.port,
+                job_id: i.job_id.clone(),
+                place_id: i.place_id,
+            }
+        });
         self.game_overlay.set_server(server);
     }
 

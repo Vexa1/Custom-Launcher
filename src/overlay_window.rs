@@ -1304,7 +1304,7 @@ impl OverlayWindowApp {
         let margin = 16.0;
         let gap = 8.0;
         let pad = 12.0;
-        let row_h = 17.0;
+        let row_h: f32 = 17.0;
         let label_font = FontId::proportional(10.0);
         let value_font = FontId::monospace(12.5);
         let alpha = (self.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1337,7 +1337,14 @@ impl OverlayWindowApp {
                 value_w = value_w.max(value.size().x);
                 let tone = tone_rgba(&row.label, &row.value, 255).map(|c| (c.r(), c.g(), c.b()));
                 has_dot |= tone.is_some();
-                rows.push((label, value, tone));
+                // The slot is as tall as the taller text plus a little air. A fixed row
+                // height let a sub-label's descenders touch the line below it - and on a
+                // fallback font the two rows visibly overlapped.
+                let h = row_h
+                    .max(label.as_ref().map_or(0.0, |g| g.size().y))
+                    .max(value.size().y)
+                    + 2.0;
+                rows.push((label, value, tone, h));
             }
             let dot_w = if has_dot { 11.0 } else { 0.0 };
 
@@ -1352,7 +1359,7 @@ impl OverlayWindowApp {
                 height += t.size().y + gap;
             }
             if !rows.is_empty() {
-                height += px + gap + row_h * rows.len() as f32;
+                height += px + gap + rows.iter().map(|r| r.3).sum::<f32>();
             }
             let panel_size = vec2(width, height);
 
@@ -1383,17 +1390,20 @@ impl OverlayWindowApp {
                 rules.push(snap_half_px(cursor_y, ppp));
                 cursor_y += px + gap;
                 let row_count = rows.len();
-                for (i, (label, value, tone)) in rows.into_iter().enumerate() {
+                for (i, (label, value, tone, h)) in rows.into_iter().enumerate() {
                     let value_pos = pos2(
                         rect.right() - pad - value.size().x,
-                        cursor_y + (row_h - value.size().y) / 2.0,
+                        cursor_y + (h - value.size().y) / 2.0,
                     );
+                    // A line with no label ("Server info unavailable") is a status line of
+                    // its own: at the left edge, on its own row, never sharing a baseline
+                    // with the title or the line above it.
                     let label_pos = label
                         .as_ref()
-                        .map(|g| pos2(rect.left() + pad, cursor_y + (row_h - g.size().y) / 2.0))
-                        .unwrap_or(value_pos);
-                    let dot_pos = pos2(value_pos.x - 8.0, cursor_y + row_h / 2.0);
-                    cursor_y += row_h;
+                        .map(|g| pos2(rect.left() + pad, cursor_y + (h - g.size().y) / 2.0))
+                        .unwrap_or(pos2(rect.left() + pad, value_pos.y));
+                    let dot_pos = pos2(value_pos.x - 8.0, cursor_y + h / 2.0);
+                    cursor_y += h;
                     if i + 1 < row_count {
                         rules.push(snap_half_px(cursor_y, ppp));
                     }
