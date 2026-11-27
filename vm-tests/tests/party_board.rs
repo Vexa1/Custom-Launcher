@@ -11,7 +11,6 @@ fn game(place_id: u64, name: &str) -> PartySuggestion {
         place_id,
         universe_id: place_id * 10,
         name: name.to_string(),
-        by: 1,
     }
 }
 
@@ -21,9 +20,8 @@ fn a_ready_check_runs_for_ten_seconds_and_then_clears_itself() {
     assert!(!board.ready_check_active());
     assert_eq!(board.ready_seconds_left(0), 0);
 
-    board.start_ready_check(7, 1_000);
+    board.start_ready_check(1_000);
     assert!(board.ready_check_active());
-    assert_eq!(board.ready_by, 7);
     assert_eq!(board.ready_seconds_left(1_000), 10);
     assert_eq!(board.ready_seconds_left(1_001), 10);
     assert_eq!(board.ready_seconds_left(10_000), 1);
@@ -34,7 +32,6 @@ fn a_ready_check_runs_for_ten_seconds_and_then_clears_itself() {
     assert!(!board.expire(10_999), "still running");
     assert!(board.expire(11_000), "the deadline clears it");
     assert!(!board.ready_check_active());
-    assert_eq!(board.ready_by, 0);
     assert_eq!(board.ready_count(), (0, 0));
     assert!(!board.expire(12_000), "expiring twice is a no-op");
 }
@@ -42,7 +39,7 @@ fn a_ready_check_runs_for_ten_seconds_and_then_clears_itself() {
 #[test]
 fn each_member_answers_once_and_can_flip_their_answer() {
     let mut board = PartyBoard::default();
-    board.start_ready_check(7, 0);
+    board.start_ready_check(0);
     assert_eq!(board.is_ready(8), None);
 
     assert!(board.set_ready(8, true));
@@ -59,9 +56,8 @@ fn each_member_answers_once_and_can_flip_their_answer() {
     assert_eq!(board.ready_count(), (2, 3));
 
     // A new check asks everybody again instead of carrying old answers over.
-    board.start_ready_check(9, 5_000);
+    board.start_ready_check(5_000);
     assert_eq!(board.ready_count(), (0, 0));
-    assert_eq!(board.ready_by, 9);
 }
 
 #[test]
@@ -128,7 +124,7 @@ fn the_tally_sorts_by_votes_and_ties_keep_suggestion_order() {
 #[test]
 fn a_board_survives_a_json_round_trip() {
     let mut board = PartyBoard::default();
-    board.start_ready_check(7, 1_000);
+    board.start_ready_check(1_000);
     board.set_ready(8, true);
     board.suggest(game(123, "Doors"));
     board.vote(8, 123);

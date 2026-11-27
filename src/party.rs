@@ -203,8 +203,6 @@ pub struct PartySuggestion {
     pub universe_id: u64,
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
-    pub by: u64,
 }
 
 /// Ready Check and Game Vote state.
@@ -217,9 +215,6 @@ pub struct PartyBoard {
     /// Wall-clock ms when the running ready check expires; 0 when none is running.
     #[serde(default)]
     pub ready_until_ms: u64,
-    /// Who started the check.
-    #[serde(default)]
-    pub ready_by: u64,
     /// `(user id, ready)` for everybody who answered the running check.
     #[serde(default)]
     pub ready: Vec<(u64, bool)>,
@@ -245,9 +240,8 @@ impl PartyBoard {
             .div_ceil(1000)
     }
 
-    pub fn start_ready_check(&mut self, by: u64, now_ms: u64) {
+    pub fn start_ready_check(&mut self, now_ms: u64) {
         self.ready_until_ms = now_ms.saturating_add(Self::READY_SECONDS * 1000);
-        self.ready_by = by;
         self.ready.clear();
     }
 
@@ -256,7 +250,6 @@ impl PartyBoard {
     pub fn expire(&mut self, now_ms: u64) -> bool {
         if self.ready_until_ms > 0 && now_ms >= self.ready_until_ms {
             self.ready_until_ms = 0;
-            self.ready_by = 0;
             self.ready.clear();
             return true;
         }
@@ -737,7 +730,6 @@ impl PartyHandle {
             place_id,
             universe_id,
             name,
-            by: 0,
         }));
     }
 
@@ -946,27 +938,14 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                             host.announce = true;
                         }
                         Role::Guest(guest) => {
-                            if let Some(ws) = guest.ws.as_mut() {
-                                let _ = write(
-                                    ws,
-                                    &WireOut::Status {
-                                        status: status.wire().to_string(),
-                                        place_id,
-                                        job_id,
-                                        ready: None,
-                                        vote: None,
-                                        suggest: None,
-                                    },
-                                );
-                            }
+                            send_status(guest, local.as_ref(), None, None, None);
                         }
                         Role::Idle => {}
                     }
                 }
                 Command::ReadyCheck => {
                     if let Role::Host(host) = &mut role {
-                        let host_id = host.invite.host_id;
-                        host.board.start_ready_check(host_id, wall_ms());
+                        host.board.start_ready_check(wall_ms());
                         host.announce = true;
                     }
                 }
@@ -978,19 +957,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         }
                     }
                     Role::Guest(guest) => {
-                        if let (Some(local), Some(ws)) = (local.as_ref(), guest.ws.as_mut()) {
-                            let _ = write(
-                                ws,
-                                &WireOut::Status {
-                                    status: local.status.wire().to_string(),
-                                    place_id: local.place_id,
-                                    job_id: local.job_id.clone(),
-                                    ready: Some(ready),
-                                    vote: None,
-                                    suggest: None,
-                                },
-                            );
-                        }
+                        send_status(guest, local.as_ref(), Some(ready), None, None);
                         let me = local.as_ref().map(|l| l.me.id).unwrap_or(0);
                         guest.board.set_ready(me, ready);
                         out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local.as_ref())));
@@ -999,26 +966,12 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                 },
                 Command::Suggest(suggestion) => match &mut role {
                     Role::Host(host) => {
-                        let mut suggestion = suggestion;
-                        suggestion.by = host.invite.host_id;
                         if host.board.suggest(suggestion) {
                             host.announce = true;
                         }
                     }
                     Role::Guest(guest) => {
-                        if let (Some(local), Some(ws)) = (local.as_ref(), guest.ws.as_mut()) {
-                            let _ = write(
-                                ws,
-                                &WireOut::Status {
-                                    status: local.status.wire().to_string(),
-                                    place_id: local.place_id,
-                                    job_id: local.job_id.clone(),
-                                    ready: None,
-                                    vote: None,
-                                    suggest: Some(suggestion),
-                                },
-                            );
-                        }
+                        send_status(guest, local.as_ref(), None, None, Some(suggestion));
                     }
                     Role::Idle => {}
                 },
@@ -1030,19 +983,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         }
                     }
                     Role::Guest(guest) => {
-                        if let (Some(local), Some(ws)) = (local.as_ref(), guest.ws.as_mut()) {
-                            let _ = write(
-                                ws,
-                                &WireOut::Status {
-                                    status: local.status.wire().to_string(),
-                                    place_id: local.place_id,
-                                    job_id: local.job_id.clone(),
-                                    ready: None,
-                                    vote: Some(place_id),
-                                    suggest: None,
-                                },
-                            );
-                        }
+                        send_status(guest, local.as_ref(), None, Some(place_id), None);
                         let me = local.as_ref().map(|l| l.me.id).unwrap_or(0);
                         guest.board.vote(me, place_id);
                         out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local.as_ref())));
@@ -1370,8 +1311,7 @@ fn read_peers(host: &mut Host, out: &Out) {
                 if let Some(vote) = vote {
                     host.board.vote(peer.user.id, vote);
                 }
-                if let Some(mut suggestion) = suggest {
-                    suggestion.by = peer.user.id;
+                if let Some(suggestion) = suggest {
                     host.board.suggest(suggestion);
                 }
                 host.announce = true;
@@ -1895,6 +1835,31 @@ fn set_read_timeout(ws: &mut WebSocket<TcpStream>) {
 
 fn is_idle(e: &std::io::Error) -> bool {
     matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+}
+
+/// Guest-side status frame, carrying at most one party action. Everything else stays
+/// `None`, so an unset action serializes to exactly the frame 0.5.5 hosts already parse.
+fn send_status(
+    guest: &mut Guest,
+    local: Option<&Local>,
+    ready: Option<bool>,
+    vote: Option<u64>,
+    suggest: Option<PartySuggestion>,
+) {
+    let (Some(local), Some(ws)) = (local, guest.ws.as_mut()) else {
+        return;
+    };
+    let _ = write(
+        ws,
+        &WireOut::Status {
+            status: local.status.wire().to_string(),
+            place_id: local.place_id,
+            job_id: local.job_id.clone(),
+            ready,
+            vote,
+            suggest,
+        },
+    );
 }
 
 fn write(ws: &mut WebSocket<TcpStream>, frame: &impl Serialize) -> bool {
