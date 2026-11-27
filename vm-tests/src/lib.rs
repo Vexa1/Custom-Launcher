@@ -45,5 +45,8 @@ pub mod release_links;
 #[path = "../../src/sha256.rs"]
 pub mod sha256;
 
+#[path = "../../src/window_lifecycle.rs"]
+pub mod window_lifecycle;
+
 #[path = "../../src/zip_update.rs"]
 pub mod zip_update;

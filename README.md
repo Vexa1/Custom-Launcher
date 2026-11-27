@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.15
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.16
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -184,7 +184,7 @@ ordered out while nothing could restore it. Three links, all in the macOS path:
 |---|---|---|
 | Hidden window → `App::update()` | With `Visible(false)` (or a minimized window) eframe stops drawing frames, so the `Msg::TrayAction(ShowAndFocus)` the watcher sent was **never polled** - and `ctx.request_repaint()` cannot wake a viewport that is ordered out. The restore code was correct and simply never ran | Restoration is dispatched straight onto the AppKit main thread with `dispatch_async_f` (`tray_macos.rs::dispatch_main`), which works with egui completely idle. `activate_app` there does `[NSApp unhide:nil]`, `setActivationPolicy:Regular`, `deminiaturize:` + `makeKeyAndOrderFront:` per window and `activateIgnoringOtherApps:` |
 | Dock click | A Dock click is `applicationShouldHandleReopen:hasVisibleWindows:`. winit does not implement it, so AppKit activated the app, found no window and stopped - the icon kept its dot and every click looked dead | The method is added to winit's **own** delegate class with `class_addMethod` (`tray_macos.rs::install_dock_reopen_handler`), so every other winit callback stays intact. It restores the window immediately, and the watcher is the fallback if the class already had the method |
-| Leaving a game | The "game ended" message travelled the same dead channel, and `return_to_launcher` only runs inside `update()`. Nothing at all was watching the game once the window was hidden | The watcher polls every 400 ms while the window is hidden: `set_hidden_for_game(true)` marks a hide *for a game* (a tray hide or `Cmd+H` is never undone), and `game_still_running` re-reads the Roblox process list plus each player log. An empty process list or an explicit `AppAfterPlay`/`AppOnly` state for **every** log restores the launcher in under a second; `Unknown` counts as playing, so the window can never pop up mid-game |
+| Leaving a game | The "game ended" message travelled the same dead channel, and `return_to_launcher` only runs inside `update()`. Nothing at all was watching the game once the window was hidden | The watcher polls every 400 ms while the window is hidden: `set_hidden_for_game(true)` marks a hide *for a game* (a tray hide or `Cmd+H` is never undone), and `game_still_running` re-reads the Roblox process list plus each player log. An empty process list or an explicit `AppAfterPlay`/`AppOnly` state for **every** log restores the launcher in under a second; `Unknown` counts as playing, so the window can never pop up mid-game. (Superseded in 0.5.16: a game tuck is no longer undone when the game ends — only **Open CREBLOX** restores the window.) |
 | `--companion` | The headless copy ran under a **Regular** activation policy, so it sat in the Dock with a dot and zero windows - a click activated a process with nothing to show and no reopen delegate | `set_accessory_policy()` keeps it out of the Dock entirely; it still relaunches the GUI from the enclosing bundle when the game ends (`companion.rs::relaunch_launcher`), and its game detection now also accepts `Unknown` + a join banner |
 
 As a last resort, if a process owns **no** window at all (`key_window_count() == 0` after
@@ -300,7 +300,18 @@ The `+ Add URL` action, Home headers and the friends strip are converted; the re
 pages inherit the new palette, typography, radii and control metrics automatically because
 they draw through `card_frame`, `pal`, `tokens` and this widget set.
 
-What to expect in `~/Library/Application Support/CREBLOX/`: `window: hidden to the menu bar (NSApp hide, event loop stays alive)` when a game starts, `window: restoring the launcher` when it ends or the Dock icon is clicked, and `overlay.log` showing `spec loaded (N panels)` followed by a `Server: <city>, <region>` title within a second of the join.
+What to expect in `~/Library/Application Support/CREBLOX/`: `window: hidden to the menu bar (NSApp hide, event loop stays alive)` when a game starts, `window: game ended while in the menu bar - staying there` when it ends, `window: restoring the launcher` only when you choose **Open CREBLOX**, and `overlay.log` showing `spec loaded (N panels)` followed by a `Server: <city>, <region>` title within a second of the join.
+
+#### Window lifecycle
+
+| Moment | What happens |
+|---|---|
+| A game starts (`Playing`, or a launch from CREBLOX) | The window is hidden, the Dock icon is dropped (`NSApplicationActivationPolicyAccessory`) and the launcher is marked as tucked into the menu bar. It keeps running: the menu-bar icon, the in-game overlays and the settings stay live. |
+| The game ends (`AppAfterPlay`, Roblox gone) | Nothing. CREBLOX stays in the menu bar; a finished game never moves the player's screen or reopens the window. |
+| Menu bar → **Open CREBLOX** (also a page shortcut or launching CREBLOX again) | The tucked state clears, the activation policy goes back to Regular and the window is shown, raised and focused. |
+| The red close button, not in a game | A normal quit. `CloseRequested` is not intercepted into a menu-bar hide on macOS. |
+
+The transitions are one pure table in `window_lifecycle.rs`, asserted in `vm-tests/tests/window_lifecycle.rs`; `app.rs` applies them and `tray_macos.rs` reads the published flag in the Dock-reopen handler and the reopen watcher.
 
 #### Edit Overlay Position (tray → drag → confirm)
 
@@ -479,7 +490,7 @@ to reach CREBLOX without leaving the session.
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
 | Edit Overlay Position… | — | Opens the on-screen HUD editor: drag it, then Confirm (⏎) or Esc. Disabled while the editor is open, and when every overlay is off. |
-| Dock icon (click) | — | Reopens the launcher, even with the window hidden or minimized. See [Why the launcher did not come back](#why-the-launcher-did-not-come-back-fixed-in-0423). |
+| Dock icon (click) | — | Reopens a window you hid yourself (Hide to Menu Bar, `Cmd+H`). While CREBLOX is tucked in the menu bar for a game there is no Dock icon and no automatic restore: **Open CREBLOX** is the way back. See [Window lifecycle](#window-lifecycle). |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
 
 **Live sync in both directions.** A menu click becomes `Msg::TrayAction` on the existing

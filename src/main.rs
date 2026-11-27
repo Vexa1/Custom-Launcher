@@ -28,6 +28,7 @@ mod theme;
 mod tray;
 mod types;
 mod ui;
+mod window_lifecycle;
 mod updater;
 mod video_preview;
 

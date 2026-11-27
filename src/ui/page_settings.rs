@@ -746,15 +746,18 @@ impl Creblox {
 
             ui.indent("tray_sub_options", |ui| {
                 ui.add_enabled_ui(self.settings.tray_enabled, |ui| {
-                    if ui
-                        .checkbox(
-                            &mut self.settings.tray_minimize_on_close,
-                            format!(
-                                "Minimize to the {} when clicking Close (X)",
-                                crate::platform::tray_label()
-                            ),
-                        )
-                        .changed()
+                    // macOS: the red button quits CREBLOX like any other app, so there is no
+                    // "minimize on close" to offer there (`window_lifecycle`).
+                    if !cfg!(target_os = "macos")
+                        && ui
+                            .checkbox(
+                                &mut self.settings.tray_minimize_on_close,
+                                format!(
+                                    "Minimize to the {} when clicking Close (X)",
+                                    crate::platform::tray_label()
+                                ),
+                            )
+                            .changed()
                     {
                         save_needed = true;
                     }
@@ -1269,27 +1272,39 @@ impl Creblox {
                     "Show the \"Connected server\" badge in the launcher",
                 )
                 .changed();
+            // A window the user hid themselves still comes back when the game ends.
             changed |= ui
                 .checkbox(
                     &mut self.settings.return_to_launcher_on_leave,
                     "Return to the launcher when I leave a game",
                 )
                 .changed();
-            changed |= ui
-                .checkbox(
-                    &mut self.settings.minimize_on_game_launch,
-                    "Minimize the launcher while a game is launching",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(
-                    &mut self.settings.close_launcher_during_game,
-                    "Close the launcher window while I play (it stays in the menu bar)",
-                )
-                .changed();
+            // On macOS the game tuck is not optional, so neither of these exists there:
+            // starting a game always moves CREBLOX into the menu bar.
+            #[cfg(not(target_os = "macos"))]
+            {
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.minimize_on_game_launch,
+                        "Minimize the launcher while a game is launching",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut self.settings.close_launcher_during_game,
+                        "Close the launcher window while I play (it stays in the menu bar)",
+                    )
+                    .changed();
+                small_text(
+                    ui,
+                    "The launcher keeps running in the tray while you play: the tray icon, the in-game overlays and the settings stay available, and the window comes back by itself when you leave the game."
+                        .to_string(),
+                );
+            }
+            #[cfg(target_os = "macos")]
             small_text(
                 ui,
-                "The launcher keeps running in the menu bar while you play: the tray icon, the in-game overlays and the settings stay available, and you can open it from the menu bar at any time. The window comes back by itself when you leave the game. Nothing quits, so nothing has to start up again."
+                "Starting a game moves CREBLOX into the menu bar: the menu-bar icon, the in-game overlays and your settings stay available, and Open CREBLOX brings the window back. Finishing a game leaves it there. The red close button quits CREBLOX like any other Mac app."
                     .to_string(),
             );
         });

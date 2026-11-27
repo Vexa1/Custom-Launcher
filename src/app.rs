@@ -271,14 +271,13 @@ pub struct Creblox {
     pub roblox_running: bool,
     pub tray_minimize_balloon_shown: bool,
     pub allow_close_exit: bool,
-    /// CREBLOX hid its own window because a game was launched (it keeps running in the menu bar).
-    pub hidden_for_game: bool,
-    pub hidden_at: Option<Instant>,
+    /// Whether the launcher lives in the menu bar with no window. Set when a game starts and
+    /// cleared only by "Open CREBLOX": a finished game never puts the window back.
+    pub lifecycle: crate::window_lifecycle::Lifecycle,
     /// While hidden: whether the app has been inactive at least once since hiding. A click
     /// on the Dock icon flips inactive -> active, which reopens the window; the menu-bar
     /// click that hid it leaves the app active, so that alone does not undo the hide.
     pub hidden_seen_inactive: bool,
-    pub last_hidden_check: Option<Instant>,
     /// Watchdog for "the launcher says it is on but no window is on screen".
     pub last_window_check: Option<Instant>,
     /// Checks the real AppKit window state after a restore, not just our own flag.
@@ -576,10 +575,8 @@ impl Creblox {
             window_visible: !start_in_tray,
             tray_minimize_balloon_shown: false,
             allow_close_exit: false,
-            hidden_for_game: false,
-            hidden_at: None,
+            lifecycle: crate::window_lifecycle::Lifecycle::new(),
             hidden_seen_inactive: false,
-            last_hidden_check: None,
             last_window_check: None,
             #[cfg(target_os = "macos")]
             last_visibility_check: None,
@@ -2579,14 +2576,20 @@ impl Creblox {
                         // watchdog to notice the session.
                         self.maybe_show_game_overlay();
                     }
+                    // A launched game moves the launcher into the menu bar. On macOS that
+                    // is not a preference: the window is not where the player is looking,
+                    // and the tray, the overlay and the settings stay live behind it.
+                    #[cfg(target_os = "macos")]
+                    if r.is_ok() {
+                        self.tuck_into_menu_bar();
+                    }
+                    // Windows keeps its own two tray preferences.
+                    #[cfg(not(target_os = "macos"))]
                     if r.is_ok() && self.settings.close_launcher_during_game {
                         // Take only the window away: CREBLOX itself keeps running so the
-                        // menu-bar icon, the overlays and the settings stay available while
-                        // the game is on (and it never looks like CREBLOX "quit").
-                        self.hidden_for_game = true;
-                        self.hidden_at = Some(Instant::now());
-                        let ctx = self.ctx.clone();
-                        self.hide_to_tray(&ctx, false);
+                        // tray icon, the overlays and the settings stay available while the
+                        // game is on (and it never looks like CREBLOX "quit").
+                        self.tuck_into_menu_bar();
                     } else if r.is_ok() && self.settings.minimize_on_game_launch {
                         self.ctx
                             .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -2670,16 +2673,13 @@ impl Creblox {
                         self.maybe_show_game_overlay();
                         self.sync_tray_state();
                     }
-                    // The hidden-window watchdog otherwise waits for its next frame. React
-                    // to the actual process-exit event so the launcher comes straight back.
-                    if !running && self.hidden_for_game {
-                        let hidden_long_enough = self
-                            .hidden_at
-                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(4));
-                        if hidden_long_enough {
-                            self.finish_playtime_session();
-                            self.return_to_launcher();
-                        }
+                    // Roblox going away ends the session, but it is never a reason to put
+                    // the window back: the menu bar is where the player left CREBLOX, and
+                    // "Open CREBLOX" is the only way out of it.
+                    if !running {
+                        let _ = self
+                            .lifecycle
+                            .apply(crate::window_lifecycle::Event::GameEnded);
                     }
                 }
                 Msg::RobloxSessionUpdated(place_opt) => {
@@ -2698,6 +2698,10 @@ impl Creblox {
                                 }
                                 self.active_roblox_place_id = Some(pid);
                                 crate::auth::log(&format!("session: joined place {pid}"));
+                                // `Playing` is the moment "in a game" becomes true: tuck the
+                                // window away before the player looks for it behind the game.
+                                #[cfg(target_os = "macos")]
+                                self.tuck_into_menu_bar();
                                 // The party sees "Launching" until the log watcher knows the
                                 // place; this is the moment the dot turns into "In game".
                                 self.party_sync_presence();
@@ -2721,7 +2725,10 @@ impl Creblox {
                                 // Keep the overlay helper but hide it: re-joining from the
                                 // Roblox menu must not need a process respawn.
                                 self.maybe_show_game_overlay();
-                                if was_playing || self.hidden_for_game {
+                                let _ = self
+                                    .lifecycle
+                                    .apply(crate::window_lifecycle::Event::GameEnded);
+                                if was_playing {
                                     self.return_to_launcher();
                                 }
                             }
@@ -4452,8 +4459,11 @@ impl Creblox {
         };
         TrayState {
             // The menu-bar icon must be there while a game runs, even when the tray is
-            // disabled otherwise: it is the only way back into CREBLOX mid-game.
-            enabled: self.settings.tray_enabled || self.active_roblox_place_id.is_some(),
+            // disabled otherwise: it is the only way back into CREBLOX mid-game, and the
+            // only way out of a menu-bar tuck once the session is over.
+            enabled: self.settings.tray_enabled
+                || self.active_roblox_place_id.is_some()
+                || self.lifecycle.hidden_to_tray(),
             window_visible: self.window_visible,
             status_line,
             tooltip,
@@ -4500,32 +4510,60 @@ impl Creblox {
         self.tray.sync(self.tray_state_snapshot());
     }
 
+    /// Moves the launcher into the menu bar for a game session.
+    ///
+    /// Hides the window, drops the Dock icon (menu bar only) and records the state that keeps
+    /// every automatic restore away until "Open CREBLOX". The process keeps running: the tray
+    /// menu, the overlay helper and the settings stay live.
+    pub fn tuck_into_menu_bar(&mut self) {
+        // The watcher can report the same session more than once (launch, then `Playing`):
+        // the second report must not re-hide a window, or switch policy again.
+        if self.lifecycle.hidden_to_tray() {
+            return;
+        }
+        // Without a menu-bar icon there is no way back in, so the window stays instead.
+        if !self.tray.available() {
+            crate::auth::log("tray: icon unavailable - keeping the window while the game runs");
+            return;
+        }
+        let _ = self
+            .lifecycle
+            .apply(crate::window_lifecycle::Event::GameStarted);
+        // The icon has to be visible *before* the window goes away; the snapshot keeps it up
+        // while a game runs even if the user turned tray mode off.
+        self.sync_tray_state();
+        let ctx = self.ctx.clone();
+        self.hide_to_tray(&ctx, false);
+        // Accessory: no Dock icon, no app switcher entry - a menu-bar app for the session.
+        #[cfg(target_os = "macos")]
+        crate::tray::set_accessory_policy();
+    }
+
     pub fn hide_to_tray(&mut self, ctx: &egui::Context, show_balloon: bool) {
         // Start a fresh hide: a Dock click only reopens after the app has been inactive
         // since this hide, not because it happened to be inactive while still visible.
         self.hidden_seen_inactive = false;
         // Without a *visible* menu-bar/tray icon, hiding the window leaves a running app
         // with no obvious way back in. The tray icon object can exist but be hidden when
-        // tray mode is off, so check that too and minimize instead.
+        // tray mode is off, so check that too and minimize instead. A game tuck counts as
+        // having an icon: `tuck_into_menu_bar` enables it before hiding.
         let tray_reachable = self.tray.available()
-            && (self.settings.tray_enabled || self.active_roblox_place_id.is_some());
+            && (self.settings.tray_enabled
+                || self.active_roblox_place_id.is_some()
+                || crate::window_lifecycle::hidden_to_tray());
         if !tray_reachable {
             crate::auth::log("tray: no visible icon - minimizing instead of hiding");
             self.window_visible = true;
-            self.hidden_at = None;
-            #[cfg(target_os = "macos")]
-            crate::tray::set_hidden_for_game(false);
+            crate::window_lifecycle::set_hidden_to_tray(false);
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.sync_tray_state();
             return;
         }
         self.window_visible = false;
-        self.hidden_at = Some(Instant::now());
         self.hidden_seen_inactive = false;
-        // The watcher thread restores a window hidden *for a game* by itself, because
-        // nothing inside `update()` runs while the window is ordered out.
-        #[cfg(target_os = "macos")]
-        crate::tray::set_hidden_for_game(self.hidden_for_game);
+        // Publish the state the tray thread and the Dock handler read. A manual hide leaves
+        // it false: those may still be undone by a click on the app, a game tuck may not.
+        crate::window_lifecycle::set_hidden_to_tray(self.lifecycle.hidden_to_tray());
         // macOS: never `Visible(false)`. Ordering the window out stops the event loop, so the
         // "the game ended" and "the Dock was clicked" messages were queued and never read
         // (the log shows `dock: reopen requested` twice with no restore after it). AppKit's
@@ -4668,11 +4706,12 @@ impl Creblox {
             crate::auth::log("hop: launcher restore suppressed while the hop is in flight");
             return;
         }
-        // CREBLOX hid itself when the game was launched, so it always comes back - even when
-        // "return to the launcher" is off: the window should never go away for good.
-        if self.hidden_for_game {
-            self.hidden_for_game = false;
-            self.restore_from_tray();
+        // Tucked into the menu bar on purpose: a finished game is not a reason to move the
+        // player's screen. Only "Open CREBLOX" (or launching CREBLOX again) restores it.
+        // Windows keeps its own "come back when the game ends" behaviour.
+        #[cfg(target_os = "macos")]
+        if self.lifecycle.hidden_to_tray() {
+            crate::auth::log("window: game ended while in the menu bar - staying there");
             return;
         }
         if !self.settings.return_to_launcher_on_leave {
@@ -4682,11 +4721,14 @@ impl Creblox {
     }
 
     pub fn restore_from_tray(&mut self) {
+        // The one way out of the menu bar. Clears the tucked state, which is what lets the
+        // Dock handler and the visibility watchdog look after the window again.
+        let _ = self
+            .lifecycle
+            .apply(crate::window_lifecycle::Event::OpenLauncher);
         crate::auth::log("window: restoring the launcher");
         self.window_visible = true;
         self.hidden_seen_inactive = false;
-        #[cfg(target_os = "macos")]
-        crate::tray::set_hidden_for_game(false);
         self.pending_start_in_tray_frames = 0;
         self.ctx
             .send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -4724,6 +4766,9 @@ impl Creblox {
     }
 
     pub fn quit_app(&mut self) {
+        let _ = self
+            .lifecycle
+            .apply(crate::window_lifecycle::Event::CloseClicked);
         self.allow_close_exit = true;
         self.tray.shutdown();
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -4839,26 +4884,9 @@ impl eframe::App for Creblox {
         }
         // Adopt at most a couple of the avatar's textures before anything is drawn.
         self.adopt_avatar_textures();
-        // CREBLOX hid itself for a game. If the game is gone but the watcher's last message was
-        // missed, the window would never come back - so check for ourselves now and then.
-        if self.hidden_for_game {
-            let due = self
-                .last_hidden_check
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
-            if due {
-                self.last_hidden_check = Some(Instant::now());
-                let hidden_long_enough = self
-                    .hidden_at
-                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
-                if hidden_long_enough {
-                    let (procs, _) = crate::roblox_process::enumerate_roblox_processes();
-                    if procs.is_empty() {
-                        self.finish_playtime_session();
-                        self.return_to_launcher();
-                    }
-                }
-            }
-        }
+        // There is deliberately no "the game ended, bring the window back" watchdog here:
+        // once CREBLOX is tucked into the menu bar only "Open CREBLOX" restores it, so every
+        // automatic restore is exactly the behaviour this loop must not have.
         // Remember every inactive moment while CREBLOX is hidden. This used to be sampled
         // only once every three seconds, so a quick click on the Dock/Finder icon could be
         // missed and the window then stayed hidden - which looked like CREBLOX refusing to
@@ -4876,8 +4904,12 @@ impl eframe::App for Creblox {
                 self.last_window_check = Some(Instant::now());
                 #[cfg(target_os = "macos")]
                 {
-                    if crate::tray::app_is_active() && self.hidden_seen_inactive {
-                        // Active again after being inactive: a Dock/Finder click.
+                    if !crate::window_lifecycle::hidden_to_tray()
+                        && crate::tray::app_is_active()
+                        && self.hidden_seen_inactive
+                    {
+                        // Active again after being inactive: a Dock/Finder click on a window
+                        // the user hid themselves. A game tuck is never undone this way.
                         self.restore_from_tray();
                     }
                 }
@@ -4892,6 +4924,7 @@ impl eframe::App for Creblox {
         if self.window_visible
             && self.raise_frames == 0
             && !self.allow_close_exit
+            && !crate::window_lifecycle::hidden_to_tray()
             && !ui.ctx().input(|i| i.viewport().close_requested())
         {
             let due = self
@@ -4968,6 +5001,10 @@ impl eframe::App for Creblox {
                 ui.ctx().request_repaint();
             }
         }
+        // macOS: the red button is a normal quit. Turning it into a tray hide is the "the
+        // close button does nothing" complaint, so only the platforms whose tray menu still
+        // promises "minimize when clicking Close (X)" keep that interception. Windows does.
+        #[cfg(not(target_os = "macos"))]
         if ui.ctx().input(|i| i.viewport().close_requested())
             && !self.allow_close_exit
             && self.settings.tray_enabled

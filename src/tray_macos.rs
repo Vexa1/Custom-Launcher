@@ -919,8 +919,7 @@ pub fn show_launcher_window() {
 /// Whether the whole app is hidden (`[NSApp isHidden]`).
 ///
 /// A hidden app still owns ordered-in windows, so "no visible window" alone cannot detect
-/// it - and the post-game restore has to fire for a hidden app just as much as for an
-/// ordered-out one.
+/// it - and the watcher has to treat a hidden app as "the launcher is not on screen".
 pub fn app_is_hidden() -> bool {
     use std::os::raw::c_void;
     type Msg0 = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
@@ -970,16 +969,14 @@ pub fn set_accessory_policy() {
 }
 
 static REPAINT_CTX: OnceLock<egui::Context> = OnceLock::new();
-static HIDDEN_FOR_GAME: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
-/// Records whether the window is currently hidden *because a game is running*.
+/// Whether CREBLOX is living in the menu bar on purpose (`window_lifecycle`).
 ///
-/// A user hide (tray icon, `Cmd+H`) must never be undone automatically; a hide for a game
-/// must always be undone when that game ends, including when the launcher cannot be woken
-/// through egui and only the watcher thread is left running.
-pub fn set_hidden_for_game(hidden: bool) {
-    HIDDEN_FOR_GAME.store(hidden, std::sync::atomic::Ordering::Relaxed);
+/// While it is, nothing here may put the window back: not a finished game, not a Dock click,
+/// not an app activation. "Open CREBLOX" is the one way out, and it travels through the
+/// app's own event channel.
+fn tucked_in_menu_bar() -> bool {
+    crate::window_lifecycle::hidden_to_tray()
 }
 
 /// Adds `applicationShouldHandleReopen:hasVisibleWindows:` to the delegate winit installed.
@@ -999,6 +996,12 @@ pub fn install_dock_reopen_handler() {
         _app: *mut c_void,
         _visible: i8,
     ) -> i8 {
+        if tucked_in_menu_bar() {
+            // A menu-bar app has no Dock icon, so this is a launch reactivation (Finder, an
+            // `open` of the bundle, a second instance). It must not pull the window back.
+            crate::auth::log("dock: reopen ignored - CREBLOX stays in the menu bar");
+            return 0;
+        }
         crate::auth::log("dock: applicationShouldHandleReopen - restoring the launcher");
         activate_app();
         if let Some(ctx) = REPAINT_CTX.get() {
@@ -1052,45 +1055,18 @@ pub fn install_dock_reopen_handler() {
     }
 }
 
-/// Whether a Roblox session is still on. Deliberately conservative: `Unknown` counts as
-/// playing, so a log whose markers are not recognised can never pop the launcher up in the
-/// middle of a game. Only an empty process list or an explicit "left the game" state ends it.
-fn game_still_running() -> bool {
-    use crate::roblox_process::{
-        LogSessionState, enumerate_roblox_processes, find_player_log_for_proc,
-        inspect_player_log_full, roblox_logs_dir,
-    };
-    let (procs, crash_logs) = enumerate_roblox_processes();
-    if procs.is_empty() {
-        return false;
-    }
-    let logs_dir = roblox_logs_dir();
-    for p in &procs {
-        let Some(path) = find_player_log_for_proc(p, &crash_logs, logs_dir.as_deref()) else {
-            continue;
-        };
-        let (state, ..) = inspect_player_log_full(&path);
-        if !matches!(
-            state,
-            LogSessionState::AppAfterPlay | LogSessionState::AppOnly | LogSessionState::TrayOnly
-        ) {
-            return true;
-        }
-    }
-    // Every log we could read says the player left.
-    false
-}
-
 static REOPEN_WATCHER: OnceLock<()> = OnceLock::new();
 
-/// Reopens the launcher when the Dock icon is clicked while no window is on screen.
+/// Reopens the launcher when the app is activated while no window is on screen.
 ///
 /// macOS reports a Dock click as an app activation, not as an egui event, and eframe stops
 /// ticking once the window is ordered out - so the in-`update()` checks could never run in
-/// exactly the state they exist for (running Dock dot, no window). That is the "clicking the
-/// Dock icon does nothing after leaving a game" bug: the watchdog was sound but asleep.
-/// This thread is the only thing guaranteed to be alive then, and it costs one `isActive`
-/// call plus one window-list walk every 700 ms.
+/// exactly the state they exist for (running Dock dot, no window). This thread is the only
+/// thing guaranteed to be alive then, and it costs one `isActive` call plus one window-list
+/// walk every 400 ms.
+///
+/// It only ever restores a window the user hid themselves. A launcher tucked into the menu bar
+/// for a game is skipped entirely: there, "Open CREBLOX" is the only way back.
 pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
     if REOPEN_WATCHER.set(()).is_err() {
         return;
@@ -1115,21 +1091,19 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
                     idle_checks = 0;
                     continue;
                 }
-                // (a) A Dock click. "No visible window" alone is not enough: hiding to the
-                // menu bar also leaves no window, and the app is inactive then, so requiring
-                // an active app means the user really did click the Dock icon or the app in
-                // Finder.
+                // Tucked into the menu bar on purpose: a finished game, a Dock click and
+                // an app activation are all explicitly not a request to reopen. The watcher
+                // exists for a window the *user* hid; a game tuck is undone only by
+                // "Open CREBLOX", which arrives through the app's own channel.
+                if tucked_in_menu_bar() {
+                    idle_checks = 0;
+                    continue;
+                }
+                // "No visible window" alone is not enough: hiding to the menu bar also
+                // leaves no window, and the app is inactive then, so requiring an active app
+                // means the user really did click the Dock icon or the app in Finder.
                 let dock_click = app_is_active();
-                // (b) The game ended while the launcher was hidden for it. Nothing else can
-                // notice this: `App::update()` is not running, so the message the watcher
-                // sends would never be read.
-                let game_over = !dock_click
-                    && HIDDEN_FOR_GAME.load(std::sync::atomic::Ordering::Relaxed)
-                    && !game_still_running()
-                    // A hop kills the old client and starts the next one: that gap looks
-                    // exactly like "the game ended" and must not raise the launcher.
-                    && !crate::server_hop::hop_in_progress();
-                if !dock_click && !game_over {
+                if !dock_click {
                     idle_checks = 0;
                     continue;
                 }
@@ -1152,18 +1126,11 @@ pub fn start_reopen_watcher(tx: Sender<Msg>, ctx: egui::Context) {
                     thread::sleep(Duration::from_millis(800));
                     std::process::exit(0);
                 }
-                crate::auth::log(if game_over {
-                    "dock: game ended while hidden - restoring the launcher"
-                } else {
-                    "dock: reopen requested while the app had no visible window"
-                });
+                crate::auth::log("dock: reopen requested while the app had no visible window");
                 // AppKit does the real work, on the main thread, right now. Sending the
                 // message alone was the bug: with no visible window eframe never ticks, so
                 // `request_repaint()` wakes nothing and the message waits forever.
-                dispatch_main(|| {
-                    set_hidden_for_game(false);
-                    show_launcher_window();
-                });
+                dispatch_main(show_launcher_window);
                 let _ = tx.send(Msg::TrayAction(TrayEvent::ShowAndFocus));
                 ctx.request_repaint();
             }
