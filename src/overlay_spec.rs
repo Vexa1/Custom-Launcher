@@ -67,10 +67,14 @@ pub struct Live<'a> {
     /// The server the player is in. `None` while the player log has not named one yet, which
     /// is what the HUD shows as `Server info unavailable`.
     pub server: Option<LiveServer<'a>>,
-    /// Seconds since that server was resolved: the panel's own age and the `In server` timer.
+    /// Seconds since that server was resolved: the panel's own age and how long
+    /// `Detecting server...` is shown. The `In server` row is ticked by the overlay.
     pub server_age_secs: u64,
-    /// Seconds since this session started, for the `Session` row.
-    pub session_secs: u64,
+    /// Unix-ms anchor the `In server` and `Session` rows count from. It is written to the
+    /// panels file as `joined_at_unix_ms` and is the only thing the launcher supplies: the
+    /// overlay window computes the elapsed time itself, so the clock never waits for the
+    /// file to be rewritten and never jumps by however long a tick happened to take.
+    pub joined_at_unix_ms: u64,
     /// Seconds since the overlay started: how long `Detecting server...` is shown.
     pub detect_secs: u64,
     /// Geolocated region of `server.ip`, e.g. `Sydney, AU`. `None` while locating.
@@ -169,8 +173,16 @@ pub fn build(panels: &Panels, live: &Live) -> Vec<Value> {
         if let Some((_, Some(playing))) = &live.game {
             lines.push(format!("Playing  {playing}"));
         }
-        lines.push(format!("In server {}", fmt_secs(live.server_age_secs)));
-        out.push(json!({"id": "game", "corner": gp.corner, "title": title, "lines": lines}));
+        // A token, not a time: `overlay_window` fills it from the anchor below on every
+        // frame it draws, so the row ticks on the second even when nothing rewrites this file.
+        lines.push(format!("In server {ELAPSED}"));
+        out.push(json!({
+            "id": "game",
+            "corner": gp.corner,
+            "title": title,
+            "lines": lines,
+            "joined_at_unix_ms": live.joined_at_unix_ms
+        }));
     }
 
     if let Some(st) = panels.stats {
@@ -196,18 +208,22 @@ pub fn build(panels: &Panels, live: &Live) -> Vec<Value> {
             lines.push(format!("FPS cap  {fps}"));
         }
         if st.session {
-            lines.push(format!("Session  {}", fmt_secs(live.session_secs)));
+            lines.push(format!("Session  {ELAPSED}"));
         }
         if st.clock {
             lines.push(format!("Time     {}", live.clock));
         }
         if !lines.is_empty() {
-            out.push(json!({
+            let mut panel = json!({
                 "id": "stats",
                 "corner": st.corner,
                 "title": "Roblox stats",
                 "lines": lines
-            }));
+            });
+            if st.session {
+                panel["joined_at_unix_ms"] = json!(live.joined_at_unix_ms);
+            }
+            out.push(panel);
         }
     }
 
@@ -360,6 +376,52 @@ pub fn spec_json(
         "edit": edit,
         "panels": panels
     })
+}
+
+/// Where a live timer's value belongs in a HUD line.
+///
+/// The launcher writes this token instead of a time; the overlay window replaces it from the
+/// panel's `joined_at_unix_ms` while it draws. A formatted time in the file would only move
+/// when the launcher happened to rewrite it - which is how the timer froze and then jumped.
+pub const ELAPSED: &str = "{elapsed}";
+
+/// Milliseconds since the Unix epoch: the anchor every panel timer counts from.
+pub fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Whole seconds since `started_at_ms`. A clock that moved backwards reads as zero rather
+/// than wrapping, and the anchor is never older than the session it belongs to.
+pub fn elapsed_secs(started_at_ms: u64, now_ms: u64) -> u64 {
+    now_ms.saturating_sub(started_at_ms) / 1000
+}
+
+/// Milliseconds until the next whole second of the timer, always `1..=1000`.
+///
+/// The overlay wakes once per boundary with this. A fixed 500 ms cadence would draw the same
+/// second twice and still show the change up to half a second late; a second from the
+/// boundary lands on it every time and costs one frame per second in between.
+pub fn ms_until_next_second(started_at_ms: u64, now_ms: u64) -> u64 {
+    1000 - now_ms.saturating_sub(started_at_ms) % 1000
+}
+
+/// Whether a HUD line carries a live timer.
+pub fn has_elapsed(line: &str) -> bool {
+    line.contains(ELAPSED)
+}
+
+/// A HUD line with [`ELAPSED`] replaced by the live `m:ss` / `h:mm:ss` value.
+pub fn with_elapsed(line: &str, started_at_ms: u64, now_ms: u64) -> String {
+    if !has_elapsed(line) {
+        return line.to_string();
+    }
+    line.replace(
+        ELAPSED,
+        &fmt_secs(elapsed_secs(started_at_ms, now_ms)),
+    )
 }
 
 /// `m:ss`, or `h:mm:ss` once the session passes an hour.

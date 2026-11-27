@@ -7,8 +7,12 @@
 //! overlay window opened with), then with the resolved server, its region and a measured RTT.
 
 use creblox_vm_tests::overlay_spec::{
-    self, HudToggles, Live, LiveServer, Panels, ServerPanel, StatsPanel, TrayToggle,
+    self, GamePanel, HudToggles, Live, LiveServer, Panels, ServerPanel, StatsPanel, TrayToggle,
 };
+
+/// A fixed Unix-ms anchor. Every timer assertion below is arithmetic on this, never on the
+/// wall clock, so a slow CI machine cannot change what the HUD is expected to say.
+const ANCHOR: u64 = 1_700_000_000_123;
 
 fn server_cfg() -> ServerPanel {
     ServerPanel {
@@ -70,7 +74,7 @@ fn unresolved() -> Live<'static> {
     Live {
         server: None,
         server_age_secs: 0,
-        session_secs: 30,
+        joined_at_unix_ms: ANCHOR,
         detect_secs: 30,
         region: None,
         ping_ms: None,
@@ -92,7 +96,7 @@ fn resolved() -> Live<'static> {
             place_id: 142_823_291,
         }),
         server_age_secs: 5,
-        session_secs: 35,
+        joined_at_unix_ms: ANCHOR,
         detect_secs: 35,
         region: Some("Sydney, AU"),
         ping_ms: Some(35),
@@ -118,6 +122,134 @@ fn spec(live: &Live) -> String {
         live,
     );
     overlay_spec::spec_json(0.9, true, 0, 0, false, panels).to_string()
+}
+
+/// The launcher writes an anchor and a token, never a formatted clock: the overlay window is
+/// what makes the seconds move, so a frozen panels file cannot freeze the row.
+#[test]
+fn the_timer_rows_are_anchors_the_overlay_ticks_itself() {
+    let game = GamePanel { corner: 2 };
+    let mut live = resolved();
+    live.joined_at_unix_ms = ANCHOR;
+    let panels = overlay_spec::build(
+        &Panels {
+            server: Some(&server_cfg()),
+            stats: Some(&stats_cfg()),
+            flags: None,
+            game: Some(&game),
+        },
+        &live,
+    );
+    let game_panel = panels
+        .iter()
+        .find(|p| p["id"] == "game")
+        .expect("the game panel");
+    let stats_panel = panels
+        .iter()
+        .find(|p| p["id"] == "stats")
+        .expect("the stats panel");
+
+    for panel in [game_panel, stats_panel] {
+        assert_eq!(
+            panel["joined_at_unix_ms"].as_u64(),
+            Some(ANCHOR),
+            "the panel carries the raw timestamp: {panel}"
+        );
+    }
+    let game_lines = game_panel["lines"].to_string();
+    assert!(
+        game_lines.contains(&format!("In server {}", overlay_spec::ELAPSED)),
+        "{game_lines}"
+    );
+    let stats_lines = stats_panel["lines"].to_string();
+    assert!(
+        stats_lines.contains(&format!("Session  {}", overlay_spec::ELAPSED)),
+        "{stats_lines}"
+    );
+    // Nothing time-shaped went into the file: 0:05 for the server, 0:35 for the session.
+    assert!(!game_lines.contains("0:05"), "{game_lines}");
+    assert!(!stats_lines.contains("0:35"), "{stats_lines}");
+}
+
+/// Ten seconds of frames, sampled four times a second: the row is stable inside a second and
+/// changes exactly on the boundary, so the clock neither freezes nor skips.
+#[test]
+fn the_timer_advances_exactly_one_second_at_a_time() {
+    let line = format!("Session  {}", overlay_spec::ELAPSED);
+    let mut seen: Vec<String> = Vec::new();
+    for quarter in 0..44u64 {
+        let now = ANCHOR + quarter * 250;
+        let text = overlay_spec::with_elapsed(&line, ANCHOR, now);
+        assert_eq!(
+            overlay_spec::elapsed_secs(ANCHOR, now),
+            quarter / 4,
+            "whole seconds at {quarter} ms"
+        );
+        if seen.last() != Some(&text) {
+            seen.push(text);
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![
+            "Session  00:00",
+            "Session  00:01",
+            "Session  00:02",
+            "Session  00:03",
+            "Session  00:04",
+            "Session  00:05",
+            "Session  00:06",
+            "Session  00:07",
+            "Session  00:08",
+            "Session  00:09",
+            "Session  00:10",
+        ],
+        "one new value per whole second, in order"
+    );
+
+    // A whole session, minute rollover included: every second is rendered once, in order.
+    for secs in 0..=3_600u64 {
+        let text = overlay_spec::with_elapsed(&line, ANCHOR, ANCHOR + secs * 1000);
+        assert_eq!(text, format!("Session  {}", overlay_spec::fmt_secs(secs)));
+    }
+    assert_eq!(overlay_spec::fmt_secs(599), "09:59");
+    assert_eq!(overlay_spec::fmt_secs(600), "10:00");
+    assert_eq!(overlay_spec::fmt_secs(3599), "59:59");
+    assert_eq!(overlay_spec::fmt_secs(3600), "1:00:00");
+
+    // A row without the token is left exactly as it was.
+    assert_eq!(
+        overlay_spec::with_elapsed("Ping     35 ms", ANCHOR, ANCHOR + 90_000),
+        "Ping     35 ms"
+    );
+}
+
+/// The next frame is scheduled for the exact next whole second of the timer: one wake-up per
+/// tick, landing on the boundary, and never a wait longer than a second or a zero-length busy
+/// loop.
+#[test]
+fn the_next_repaint_lands_on_the_next_whole_second() {
+    for offset in [0u64, 1, 123, 999, 1000, 1001, 61_000, 3_599_877, 7_200_500] {
+        let now = ANCHOR + offset;
+        let wait = overlay_spec::ms_until_next_second(ANCHOR, now);
+        assert!(
+            (1..=1000).contains(&wait),
+            "the wait is one second at most and never zero (offset {offset}: {wait})"
+        );
+        assert_eq!(
+            (now + wait) % 1000,
+            ANCHOR % 1000,
+            "the wake-up lands on a whole second (offset {offset})"
+        );
+        assert_eq!(
+            (now + wait - 1) % 1000,
+            (ANCHOR + 999) % 1000,
+            "and on the next one, not a later one (offset {offset})"
+        );
+    }
+    // A clock that reads behind the anchor is a zero, not an overflow.
+    assert_eq!(overlay_spec::ms_until_next_second(ANCHOR, ANCHOR - 5), 1000);
+    assert_eq!(overlay_spec::elapsed_secs(ANCHOR, ANCHOR - 5), 0);
 }
 
 #[test]

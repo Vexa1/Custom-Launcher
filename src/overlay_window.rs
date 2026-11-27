@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, pos2, vec2};
 use serde_json::Value;
 
+use crate::overlay_spec;
+
 // ---------------------------------------------------------------------------
 // CoreGraphics: find the Roblox game window
 // ---------------------------------------------------------------------------
@@ -609,6 +611,9 @@ struct Panel {
     /// `lines` parsed into label/value pairs, also built once per spec change so the
     /// render loop never splits or allocates strings per frame.
     rows: Vec<Row>,
+    /// Unix-ms anchor of this panel's live timer (`joined_at_unix_ms`), when it has one.
+    /// The launcher writes it once per session; the seconds come from the clock here.
+    started_at_ms: Option<u64>,
 }
 
 /// One laid-out row, in game-window coordinates. Built once per spec / scale change; the
@@ -966,8 +971,8 @@ impl OverlayWindowApp {
         self.game_active = spec["game_active"].as_bool().unwrap_or(true);
         self.spec_gen = self.spec_gen.wrapping_add(1);
         // Where the launcher thinks the HUD sits. Ignored while the user drags: the spec is
-        // rewritten about once a second (the session timer changes), and taking the saved
-        // value again would snap the HUD back under the pointer mid-drag.
+        // rewritten whenever anything but the clock changes, and taking the saved value
+        // again would snap the HUD back under the pointer mid-drag.
         self.saved_offset = vec2(
             spec["offset_x"].as_f64().unwrap_or(0.0) as f32,
             spec["offset_y"].as_f64().unwrap_or(0.0) as f32,
@@ -1004,6 +1009,10 @@ impl OverlayWindowApp {
                             .iter()
                             .map(|line| split_row(line.as_str()))
                             .collect();
+                        // The anchor only matters when a row carries the timer token.
+                        let started_at_ms = p["joined_at_unix_ms"]
+                            .as_u64()
+                            .filter(|_| lines.iter().any(|l| overlay_spec::has_elapsed(l)));
                         Panel {
                             id: p["id"].as_str().unwrap_or("").to_string(),
                             corner: p["corner"].as_u64().unwrap_or(3).min(3) as u8,
@@ -1011,6 +1020,7 @@ impl OverlayWindowApp {
                             title,
                             rows,
                             lines,
+                            started_at_ms,
                         }
                     })
                     .collect()
@@ -1294,6 +1304,44 @@ impl OverlayWindowApp {
         self.layout
             .iter()
             .fold(Rect::NOTHING, |acc, p| acc.union(p.rect))
+    }
+
+    /// Advances the live timer rows (`In server`, `Session`) from their anchors.
+    ///
+    /// The launcher writes an anchor, not a clock, so the seconds have to be produced here.
+    /// Each row is rewritten only when its whole second changed - one string a second, not a
+    /// re-format per frame - and the layout is invalidated once for the new widths.
+    ///
+    /// Returns the millis until the next whole second, so `ui` can sleep exactly until the
+    /// moment the row changes and nowhere in between.
+    fn tick_timers(&mut self, now_ms: u64) -> Option<u64> {
+        let mut wake: Option<u64> = None;
+        let mut changed = false;
+        for panel in &mut self.panels {
+            let Some(started_at_ms) = panel.started_at_ms else {
+                continue;
+            };
+            let due = overlay_spec::ms_until_next_second(started_at_ms, now_ms);
+            wake = Some(wake.map_or(due, |w: u64| w.min(due)));
+            for i in 0..panel.rows.len() {
+                if !overlay_spec::has_elapsed(&panel.rows[i].value) {
+                    continue;
+                }
+                let text = overlay_spec::with_elapsed(&panel.rows[i].value, started_at_ms, now_ms);
+                if text == panel.rows[i].value {
+                    continue;
+                }
+                panel.rows[i].value = text.clone();
+                if let Some(line) = panel.lines.get_mut(i) {
+                    *line = text;
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.spec_gen = self.spec_gen.wrapping_add(1);
+        }
+        wake
     }
 
     /// Lays the panels out in game-window coordinates.
@@ -1914,13 +1962,24 @@ impl eframe::App for OverlayWindowApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        // Advance the clock before drawing, so the frame that wakes on the boundary already
+        // shows the new second instead of painting the old one and sleeping another tick.
+        let tick = if self.visible || self.edit {
+            self.tick_timers(overlay_spec::unix_ms_now())
+        } else {
+            None
+        };
         self.paint(ui);
-        // Event-driven, not a loop: 60 fps only while the user is dragging, otherwise two
-        // wake-ups a second when the HUD is on screen and one when it is hidden. The old
-        // build had a 150 ms repaint plus a 400 ms heartbeat thread, i.e. ~9 full transparent
-        // composites a second whether anything had changed or not.
+        // Event-driven, not a loop: 60 fps only while the user is dragging. With a session
+        // timer on screen the wake-up is scheduled for the exact next whole second, so one
+        // frame draws each tick and nothing in between; without one, two wake-ups a second
+        // while the HUD is up and one while it is hidden. The old build had a 150 ms repaint
+        // plus a 400 ms heartbeat thread, i.e. ~9 full transparent composites a second
+        // whether anything had changed or not.
         let interval = if self.edit || self.dragging {
             Duration::from_millis(16)
+        } else if let Some(ms) = tick {
+            Duration::from_millis(ms.clamp(1, 1000))
         } else if self.visible {
             Duration::from_millis(500)
         } else {

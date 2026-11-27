@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.14
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.15
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -111,10 +111,10 @@ Everything listed here exists in the code today. File references point at the im
 |---|---|
 | **Transparent overlay window** (`main.rs:36-42`, `overlay_window.rs`) | A second copy of the binary runs with `--overlay-window <spec.json>`: borderless, transparent, click-through, always-on-top, non-activating window positioned over the Roblox window (including fullscreen Spaces). |
 | **Server panel** (`game_overlay.rs`) | Corner-selectable panel showing server region, IP and job id, with auto-hide duration. |
-| **Stats panel** | Live CPU, RAM, ping (ICMP to the game server), session timer, clock and the active FPS cap. |
+| **Stats panel** | Live CPU, RAM, ping (ICMP to the game server), session timer, clock and the active FPS cap. The session timer is ticked by the overlay window from the server's join timestamp, not by the launcher rewriting the file. |
 | **FastFlags panel** | Read-only view of the flags currently applied to the client. |
 | **Crosshair** | Style, size, gap, thickness, colour and opacity. Endpoints are snapped to device-pixel centres and the dark backing is exactly one physical pixel, so it stays sharp on both Retina and 1x Catalina displays. See *HUD design system*. |
-| **Driver** | `game_overlay.rs` writes a JSON spec roughly once a second from a background thread and keeps the overlay process alive, restarting it if it dies mid-session. A config change sets a wake flag that cuts the tick short, so a tray toggle lands within 100 ms. Works identically from the launcher or from `--companion`. |
+| **Driver** | `game_overlay.rs` writes a JSON spec from a background thread whenever something observable changes — server, region, ping, flags, config — and keeps the overlay process alive, restarting it if it dies mid-session. The clock is not written: each timer row carries a `joined_at_unix_ms` anchor plus an `{elapsed}` token, and the overlay window turns that into `m:ss` itself, so a quiet second costs no file write. A config change sets a wake flag that cuts the tick short, so a tray toggle lands within 100 ms. Works identically from the launcher or from `--companion`. |
 
 #### HUD design system (`overlay_window.rs`)
 
@@ -198,7 +198,8 @@ The overlay window is its own process: `main.rs:37` sees `--overlay-window` and 
 minimised or closed cannot freeze it. There are no egui secondary viewports, no
 `show_viewport_deferred`, no `NSPanel`/`CALayer` renderer anywhere in `src/` - the HUD is one
 transparent, click-through `NSWindow` (level 1000, all Spaces, `orderFrontRegardless`) drawn
-with egui, fed by a JSON spec the launcher rewrites about once a second.
+with egui, fed by a JSON spec the launcher rewrites only when something changes (the `In server`
+and `Session` rows carry an anchor, and the window ticks them itself).
 
 That architecture was sound; the visibility *condition* was not:
 
@@ -321,9 +322,12 @@ process owns the pointer while the launcher owns the config.
 
 #### Why the overlay costs almost nothing
 
-- **Event-driven repaints** (`overlay_window.rs:1549`): 16 ms only while dragging, 500 ms
-  when the HUD is on screen, 1000 ms when hidden. The previous build repainted every 150 ms
-  *and* ran a 400 ms heartbeat thread, i.e. ~9 transparent composites a second while idle.
+- **Event-driven repaints** (`overlay_window.rs:1959`): 16 ms only while dragging. With a
+  live session timer on screen the next frame is scheduled for the exact milliseconds left
+  until its next whole second, so the clock ticks on the boundary and the overlay wakes once
+  per second with nothing in between; without one, 500 ms while the HUD is on screen and
+  1000 ms while it is hidden. The previous build repainted every 150 ms *and* ran a 400 ms
+  heartbeat thread, i.e. ~9 transparent composites a second while idle.
 - **No per-frame text layout.** Every label and value is measured once per spec change and
   cached (`relayout`, `overlay_window.rs:934`); `paint_layout` (`:1071`) only translates and
   draws those galleys.

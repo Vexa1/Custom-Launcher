@@ -94,7 +94,7 @@ fn tone(label: &str, value: &str) -> Option<Color32> {
 
 /// Draws the HUD `spec` over a game-like backdrop and registers every text box, so the layout
 /// rules (`Probe::problems`) can reject a clipped or overlapping HUD.
-pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value) {
+pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value, now_ms: u64) {
     let area = ui.max_rect();
     let painter = ui.painter().clone();
     for i in 0..160 {
@@ -127,11 +127,20 @@ pub fn draw(ui: &mut egui::Ui, probe: &mut Probe, spec: &Value) {
     };
     for (pi, panel) in panels.iter().enumerate() {
         let title = tracked(panel["title"].as_str().unwrap_or(""));
+        // Live rows are formatted here, exactly as `overlay_window::tick_timers` does it: the
+        // file carries the panel's `joined_at_unix_ms` anchor and a `{elapsed}` token, never a
+        // time that would go stale between launcher ticks. The value font is monospace, so
+        // the digits are tabular and the row never jitters as the seconds change.
+        let started_at_ms = panel["joined_at_unix_ms"].as_u64();
         let lines: Vec<String> = panel["lines"]
             .as_array()
             .map(|l| {
                 l.iter()
-                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .filter_map(|s| s.as_str())
+                    .map(|s| match started_at_ms {
+                        Some(start) => crate::overlay_spec::with_elapsed(s, start, now_ms),
+                        None => s.to_string(),
+                    })
                     .collect()
             })
             .unwrap_or_default();

@@ -216,6 +216,9 @@ fn the_pipeline_from_a_roblox_log_to_a_rendered_live_ping() {
         clock: true,
         fps_cap: Some(240),
     };
+    // One fixed anchor for both writes: the HUD clocks itself from it, so the rendered
+    // `Session` row is 1:05 whatever the wall clock does while the test runs.
+    let now_ms = overlay_spec::unix_ms_now();
     let live_for = |ping: Option<u32>| Live {
         server: Some(LiveServer {
             ip: &healthy.ip,
@@ -223,7 +226,7 @@ fn the_pipeline_from_a_roblox_log_to_a_rendered_live_ping() {
             place_id: healthy.place_id,
         }),
         server_age_secs: 12,
-        session_secs: 65,
+        joined_at_unix_ms: now_ms.saturating_sub(65_000),
         detect_secs: 65,
         region: Some("Sydney, AU"),
         ping_ms: ping,
@@ -295,13 +298,16 @@ fn the_pipeline_from_a_roblox_log_to_a_rendered_live_ping() {
     assert!(!disk.contains("-- ms"), "no row may stay blank: {disk}");
     assert!(disk.contains("Server: Sydney, AU"), "{disk}");
     assert!(disk.contains("127.0.0.1"), "{disk}");
+    // The timer row is an anchor plus a token: the seconds are the overlay's, not the file's.
+    assert!(disk.contains("joined_at_unix_ms"), "{disk}");
+    assert!(!disk.contains("Session  01:05"), "{disk}");
     let parsed: serde_json::Value = serde_json::from_str(&disk).expect("the file is valid JSON");
 
     // --- 4. Render those exact bytes and inspect the HUD ----------------------------------
     let viewport = egui::vec2(1280.0, 800.0);
     let mut harness = shots::Harness::new();
     let (shot, probe) = harness.render("overlay_live_ping_raknet", viewport, 1.5, |ui, probe| {
-        hud::draw(ui, probe, &parsed)
+        hud::draw(ui, probe, &parsed, now_ms)
     });
     let problems = probe.problems(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport));
     assert!(
@@ -445,6 +451,7 @@ fn a_filtered_datacenter_relay_gets_its_ping_without_probing_it() {
         clock: true,
         fps_cap: Some(240),
     };
+    let now_ms = overlay_spec::unix_ms_now();
     let live = Live {
         server: Some(LiveServer {
             ip: &info.ip,
@@ -452,7 +459,7 @@ fn a_filtered_datacenter_relay_gets_its_ping_without_probing_it() {
             place_id: info.place_id,
         }),
         server_age_secs: 12,
-        session_secs: 65,
+        joined_at_unix_ms: now_ms.saturating_sub(65_000),
         detect_secs: 65,
         region: Some("Sydney, AU"),
         ping_ms: Some(reading.ms),
@@ -496,7 +503,7 @@ fn a_filtered_datacenter_relay_gets_its_ping_without_probing_it() {
     let viewport = egui::vec2(1280.0, 800.0);
     let mut harness = shots::Harness::new();
     let (shot, probe) = harness.render("overlay_live_ping", viewport, 1.5, |ui, probe| {
-        hud::draw(ui, probe, &parsed)
+        hud::draw(ui, probe, &parsed, now_ms)
     });
     let problems = probe.problems(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport));
     assert!(

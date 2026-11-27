@@ -241,7 +241,12 @@ pub struct ServerData {
 struct Shared {
     cfg: OverlayConfig,
     server: Option<ServerData>,
-    server_since: Instant,
+    /// Unix-ms anchor for the `In server` row: set when the watcher resolves the server,
+    /// cleared when the player leaves it. Written once per session instead of a clock, so
+    /// the overlay window ticks the timer on its own.
+    joined_at_ms: Option<u64>,
+    /// Unix-ms anchor for the `Session` row before a server is known (the helper's start).
+    session_started_ms: u64,
     locations: HashMap<String, String>,
     /// `(game name, players online)` for the current place.
     game_info: Option<(String, u64)>,
@@ -259,7 +264,7 @@ struct Shared {
     /// The bytes last written. Shared so the loop and a tray click can never write a spec
     /// older than what is already on disk.
     last_spec: String,
-    /// The overlay's own clock: the `Session` row and how long `Detecting server...` shows.
+    /// How long `Detecting server...` is shown before it says `Server info unavailable`.
     session_start: Instant,
     usage: Usage,
     /// `NO_PING` until a probe answers. The probe thread and the late room-list answer both
@@ -330,10 +335,13 @@ impl OverlayManager {
             .unwrap_or(0);
         let spec_path = crate::auth::data_dir().join(format!("overlay-panels-{stamp}.json"));
         write_spec(&spec_path, r#"{"panels":[]}"#);
+        let joined_at_ms = known_server.is_some().then(overlay_spec::unix_ms_now);
+        let session_started_ms = overlay_spec::unix_ms_now();
         let shared = Arc::new(Mutex::new(Shared {
             cfg,
             server: known_server,
-            server_since: Instant::now(),
+            joined_at_ms,
+            session_started_ms,
             locations: HashMap::new(),
             game_info: None,
             stop: false,
@@ -461,8 +469,10 @@ fn publish_server(server: Option<ServerData>) {
         return;
     };
     if g.server != server {
+        // A join starts the timer, a leave clears it: the next server gets a fresh anchor
+        // instead of inheriting the previous session's time.
+        g.joined_at_ms = server.is_some().then(overlay_spec::unix_ms_now);
         g.server = server;
-        g.server_since = Instant::now();
         g.game_info = None;
         g.dirty = true;
         g.rev = g.rev.wrapping_add(1);
@@ -1509,12 +1519,12 @@ fn build_spec(g: &Shared) -> Value {
         p => Some(p),
     };
     let failed = PING_FAILED.lock().ok().and_then(|p| *p);
-    // The helper outlives a session (it is kept alive while Roblox runs), so the session
-    // timer starts at this join, not when the helper process started.
-    let session_elapsed = match server {
-        Some(_) => g.server_since.elapsed(),
-        None => g.session_start.elapsed(),
-    };
+    // The helper outlives a session (it is kept alive while Roblox runs), so the timer
+    // starts at this join, not when the helper process started. Both timer rows count from
+    // this one anchor, and the anchor does not move between ticks - the overlay window does
+    // the counting, so the file only changes when something other than the clock does.
+    let now_ms = overlay_spec::unix_ms_now();
+    let joined_at_unix_ms = g.joined_at_ms.unwrap_or(g.session_started_ms);
     let panels = overlay_spec::build(
         &overlay_spec::Panels {
             server: server_panel.as_ref(),
@@ -1528,11 +1538,11 @@ fn build_spec(g: &Shared) -> Value {
                 job_id: s.job_id.as_str(),
                 place_id: s.place_id,
             }),
-            server_age_secs: match server {
-                Some(_) => g.server_since.elapsed().as_secs(),
-                None => 0,
-            },
-            session_secs: session_elapsed.as_secs(),
+            server_age_secs: g
+                .joined_at_ms
+                .map(|joined| now_ms.saturating_sub(joined) / 1000)
+                .unwrap_or(0),
+            joined_at_unix_ms,
             detect_secs: g.session_start.elapsed().as_secs(),
             region,
             ping_ms: rtt,
