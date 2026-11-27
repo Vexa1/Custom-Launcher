@@ -196,7 +196,15 @@ impl Creblox {
             return;
         };
 
-        let syncing = self.avatar_pending > 0 || self.avatar_loading;
+        // Only the debounced equip sync gets the in-viewport pill; ordinary avatar
+        // loads and other edits keep their existing indicators.
+        let syncing = self.avatar_sync.pending();
+        // Other avatar edits (rig, colours, outfits) still use the header indicator.
+        let other_syncing = self.avatar_pending > 0;
+        if syncing {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(120));
+        }
         let current_tab = self.avatar_tab;
         let current_rig = self
             .avatar_state
@@ -229,6 +237,7 @@ impl Creblox {
                     Some(&avatar_url),
                     egui::vec2(left_panel_w, left_h),
                     ui.visuals().dark_mode,
+                    syncing,
                 );
             });
 
@@ -293,7 +302,7 @@ impl Creblox {
                                 }
                             });
 
-                            if syncing {
+                            if other_syncing {
                                 ui.add_space(8.0);
                                 ui.spinner();
                                 ui.label(

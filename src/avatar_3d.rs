@@ -2,8 +2,10 @@
 // Real-time 3D Roblox Avatar parser, loader, and GPU-accelerated egui renderer
 
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+use crate::avatar_sync::MeshStore;
 use serde_json::Value;
 use std::io::Read;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Roblox CDN sharding algorithm: assets starting with 30DAY- or raw hex hashes
 /// must be downloaded from t{sub}.rbxcdn.com where sub = (hash bytes XOR 31) % 8.
@@ -81,6 +83,38 @@ pub struct LoadedTexture {
     pub image: egui::ColorImage,
     #[allow(dead_code)]
     pub handle: Option<egui::TextureHandle>,
+}
+
+/// What is cached for one rendered avatar look: the parsed mesh plus every decoded texture.
+type CachedAvatar = (Avatar3DModel, Vec<(String, egui::ColorImage)>);
+
+/// Decoded avatars, keyed by the mesh and texture hashes Roblox served. Toggling an item off
+/// and back on, or stepping back to a recently seen look, therefore repaints from memory
+/// instead of downloading and decoding the same OBJ and textures again.
+fn avatar_cache() -> &'static Mutex<MeshStore<CachedAvatar>> {
+    static CACHE: OnceLock<Mutex<MeshStore<CachedAvatar>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(MeshStore::new(128 * 1024 * 1024)))
+}
+
+fn avatar_cache_key(obj_hash: &str, tex_hashes: &[String]) -> String {
+    format!("{obj_hash}|{}", tex_hashes.join(","))
+}
+
+fn avatar_payload_bytes(model: &Avatar3DModel, images: &[(String, egui::ColorImage)]) -> usize {
+    let mesh = model.triangles.len() * std::mem::size_of::<AvatarTriangle>();
+    let textures: usize = images.iter().map(|(_, i)| i.pixels.len() * 4).sum();
+    mesh + textures
+}
+
+fn textures_from_images(images: &[(String, egui::ColorImage)]) -> Vec<LoadedTexture> {
+    images
+        .iter()
+        .map(|(hash, image)| LoadedTexture {
+            hash: hash.clone(),
+            image: image.clone(),
+            handle: None,
+        })
+        .collect()
 }
 
 /// Decode one downloaded texture into the form the rasteriser samples.
@@ -514,6 +548,14 @@ pub fn load_avatar_3d_data_ex(
         }
     }
 
+    // Reuse an already decoded avatar when this exact look was seen recently.
+    if let Ok(mut cache) = avatar_cache().lock() {
+        if let Some(hit) = cache.get(&avatar_cache_key(obj_hash, &tex_hashes)) {
+            let (model, images) = &*hit;
+            return Ok((model.clone(), textures_from_images(images)));
+        }
+    }
+
     // Download the OBJ, MTL and every texture in parallel (was one-by-one).
     let (obj_bytes, mtl_bytes, raw_textures) = std::thread::scope(|s| {
         let obj_job = s.spawn(|| download_rbx_asset(obj_hash));
@@ -544,6 +586,18 @@ pub fn load_avatar_3d_data_ex(
 
     let mut model = parse_avatar_3d(&obj_bytes, mtl_bytes.as_deref(), &tex_hashes)?;
     model.obj_hash = obj_hash_owned.clone();
+
+    // Keep the decoded result, bounded by the shared RAM budget, so coming back to this look
+    // is a memory copy rather than another round trip.
+    let images: Vec<(String, egui::ColorImage)> = raw_textures
+        .iter()
+        .map(|t| (t.hash.clone(), t.image.clone()))
+        .collect();
+    let key = avatar_cache_key(&obj_hash_owned, &tex_hashes);
+    let bytes = avatar_payload_bytes(&model, &images);
+    if let Ok(mut cache) = avatar_cache().lock() {
+        cache.put(key, Arc::new((model.clone(), images)), bytes);
+    }
 
     Ok((model, raw_textures))
 }
@@ -979,6 +1033,8 @@ pub fn render_avatar_viewport(
     avatar_2d_url: Option<&str>,
     viewport_size: Vec2,
     dark_mode: bool,
+    // The debounced equip sync is still running: show the corner pill.
+    syncing: bool,
 ) {
     let (rect, resp) = ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -1238,6 +1294,25 @@ pub fn render_avatar_viewport(
                     ui.label(egui::RichText::new("3D").size(11.0).strong());
                 });
             });
+    }
+
+    if syncing {
+        // Tiny, non-intrusive: the mesh stays on screen and draggable while the debounced
+        // `set-wearing-assets` request is on the wire. No full-frame spinner, no blanking.
+        let painter = ui.painter_at(rect);
+        let font = egui::FontId::proportional(11.0);
+        let text = Color32::from_rgb(226, 231, 240);
+        let galley = painter.layout_no_wrap("Syncing...".to_string(), font, text);
+        let size = galley.size() + egui::vec2(18.0, 7.0);
+        let pill = Rect::from_min_size(
+            Pos2::new(
+                (rect.max.x - size.x - 10.0).max(rect.min.x + 6.0),
+                (rect.max.y - size.y - 10.0).max(rect.min.y + 6.0),
+            ),
+            size,
+        );
+        painter.rect_filled(pill, 9.0, Color32::from_rgba_unmultiplied(10, 13, 20, 200));
+        painter.galley(pill.min + egui::vec2(9.0, 3.5), galley, text);
     }
 }
 

@@ -197,6 +197,8 @@ pub struct Creblox {
     pub avatar_palette: Vec<PaletteColor>,
     pub avatar_loading: bool,
     pub avatar_pending: u32,
+    /// Optimistic equip state, debounced sync and its revision counter.
+    pub avatar_sync: crate::avatar_sync::AvatarSync,
     pub avatar_seq: u64,
     pub avatar_err: Option<String>,
     pub avatar_tab: AvatarTab,
@@ -522,6 +524,7 @@ impl Creblox {
             avatar_palette: Vec::new(),
             avatar_loading: false,
             avatar_pending: 0,
+            avatar_sync: crate::avatar_sync::AvatarSync::default(),
             avatar_seq: 0,
             avatar_err: None,
             avatar_tab: AvatarTab::Wearing,
@@ -1139,6 +1142,28 @@ impl Creblox {
         }
     }
 
+    /// Sends the single debounced `set-wearing-assets` request for the latest equip set.
+    ///
+    /// Called every frame from `poll`; it is a no-op until the 350 ms debounce has elapsed,
+    /// and it never runs while a request is on the wire, so a burst of clicks is one POST.
+    pub fn flush_avatar_equip(&mut self) {
+        let Some((revision, assets)) = self.avatar_sync.take_request(Instant::now()) else {
+            return;
+        };
+        let (Some(uid), Some(cookie)) = (
+            self.me.as_ref().map(|p| p.user.id),
+            self.cookie.clone(),
+        ) else {
+            return;
+        };
+        self.spawn(move || {
+            Msg::AvatarEquipped(
+                revision,
+                apply_avatar_assets(uid, &cookie, &assets, "Avatar updated.".to_string()),
+            )
+        });
+    }
+
     pub fn load_avatar_3d(&mut self) {
         if self.avatar_3d.loading {
             // An edit landed while a load was running: that load may show the old avatar,
@@ -1162,9 +1187,12 @@ impl Creblox {
         };
         self.avatar_3d.loading = true;
         self.avatar_3d.err = None;
+        // Tag the fetch with the avatar revision it was started for. If the user equips
+        // something else before it lands, the result is discarded rather than painted.
+        let revision = self.avatar_sync.revision;
         self.spawn(move || {
             let res = load_avatar_3d_data_ex(uid, cookie.as_deref(), stale_hash.as_deref());
-            Msg::Avatar3DLoaded(uid, res)
+            Msg::Avatar3DLoaded(uid, revision, res)
         });
     }
 
@@ -1365,6 +1393,7 @@ impl Creblox {
         self.avatar_loading = false;
         self.avatar_pending = 0;
         self.avatar_seq = 0;
+        self.avatar_sync = crate::avatar_sync::AvatarSync::default();
         self.avatar_err = None;
         self.avatar_tab = AvatarTab::Wearing;
         self.avatar_search.clear();
@@ -1588,6 +1617,7 @@ impl Creblox {
     }
 
     pub fn poll(&mut self) -> bool {
+        self.flush_avatar_equip();
         let mut had_messages = false;
         while let Ok(msg) = self.rx.try_recv() {
             had_messages = true;
@@ -2343,7 +2373,9 @@ impl Creblox {
                     self.avatar_loading = false;
                     match r {
                         Ok((state, palette)) => {
+                            let wearing = state.wearing.clone();
                             self.avatar_state = Some(state);
+                            self.avatar_sync.seed(&wearing);
                             if !palette.is_empty() {
                                 self.avatar_palette = palette;
                             }
@@ -2432,7 +2464,9 @@ impl Creblox {
                     match r {
                         Ok((state, avatar_url, headshot_url, note)) => {
                             if seq == self.avatar_seq {
+                                let wearing = state.wearing.clone();
                                 self.avatar_state = Some(state);
+                                self.avatar_sync.seed(&wearing);
                                 self.avatar_err = None;
                             }
                             if let Some(prof) = &mut self.me {
@@ -2467,9 +2501,84 @@ impl Creblox {
                         }
                     }
                 }
-                Msg::Avatar3DLoaded(uid, res) => {
+                Msg::AvatarEquipped(revision, r) => {
+                    if !logged_in {
+                        continue;
+                    }
+                    match r {
+                        Ok((state, avatar_url, headshot_url, note)) => {
+                            let newest = self.avatar_sync.settle(revision, &state.wearing);
+                            if let Some(prof) = &mut self.me {
+                                if !avatar_url.is_empty() {
+                                    if !prof.avatar.is_empty() && prof.avatar != avatar_url {
+                                        self.ctx.forget_image(&prof.avatar);
+                                    }
+                                    prof.avatar = avatar_url;
+                                }
+                                if !headshot_url.is_empty() {
+                                    if !prof.user.headshot.is_empty()
+                                        && prof.user.headshot != headshot_url
+                                    {
+                                        self.ctx.forget_image(&prof.user.headshot);
+                                    }
+                                    prof.user.headshot = headshot_url;
+                                }
+                            }
+                            if newest {
+                                if let Some(st) = &mut self.avatar_state {
+                                    st.wearing = state.wearing;
+                                }
+                                self.avatar_err = None;
+                                self.status = note;
+                                self.avatar_3d.loaded_user_id = None;
+                                self.avatar_3d.expect_change = true;
+                                self.load_avatar_3d();
+                            }
+                        }
+                        Err(e) => {
+                            let rolled_back = self.avatar_sync.fail(
+                                revision,
+                                format!("Could not save that change: {e}"),
+                                Instant::now(),
+                            );
+                            if rolled_back {
+                                let restored = self.avatar_sync.desired.clone();
+                                if let Some(st) = &mut self.avatar_state {
+                                    st.wearing = restored;
+                                }
+                                self.avatar_err = None;
+                                self.status = "Avatar change reverted.".to_string();
+                                let body = self
+                                    .avatar_sync
+                                    .take_error()
+                                    .unwrap_or_else(|| e.clone());
+                                self.push_toast(
+                                    NotificationSource::RobloxApi,
+                                    ToastKind::Error,
+                                    "Avatar not updated",
+                                    body,
+                                    None,
+                                    None,
+                                    None,
+                                    4.5,
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                    // A stale settle re-queued the newer clicks: make sure the flush runs.
+                    self.ctx.request_repaint_after(Duration::from_millis(40));
+                }
+                Msg::Avatar3DLoaded(uid, revision, res) => {
                     self.avatar_3d.loading = false;
                     let run_again = std::mem::take(&mut self.avatar_3d.reload_queued);
+                    if self.avatar_sync.is_stale(revision) {
+                        // A newer click landed while this render was downloading. Keep the
+                        // mesh that is on screen (never blank it) and load the current one.
+                        self.avatar_3d.expect_change = true;
+                        self.load_avatar_3d();
+                        continue;
+                    }
                     match res {
                         Ok((model, textures)) => {
                             self.avatar_3d.loaded_user_id = Some(uid);
@@ -5837,66 +5946,39 @@ impl eframe::App for Creblox {
                     self.load_avatar_tab(tab, true);
                 }
                 Action::ToggleWearAsset(item) => {
-                    if let (Some(uid), Some(cookie)) =
-                        (self.me.as_ref().map(|p| p.user.id), self.cookie.clone())
-                    {
-                        if let Some(st) = &mut self.avatar_state {
-                            let (next, equipped) = compute_toggled_assets(&st.wearing, &item);
-                            st.wearing = next.clone();
-                            let note = if equipped {
-                                format!("Equipped \"{}\".", item.name)
-                            } else {
-                                format!("Removed \"{}\".", item.name)
-                            };
-                            self.avatar_err = None;
-                            self.avatar_seq += 1;
-                            self.avatar_pending += 1;
-                            let seq = self.avatar_seq;
-                            self.status = if equipped {
-                                format!("Equipped {} — syncing render...", item.name)
-                            } else {
-                                format!("Removed {} — syncing render...", item.name)
-                            };
-                            self.spawn(move || {
-                                Msg::AvatarApplied(
-                                    seq,
-                                    apply_avatar_assets(uid, &cookie, &next, note),
-                                )
-                            });
-                        }
+                    // Zero-latency: the clicked set is the worn set on this very frame. The
+                    // network is a debounced background concern (`flush_avatar_equip`).
+                    let (equipped, wearing) = {
+                        let sync = &mut self.avatar_sync;
+                        let equipped = sync.toggle(&item, Instant::now());
+                        (equipped, sync.desired.clone())
+                    };
+                    if let Some(st) = &mut self.avatar_state {
+                        st.wearing = wearing;
                     }
+                    self.avatar_err = None;
+                    self.status = if equipped {
+                        format!("Equipped {}", item.name)
+                    } else {
+                        format!("Removed {}", item.name)
+                    };
+                    // Wake up when the debounce expires, even if nothing else repaints.
+                    self.ctx
+                        .request_repaint_after(crate::avatar_sync::EQUIP_DEBOUNCE);
                 }
                 Action::UnequipAccessories => {
-                    if let (Some(uid), Some(cookie)) =
-                        (self.me.as_ref().map(|p| p.user.id), self.cookie.clone())
-                    {
-                        if let Some(st) = &mut self.avatar_state {
-                            let next: Vec<AvatarAsset> = st
-                                .wearing
-                                .iter()
-                                .filter(|a| !matches!(a.asset_type_id, 8 | 41..=47))
-                                .cloned()
-                                .collect();
-                            st.wearing = next.clone();
-                            self.avatar_err = None;
-                            self.avatar_seq += 1;
-                            self.avatar_pending += 1;
-                            let seq = self.avatar_seq;
-                            self.status =
-                                "Removed hats & accessories — syncing render...".to_string();
-                            self.spawn(move || {
-                                Msg::AvatarApplied(
-                                    seq,
-                                    apply_avatar_assets(
-                                        uid,
-                                        &cookie,
-                                        &next,
-                                        "Removed all hats & accessories.".to_string(),
-                                    ),
-                                )
-                            });
-                        }
+                    self.avatar_sync.retain_where(
+                        |a| !matches!(a.asset_type_id, 8 | 41..=47),
+                        Instant::now(),
+                    );
+                    let wearing = self.avatar_sync.desired.clone();
+                    if let Some(st) = &mut self.avatar_state {
+                        st.wearing = wearing;
                     }
+                    self.avatar_err = None;
+                    self.status = "Removed hats & accessories.".to_string();
+                    self.ctx
+                        .request_repaint_after(crate::avatar_sync::EQUIP_DEBOUNCE);
                 }
                 Action::WearOutfit(outfit) => {
                     if let (Some(uid), Some(cookie)) =

@@ -8,6 +8,20 @@ pub enum Msg {
 }
 
 /// Same shape as `src/types.rs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AvatarAsset {
+    pub id: u64,
+    pub name: String,
+    pub asset_type_id: u64,
+    pub asset_type_name: String,
+    pub thumb: String,
+    pub meta: Option<serde_json::Value>,
+    pub creator_name: String,
+    pub creator_verified: bool,
+    pub price: Option<u64>,
+}
+
+/// Same shape as `src/types.rs`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Game {
     pub universe_id: u64,

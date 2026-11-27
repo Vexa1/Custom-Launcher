@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.21
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.22
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -525,7 +525,13 @@ src/
   playtime.rs        playtime.json read/write.
   video_preview.rs   VP8/WebM decode → RGBA frames with downscaling.
   avatar_3d.rs       Avatar 3D loader (OBJ/MTL/textures over HTTPS) and a CPU
-                     rasteriser with a real z-buffer, cached per (yaw,pitch,zoom).
+                     rasteriser with a real z-buffer, cached per (yaw,pitch,zoom);
+                     decoded looks are kept in a bounded RAM cache keyed by mesh +
+                     texture hashes, so re-equipping a recent item paints in 0 ms.
+  avatar_sync.rs     Avatar editor equip state: optimistic toggles, the 350 ms
+                     single-request debounce, the monotonic revision that discards
+                     stale 3D responses, rollback on failure and the mesh cache's
+                     LRU/budget policy.
   telemetry.rs       RAM sampling, self-imposed RAM/CPU limits, the
                      window-visibility key used by the idle animation pacer.
   types.rs           Data model: Game, Profile, User, Friend, Settings (+ Default),

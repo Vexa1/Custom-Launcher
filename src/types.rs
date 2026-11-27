@@ -975,7 +975,12 @@ pub enum Msg {
     AvatarOutfits(u32, Result<(Vec<OutfitItem>, bool), String>),
     OutfitActionDone(Result<String, String>),
     AvatarApplied(u64, Result<(AvatarState, String, String, String), String>),
+    /// A debounced equip sync finished. The revision gates it: a response for an older set
+    /// must never overwrite newer clicks.
+    AvatarEquipped(u64, Result<(AvatarState, String, String, String), String>),
     Avatar3DLoaded(
+        u64,
+        /// Avatar revision the fetch started at: an out-of-date render is discarded.
         u64,
         Result<(avatar_3d::Avatar3DModel, Vec<avatar_3d::LoadedTexture>), String>,
     ),

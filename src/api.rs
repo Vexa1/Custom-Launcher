@@ -2661,56 +2661,6 @@ pub fn parse_hex_color(hex: &str) -> Color32 {
     Color32::from_rgb(163, 162, 165)
 }
 
-pub fn asset_type_id_from_name(name: &str) -> u64 {
-    match name {
-        "TShirt" | "T-Shirt" => 2,
-        "Hat" => 8,
-        "Shirt" => 11,
-        "Pants" => 12,
-        "Head" => 17,
-        "Face" => 18,
-        "Gear" => 19,
-        "Torso" => 27,
-        "RightArm" | "Right Arm" => 28,
-        "LeftArm" | "Left Arm" => 29,
-        "LeftLeg" | "Left Leg" => 30,
-        "RightLeg" | "Right Leg" => 31,
-        "HairAccessory" | "Hair Accessory" => 41,
-        "FaceAccessory" | "Face Accessory" => 42,
-        "NeckAccessory" | "Neck Accessory" => 43,
-        "ShoulderAccessory" | "Shoulder Accessory" => 44,
-        "FrontAccessory" | "Front Accessory" => 45,
-        "BackAccessory" | "Back Accessory" => 46,
-        "WaistAccessory" | "Waist Accessory" => 47,
-        "ClimbAnimation" => 48,
-        "DeathAnimation" => 49,
-        "FallAnimation" => 50,
-        "IdleAnimation" => 51,
-        "JumpAnimation" => 52,
-        "RunAnimation" => 53,
-        "SwimAnimation" => 54,
-        "WalkAnimation" => 55,
-        "PoseAnimation" => 56,
-        "EmoteAnimation" => 61,
-        "TShirtAccessory" => 64,
-        "ShirtAccessory" => 65,
-        "PantsAccessory" => 66,
-        "JacketAccessory" => 67,
-        "SweaterAccessory" => 68,
-        "ShortsAccessory" => 69,
-        "LeftShoeAccessory" => 70,
-        "RightShoeAccessory" => 71,
-        "DressSkirtAccessory" => 72,
-        "EyebrowAccessory" => 76,
-        "EyelashAccessory" => 77,
-        "MoodAnimation" => 78,
-        "DynamicHead" => 79,
-        "FaceMakeup" => 88,
-        "LipMakeup" => 89,
-        "EyeMakeup" => 90,
-        _ => 0,
-    }
-}
 
 pub fn fetch_asset_thumbs(ids: &[u64]) -> HashMap<u64, String> {
     let mut map = HashMap::new();
@@ -3064,69 +3014,11 @@ pub fn avatar_assets_payload(assets: &[AvatarAsset]) -> Value {
     serde_json::json!({ "assets": arr })
 }
 
-pub fn is_single_slot_asset(asset_type_id: u64) -> bool {
-    matches!(
-        asset_type_id,
-        2 | 11
-            | 12
-            | 17
-            | 18
-            | 19
-            | 27
-            | 28
-            | 29
-            | 30
-            | 31
-            | 48
-            | 49
-            | 50
-            | 51
-            | 52
-            | 53
-            | 54
-            | 55
-            | 56
-            | 78
-            | 79
-    )
-}
 
-pub fn compute_toggled_assets(
-    wearing: &[AvatarAsset],
-    item: &AvatarAsset,
-) -> (Vec<AvatarAsset>, bool) {
-    if wearing.iter().any(|w| w.id == item.id) {
-        let next = wearing
-            .iter()
-            .filter(|w| w.id != item.id)
-            .cloned()
-            .collect();
-        return (next, false);
-    }
-    let single = if item.asset_type_id != 0 {
-        is_single_slot_asset(item.asset_type_id)
-    } else {
-        is_single_slot_asset(asset_type_id_from_name(&item.asset_type_name))
-    };
-    let mut next: Vec<AvatarAsset> = if single {
-        wearing
-            .iter()
-            .filter(|w| {
-                if item.asset_type_id != 0 && w.asset_type_id != 0 {
-                    w.asset_type_id != item.asset_type_id
-                } else {
-                    !w.asset_type_name
-                        .eq_ignore_ascii_case(&item.asset_type_name)
-                }
-            })
-            .cloned()
-            .collect()
-    } else {
-        wearing.to_vec()
-    };
-    next.push(item.clone());
-    (next, true)
-}
+
+// The equip/unequip rules live with the optimistic sync state so they can be tested in
+// `vm-tests/`; keep the old paths working for this module's callers.
+pub use crate::avatar_sync::asset_type_id_from_name;
 
 pub fn post_wearing_assets(cookie: &str, assets: &[AvatarAsset]) -> Result<(), String> {
     let resp = post_csrf(
