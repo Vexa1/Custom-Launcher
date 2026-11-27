@@ -1788,6 +1788,13 @@ mod tests {
             "draft": false,
             "assets": []
         });
+        // A macOS overlay written into the notes is not a Windows archive, so on a Windows
+        // build this release offers no update at all instead of a zip the installer cannot
+        // use. The parsing below is the macOS half of that rule.
+        if WINDOWS_BUILD {
+            assert!(parse_github_release_update(&json, "0.4.13").is_none());
+            return;
+        }
         let rel = parse_github_release_update(&json, "0.4.13").expect("newer release");
         assert_eq!(
             rel.zip_url.as_deref(),
