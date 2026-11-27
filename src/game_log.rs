@@ -334,6 +334,77 @@ fn place_id_from_marker(text: &str) -> Option<u64> {
     digits.parse::<u64>().ok().filter(|&id| id > 0)
 }
 
+/// The latency keys the client has written, longest first so `dataping` / `networkping` are
+/// never read as a bare `ping`.
+const PING_KEYS: [&str; 8] = [
+    "averageping",
+    "networkping",
+    "avgping",
+    "dataping",
+    "pingms",
+    "latency",
+    "ping",
+    "rtt",
+];
+
+/// The newest network-latency sample the Roblox client itself wrote into its Player log.
+///
+/// This is the primary ping source: the client already measures the exact round trip to the
+/// server it is connected to, so reading its own sample needs no packets at all - which is
+/// the only thing that works against a `128.116.x.x` relay that blackholes every unsolicited
+/// packet. Only samples from the current session count, so a ping written before the latest
+/// join banner (the previous match) is never shown for this one.
+pub fn client_ping_from_log(text: &str) -> Option<u32> {
+    let session = match text.rfind("Joining game ") {
+        Some(idx) => &text[idx..],
+        None => text,
+    };
+    session.lines().rev().find_map(ping_sample_in_line)
+}
+
+/// `[FLog::Network] Ping: 34 ms` / `[DFLog::NetworkPing] NetworkPing 128 ms` / `Ping=34ms`.
+///
+/// A Roblox log line always carries an `FLog::`/`DFLog::` channel, and a latency sample is a
+/// small number in milliseconds. Anything else - `ping recv 25001` in the RakNet ping/pong
+/// diagnostics is time since the last ping, not a ping - is rejected rather than reported.
+fn ping_sample_in_line(line: &str) -> Option<u32> {
+    let lower = line.to_ascii_lowercase();
+    if !lower.contains("flog::") && !lower.contains("dflog::") {
+        return None;
+    }
+    let network_channel = lower.contains("flog::network") || lower.contains("dflog::network");
+    for key in PING_KEYS {
+        let mut from = 0;
+        while let Some(pos) = lower[from..].find(key) {
+            let at = from + pos;
+            from = at + key.len();
+            // Part of a longer word (`pinging`, `shipping`): not the key.
+            if at > 0 && lower.as_bytes()[at - 1].is_ascii_alphanumeric() {
+                continue;
+            }
+            let rest = lower[from..].trim_start_matches([' ', '=', ':', '\t', '"']);
+            let digits: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            let Ok(value) = digits.parse::<f32>() else {
+                continue;
+            };
+            if !(1.0..=2_000.0).contains(&value) {
+                continue;
+            }
+            let after = rest[digits.len()..].trim_start();
+            // A sample the client labels in milliseconds, or a bare ping value on a network
+            // line. A number followed by anything else is not a latency.
+            let unit = after.starts_with("ms") || after.starts_with("millisecond");
+            if unit || (network_channel && key.contains("ping")) {
+                return Some(value.round().max(1.0) as u32);
+            }
+        }
+    }
+    None
+}
+
 /// One player log in a Roblox logs directory, with the timestamps that identify the session
 /// it belongs to. The caller fills these from a directory listing; everything below is pure
 /// so it is testable without a Roblox install.

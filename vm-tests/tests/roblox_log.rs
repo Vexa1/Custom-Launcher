@@ -5,8 +5,8 @@
 //! geolocates it, so a missed format is a HUD stuck on "Server info unavailable".
 
 use creblox_vm_tests::game_log::{
-    extract_server_info_from_log, inspect_player_log_text, is_player_log_name, pick_player_log,
-    LogFile, LogSessionState,
+    client_ping_from_log, extract_server_info_from_log, inspect_player_log_text,
+    is_player_log_name, pick_player_log, LogFile, LogSessionState,
 };
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,66 @@ fn log_file(name: &str, created_ms: u64, modified_ms: u64) -> LogFile {
         created_ms,
         modified_ms,
     }
+}
+
+/// The client already measures the exact round trip to the server it is in. Reading that
+/// sample instead of probing a filtered relay is what makes the Ping row work at all.
+#[test]
+fn the_clients_own_latency_sample_is_read_from_its_log() {
+    let log = "\
+2026-11-27T09:00:00.000Z,1.000000,0a01,6 [FLog::Output] ! Joining game '6f1c2b40-0000-4000-8000-0000000000aa' place 142823291 at [10.12.2.219]:50782
+2026-11-27T09:00:05.000Z,6.000000,0a01,6 [DFLog::RakNet] Ping: 90 ms
+2026-11-27T09:00:10.000Z,11.000000,0a01,6 [DFLog::RakNet] Ping: 34 ms
+";
+    assert_eq!(
+        client_ping_from_log(log),
+        Some(34),
+        "the newest sample is the live one"
+    );
+
+    // Bare network-channel spellings and decimals both count.
+    assert_eq!(client_ping_from_log("[FLog::Network] Ping: 42\n"), Some(42));
+    assert_eq!(
+        client_ping_from_log("[DFLog::NetworkPing] NetworkPing 128.6 ms\n"),
+        Some(129)
+    );
+    assert_eq!(
+        client_ping_from_log("2026-01-01T00:00:00Z,1,0a,6 [FLog::Network] dataping=31ms\n"),
+        Some(31)
+    );
+
+    // Nothing that is not a latency sample may become the HUD's ping.
+    assert_eq!(client_ping_from_log("[FLog::Network] client ready\n"), None);
+    assert_eq!(
+        client_ping_from_log("2026-01-01T00:00:00Z,1,0a,6 [FLog::Output] ping 400\n"),
+        None,
+        "no millisecond unit and not a network line"
+    );
+    assert_eq!(
+        client_ping_from_log("2026-01-01T00:00:00Z,1,0a,6 [FLog::Network] KeepAlive ping 5000\n"),
+        None,
+        "a keep-alive interval is not a ping"
+    );
+}
+
+/// The RakNet diagnostics print time *since* the last ping; `ping recv 25001` is not a ping.
+#[test]
+fn raknet_missing_ping_pong_diagnostics_are_not_latency_samples() {
+    let log = "2026-02-11T18:04:20.433Z,116.433586,4648,6,Verbose [DFLog::RakNetMissingPingPong] Time since last (ms): ping recv 25001, ping sent 1475, pong recv 25001, pong sent 25001, pkt recv 20, pkt sent 10\n";
+    assert_eq!(client_ping_from_log(log), None);
+}
+
+/// A sample from the previous match must not be shown after rejoining: only the current
+/// session's telemetry counts.
+#[test]
+fn a_sample_from_before_the_latest_join_does_not_apply() {
+    let log = "\
+2026-11-27T08:00:00.000Z,1.000000,0a01,6 [FLog::Output] Joining game 'old-job' place 142823291 at [10.12.2.219]:50782
+2026-11-27T08:01:00.000Z,61.000000,0a01,6 [DFLog::RakNet] Ping: 210 ms
+2026-11-27T09:00:00.000Z,1.000000,0a01,6 [FLog::Output] Joining game 'new-job' place 142823291 at [10.12.2.219]:50781
+2026-11-27T09:00:02.000Z,3.000000,0a01,6 [FLog::Network] connection established
+";
+    assert_eq!(client_ping_from_log(log), None);
 }
 
 #[test]
@@ -45,7 +105,8 @@ fn connecting_to_udmux_server_reports_the_public_relay() {
 
 #[test]
 fn a_server_id_line_alone_is_enough() {
-    let log = "2022-04-17T10:37:38.354Z,3.354337,0360,7 [FLog::Network] serverId: 128.116.86.85|55874\n";
+    let log =
+        "2022-04-17T10:37:38.354Z,3.354337,0360,7 [FLog::Network] serverId: 128.116.86.85|55874\n";
     let info = extract_server_info_from_log(log).expect("serverId names the server");
     assert_eq!(info.ip, "128.116.86.85");
     assert_eq!(info.port, 55874);
@@ -62,10 +123,14 @@ fn a_bracketed_accept_line_is_understood() {
 
 #[test]
 fn udmux_address_without_spaces_or_port_is_still_parsed() {
-    let log = "2026-10-19T09:00:00.000Z,9.000000,0001,7 [FLog::Network] UDMUX Address=128.116.127.33\n";
+    let log =
+        "2026-10-19T09:00:00.000Z,9.000000,0001,7 [FLog::Network] UDMUX Address=128.116.127.33\n";
     let info = extract_server_info_from_log(log).expect("no-space spelling");
     assert_eq!(info.ip, "128.116.127.33");
-    assert_eq!(info.port, 0, "the caller falls back to RakNet's default port");
+    assert_eq!(
+        info.port, 0,
+        "the caller falls back to RakNet's default port"
+    );
 }
 
 #[test]
@@ -149,7 +214,10 @@ fn windows_player_logs_carry_the_player_marker() {
         "0.618.0.6180600_20260203T040506Z_Player_abc12_last.log",
         false
     ));
-    assert!(!is_player_log_name("0.618.0.6180600_Player_abc12.log", false));
+    assert!(!is_player_log_name(
+        "0.618.0.6180600_Player_abc12.log",
+        false
+    ));
     assert!(!is_player_log_name("studio_last.log", false));
 }
 

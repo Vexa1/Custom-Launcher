@@ -159,7 +159,10 @@ fn a_failed_probe_says_why() {
     let port = socket.local_addr().unwrap().port();
     drop(socket);
     let why = net_probe::udp_rtt_traced("127.0.0.1", port).unwrap_err();
-    assert!(!why.is_empty(), "a silent server must say why it was silent");
+    assert!(
+        !why.is_empty(),
+        "a silent server must say why it was silent"
+    );
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -171,11 +174,130 @@ fn a_failed_probe_says_why() {
     );
 
     // Inputs that never reach the network name themselves too.
-    assert!(net_probe::udp_rtt_traced("", 0).unwrap_err().contains("empty address"));
-    assert!(net_probe::icmp_rtt_traced("  ").unwrap_err().contains("empty address"));
+    assert!(net_probe::udp_rtt_traced("", 0)
+        .unwrap_err()
+        .contains("empty address"));
+    assert!(net_probe::icmp_rtt_traced("  ")
+        .unwrap_err()
+        .contains("empty address"));
     assert!(net_probe::tcp_rtt_traced("127.0.0.1", &[])
         .unwrap_err()
         .contains("no port to try"));
+}
+
+/// The order the overlay resolves a ping in: the client's own sample first, then the room
+/// list's ping for the job, then a regional edge, and only then a direct server probe.
+#[test]
+fn the_ping_sources_are_preferred_in_order() {
+    let server = net_probe::ProbeOutcome { via: "tcp", ms: 3 };
+    assert_eq!(
+        net_probe::preferred_ping(Some(34), Some(31), Some(12), Some(server)),
+        Some(net_probe::PingReading {
+            ms: 34,
+            source: net_probe::SOURCE_CLIENT_LOG,
+        }),
+        "the client's own measurement outranks every estimate"
+    );
+    assert_eq!(
+        net_probe::preferred_ping(None, Some(31), Some(12), Some(server))
+            .unwrap()
+            .source,
+        net_probe::SOURCE_ROOM_LIST
+    );
+    assert_eq!(
+        net_probe::preferred_ping(None, None, Some(12), Some(server))
+            .unwrap()
+            .source,
+        net_probe::SOURCE_REGIONAL_EDGE
+    );
+    assert_eq!(
+        net_probe::preferred_ping(None, None, None, Some(server))
+            .unwrap()
+            .source,
+        "tcp",
+        "the direct probe is the last resort"
+    );
+    assert!(net_probe::preferred_ping(None, None, None, None).is_none());
+}
+
+/// `128.116.0.0/16` is Roblox's filtered game relay range: the overlay must skip the direct
+/// probe there instead of sending packets that cannot be answered.
+#[test]
+fn a_roblox_relay_is_recognised_so_direct_probes_are_skipped() {
+    assert!(net_probe::is_roblox_datacenter("128.116.51.33"));
+    assert!(net_probe::is_roblox_datacenter(" 128.116.0.1 "));
+    assert!(!net_probe::is_roblox_datacenter("128.117.51.33"));
+    assert!(!net_probe::is_roblox_datacenter("127.0.0.1"));
+    assert!(!net_probe::is_roblox_datacenter("not an ip"));
+}
+
+/// The geolocated city (or, failing that, the country) picks the edge that is measured when
+/// neither the client log nor the room list has a ping.
+#[test]
+fn the_geolocated_city_picks_its_regional_edge() {
+    let sydney = net_probe::regional_edge("Sydney, New South Wales, AU").expect("Sydney");
+    assert_eq!(sydney.region, "ap-southeast-2");
+    assert_eq!(sydney.host, "s3.ap-southeast-2.amazonaws.com");
+    assert_eq!(sydney.port, 443);
+
+    assert_eq!(
+        net_probe::regional_edge("Tokyo, JP").unwrap().region,
+        "ap-northeast-1"
+    );
+    assert_eq!(
+        net_probe::regional_edge("Frankfurt, DE").unwrap().region,
+        "eu-central-1"
+    );
+    assert_eq!(
+        net_probe::regional_edge("Los Angeles, California, US")
+            .unwrap()
+            .region,
+        "us-west-1"
+    );
+    assert_eq!(
+        net_probe::regional_edge("Somewhere, US").unwrap().region,
+        "us-east-1",
+        "a country without a listed city still has an edge"
+    );
+
+    assert!(net_probe::regional_edge("Unknown location").is_none());
+    assert!(net_probe::regional_edge("").is_none());
+    assert!(net_probe::regional_edge("Atlantis").is_none());
+}
+
+#[test]
+fn the_regional_edge_is_measured_over_loopback() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let _ = listener.accept();
+    });
+    let ms = net_probe::tcp_rtt_to_host("127.0.0.1", port).expect("a listening edge answers");
+    assert!(ms >= 1 && ms < 1_000, "loopback RTT was {ms} ms");
+    handle.join().unwrap();
+
+    // A host that cannot be resolved is a reason, never a number.
+    assert!(net_probe::tcp_rtt_to_host("", 443).is_err());
+    assert!(net_probe::tcp_rtt_to_host("does-not-exist.invalid", 443).is_err());
+}
+
+/// A 429 must never be answered with another request, and the paging rules have to stay
+/// page-one-first with a real pause between pages.
+#[test]
+fn a_429_is_recognised_and_paging_stays_slow() {
+    assert!(net_probe::is_rate_limited(
+        "https://games.roblox.com/v1/games/1/servers/Public: status code 429"
+    ));
+    assert!(net_probe::is_rate_limited("429 Too Many Requests"));
+    assert!(!net_probe::is_rate_limited("timed out"));
+
+    assert_eq!(
+        net_probe::ROOM_LIST_PAGES,
+        2,
+        "page one, and one more at most"
+    );
+    assert!(net_probe::ROOM_LIST_PAGE_DELAY >= Duration::from_millis(1_500));
+    assert!(net_probe::ROOM_LIST_429_BACKOFF >= Duration::from_secs(60));
 }
 
 #[test]

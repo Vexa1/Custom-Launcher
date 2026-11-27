@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -958,6 +959,24 @@ static PING_FROM_LIST: Mutex<Option<(String, Option<u32>, Instant)>> = Mutex::ne
 /// for the first one either.
 static PING_LIST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// When the room-list API rate-limited us. No lookup runs before this instant, so a single
+/// `429` is never answered with another request - which is what turned one into a wall.
+static ROOM_LIST_BACKOFF_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn room_list_backoff_active() -> bool {
+    ROOM_LIST_BACKOFF_UNTIL
+        .lock()
+        .ok()
+        .and_then(|until| *until)
+        .is_some_and(|until| Instant::now() < until)
+}
+
+fn start_room_list_backoff() {
+    if let Ok(mut until) = ROOM_LIST_BACKOFF_UNTIL.lock() {
+        *until = Some(Instant::now() + crate::net_probe::ROOM_LIST_429_BACKOFF);
+    }
+}
+
 /// The job the live probe is measuring, so a room-list answer that arrives late only lands
 /// while the player is still in that server.
 static PING_TARGET: Mutex<Option<(String, Arc<AtomicU32>)>> = Mutex::new(None);
@@ -985,9 +1004,10 @@ fn cached_room_list_ping(server: &ServerData) -> Option<u32> {
     if job != &server.job_id {
         return None;
     }
-    // An answer is good for a minute; a miss is retried sooner, so a job that appears in the
-    // list a moment later is picked up without hammering the API.
-    let ttl = if ping.is_some() { 60 } else { 20 };
+    // A number is the server's ping for the whole match, so it is kept for the session
+    // instead of re-queried every tick. A miss is retried rarely: the job appearing in the
+    // list a minute later is still picked up, without paging the API over and over.
+    let ttl = if ping.is_some() { 900 } else { 120 };
     (at.elapsed() < Duration::from_secs(ttl)).then_some(*ping)?
 }
 
@@ -999,6 +1019,11 @@ fn cached_room_list_ping(server: &ServerData) -> Option<u32> {
 /// packets, so nothing here can stall it or the two-second probe cadence.
 fn request_room_list_ping(server: ServerData) {
     if server.place_id == 0 || server.job_id.is_empty() {
+        return;
+    }
+    if room_list_backoff_active() {
+        // A 429 must not be answered with another request: wait the backoff out instead.
+        log_room_list_failure(&server.job_id, "waiting out the 429 backoff");
         return;
     }
     if PING_LIST_IN_FLIGHT.swap(true, Ordering::AcqRel) {
@@ -1014,8 +1039,11 @@ fn request_room_list_ping(server: ServerData) {
             if let Ok(mut cache) = PING_FROM_LIST.lock() {
                 *cache = Some((server.job_id.clone(), ping, Instant::now()));
             }
-            if let Some(why) = failure {
-                log_room_list_failure(&server.job_id, &why);
+            if let Some(why) = &failure {
+                if crate::net_probe::is_rate_limited(why) {
+                    start_room_list_backoff();
+                }
+                log_room_list_failure(&server.job_id, why);
             }
             if let Some(ms) = ping {
                 // Land it on the live row when the player is still in that job; otherwise the
@@ -1042,9 +1070,32 @@ fn request_room_list_ping(server: ServerData) {
 /// exists but does not carry this job. The probe line in `log.txt` says which one happened,
 /// because only the first is worth retrying.
 fn fetch_room_list_ping(server: &ServerData) -> Result<Option<u32>, String> {
-    let pool = crate::api::fetch_public_server_pool(server.place_id, "Desc", 2, None)?;
-    let entries: Vec<(String, Option<u64>)> = pool.into_iter().map(|s| (s.id, s.ping)).collect();
-    Ok(crate::net_probe::ping_for_job(&entries, &server.job_id))
+    // Authenticated requests get a far higher games API rate limit than the anonymous ones
+    // that produced the `429` in the first place.
+    let cookie = crate::auth::load_cookie();
+    let mut cursor: Option<String> = None;
+    for page in 0..crate::net_probe::ROOM_LIST_PAGES {
+        if page > 0 {
+            // One page at a time, with a pause: rapid paging is what triggered the 429s.
+            thread::sleep(crate::net_probe::ROOM_LIST_PAGE_DELAY);
+        }
+        let (servers, next) = crate::api::fetch_server_page(
+            server.place_id,
+            cursor.as_deref(),
+            100,
+            cookie.as_deref(),
+        )?;
+        let entries: Vec<(String, Option<u64>)> =
+            servers.into_iter().map(|s| (s.id, s.ping)).collect();
+        if let Some(ms) = crate::net_probe::ping_for_job(&entries, &server.job_id) {
+            return Ok(Some(ms));
+        }
+        match next {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(None)
 }
 
 /// One line per job whose room-list lookup could not run: `None` alone is indistinguishable
@@ -1085,7 +1136,7 @@ fn log_room_list_ping(job_id: &str) {
         .unwrap_or(false);
     if first {
         crate::auth::log(
-            "ping: the game server answered neither ICMP, a RakNet ping nor a TCP connect - using the room list's ping for this job",
+            "ping: the client log had no latency sample yet - using the room list's ping for this job",
         );
     }
 }
@@ -1098,7 +1149,12 @@ fn log_room_list_ping(job_id: &str) {
 /// the data-centre edge, then the public room list's ping for this job. Roblox's UDMUX relays
 /// drop unauthenticated RakNet pings and often ICMP too, which is why one silent tier does
 /// not leave the row at `-- ms` for the whole session.
-fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
+fn spawn_ping(
+    server: ServerData,
+    out: Arc<AtomicU32>,
+    region: Option<String>,
+    log_path: Option<PathBuf>,
+) {
     if PING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         // A probe that ended without clearing the flag would stop every later one; take the
         // flag over once it has clearly been abandoned, and say so once.
@@ -1126,39 +1182,84 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
             } else {
                 server.port
             };
-            // Every tier reports why it had no number, so the one probe line in log.txt
-            // shows what was actually attempted against which address. The chain lives in
-            // `net_probe::probe_server`, where `vm-tests` drives it against mock relays.
+            // Every source reports why it had no number, so the one probe line in log.txt
+            // shows what was actually asked and which path failed. The order lives in
+            // `net_probe::preferred_ping`, where `vm-tests` drives it.
             let mut misses: Vec<String> = Vec::new();
-            let mut measured: Option<crate::net_probe::ProbeOutcome> = None;
-            // The path the HUD names after `-- ms`: the last tier that came back empty,
-            // which is where the chain gave up (the room list when even the API had no
-            // number for this job).
+            // The path the HUD names after `-- ms`: the last source that came back empty.
             let mut failed: Option<&'static str> = None;
-            match crate::net_probe::probe_server(
-                &server.ip,
-                port,
-                &crate::net_probe::TCP_PROBE_PORTS,
-            ) {
-                Ok(outcome) => measured = Some(outcome),
-                Err(miss) => {
-                    misses = miss.reasons;
-                    failed = Some(miss.last);
+
+            // 1. The Roblox client's own latency telemetry. No packets leave the machine,
+            // which is the only source that works against a `128.116.x.x` relay that
+            // blackholes unsolicited ICMP, RakNet and TCP alike.
+            let client_ping = log_path.as_deref().and_then(read_client_ping);
+
+            // 2. The room list's ping for this exact job, read from the per-match cache. A
+            // miss starts one authenticated, page-one-first lookup on its own thread, and
+            // never makes this probe wait for HTTP.
+            let mut room_list = None;
+            if client_ping.is_none() {
+                room_list = cached_room_list_ping(&server);
+                if room_list.is_none() {
+                    request_room_list_ping(server.clone());
                 }
             }
-            let mut rtt = measured.map(|o| o.ms);
-            let mut source = measured.map(|o| o.via);
-            if rtt.is_none() {
-                // Only ever a cache read here: the HTTP fallback is started on its own
-                // thread, so it can never stall this probe or the in-flight flag with it.
-                rtt = cached_room_list_ping(&server);
-                source = rtt.map(|_| "room list");
-                if rtt.is_none() {
-                    misses.push(room_list_miss(&server));
-                    failed = Some("room list");
-                    request_room_list_ping(server.clone());
-                    log_silent_server(&server.ip, port);
+
+            // 3. A handshake to the regional edge of the city the server was geolocated to:
+            // the honest estimate when the client log and the API both have no number.
+            let mut regional = None;
+            if client_ping.is_none() && room_list.is_none() {
+                match region.as_deref() {
+                    Some(where_) => match crate::net_probe::regional_edge_rtt(where_) {
+                        Ok((edge, ms)) => {
+                            log_regional_edge(edge.region, edge.host, ms);
+                            regional = Some(ms);
+                        }
+                        Err(why) => misses.push(format!("regional edge {why}")),
+                    },
+                    None => {
+                        misses.push("regional edge no location for this server yet".to_string())
+                    }
                 }
+            }
+
+            // 4. Last resort: the server itself, for a local or non-Roblox host. Roblox's
+            // relays are never probed - those packets cannot be answered, and sending them
+            // every two seconds is exactly the traffic their filter is there to drop.
+            let mut measured: Option<crate::net_probe::ProbeOutcome> = None;
+            if client_ping.is_none() && room_list.is_none() && regional.is_none() {
+                if crate::net_probe::is_roblox_datacenter(&server.ip) {
+                    misses.push(
+                        "server is behind Roblox's 128.116.x.x filter, direct probes skipped"
+                            .to_string(),
+                    );
+                } else {
+                    match crate::net_probe::probe_server(
+                        &server.ip,
+                        port,
+                        &crate::net_probe::TCP_PROBE_PORTS,
+                    ) {
+                        Ok(outcome) => measured = Some(outcome),
+                        Err(miss) => {
+                            misses.extend(miss.reasons);
+                            failed = Some(miss.last);
+                        }
+                    }
+                }
+            }
+
+            let reading =
+                crate::net_probe::preferred_ping(client_ping, room_list, regional, measured);
+            let rtt = reading.map(|r| r.ms);
+            let source = reading.map(|r| r.source);
+            if rtt.is_none() {
+                misses.push(room_list_miss(&server));
+                failed = Some(if region.is_some() {
+                    "regional edge"
+                } else {
+                    "room list"
+                });
+                log_silent_server(&server.ip, port);
             }
             log_ping_probe(&server, port, rtt, source, &misses);
             if let Ok(mut last) = PING_FAILED.lock() {
@@ -1175,6 +1276,55 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
         if let Ok(mut at) = PING_STARTED.lock() {
             *at = None;
         }
+    }
+}
+
+/// The newest latency sample in the active Player log's tail.
+///
+/// 128 KB covers the last minutes of a session; the client writes a sample every few seconds.
+/// A log nobody has written to for two minutes belongs to a finished session, so it is never
+/// allowed to put a stale number on the HUD.
+fn read_client_ping(path: &Path) -> Option<u32> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    let stale = meta
+        .modified()
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age > Duration::from_secs(120));
+    if stale {
+        return None;
+    }
+    let len = meta.len();
+    const TAIL: u64 = 128 * 1024;
+    if len > TAIL {
+        file.seek(SeekFrom::Start(len - TAIL)).ok()?;
+    }
+    let mut buf = Vec::with_capacity(len.min(TAIL) as usize);
+    file.read_to_end(&mut buf).ok()?;
+    crate::game_log::client_ping_from_log(&String::from_utf8_lossy(&buf))
+}
+
+/// One line the first time a regional edge supplies the number: the HUD shows a measurement
+/// either way, so log.txt is where `regional edge ap-southeast-2 (34 ms)` is visible.
+fn log_regional_edge(edge_region: &str, host: &str, ms: u32) {
+    static LOGGED: Mutex<Option<String>> = Mutex::new(None);
+    let first = LOGGED
+        .lock()
+        .map(|mut seen| {
+            if seen.as_deref() == Some(host) {
+                false
+            } else {
+                *seen = Some(host.to_string());
+                true
+            }
+        })
+        .unwrap_or(false);
+    if first {
+        crate::auth::log(&format!(
+            "ping: the relay answered nothing, measuring the regional edge {host} ({edge_region}) -> {ms} ms"
+        ));
     }
 }
 
@@ -1195,7 +1345,8 @@ fn room_list_miss(server: &ServerData) -> String {
 ///
 /// Written when the target or the result changes, and once a minute while it stays `None`,
 /// so a silent relay cannot flood log.txt at one line every two seconds.
-static PING_PROBE_LOGGED: Mutex<Option<(String, Option<u32>, Instant)>> = Mutex::new(None);
+static PING_PROBE_LOGGED: Mutex<Option<(String, Option<u32>, Option<String>, Instant)>> =
+    Mutex::new(None);
 
 fn log_ping_probe(
     server: &ServerData,
@@ -1206,16 +1357,26 @@ fn log_ping_probe(
 ) {
     let target = format!("{}:{port}", server.ip);
     let line = crate::net_probe::probe_line(&target, rtt, source, misses);
+    let source_key = source.map(str::to_string);
     let write = PING_PROBE_LOGGED
         .lock()
         .map(|mut last| {
-            let repeat = last.as_ref().is_some_and(|(seen, seen_rtt, at)| {
-                seen == &target && *seen_rtt == rtt && at.elapsed() < Duration::from_secs(60)
-            });
+            let repeat = last
+                .as_ref()
+                .is_some_and(|(seen, seen_rtt, seen_source, at)| {
+                    seen == &target
+                    && *seen_source == source_key
+                    // Jitter of a millisecond or two is the same reading, not a new event.
+                    && match (seen_rtt, rtt) {
+                        (Some(before), Some(after)) => before.abs_diff(after) <= 2,
+                        _ => *seen_rtt == rtt,
+                    }
+                    && at.elapsed() < Duration::from_secs(60)
+                });
             if repeat {
                 false
             } else {
-                *last = Some((target, rtt, Instant::now()));
+                *last = Some((target, rtt, source_key, Instant::now()));
                 true
             }
         })
@@ -1468,6 +1629,8 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
     let mut last_ping = Instant::now() - Duration::from_secs(60);
     let mut last_ping_target: Option<(String, u16, String)> = None;
     let mut roblox_pid: Option<u32> = None;
+    // The active Player log, where the client writes its own latency samples.
+    let mut player_log: Option<PathBuf> = None;
     let mut last_pid_scan = Instant::now() - Duration::from_secs(60);
     let mut pending_locations: Vec<String> = Vec::new();
     let mut last_game_fetch: Option<Instant> = None;
@@ -1565,18 +1728,28 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
             }
         }
 
-        // Which process are the stats about, and what is it using right now?
-        if cfg.stats.as_ref().is_some_and(|s| s.cpu || s.ram) {
+        // Which process are the stats about, what is it using right now, and where is the
+        // Player log carrying the client's own latency samples?
+        let wants_process = cfg.stats.as_ref().is_some_and(|s| s.cpu || s.ram || s.ping);
+        if wants_process {
             if last_pid_scan.elapsed() >= Duration::from_secs(3) {
                 last_pid_scan = Instant::now();
-                let (procs, _) = crate::roblox_process::enumerate_roblox_processes_cached();
-                roblox_pid = procs
-                    .iter()
-                    .max_by_key(|p| p.start_ms)
+                let (procs, crash_logs) =
+                    crate::roblox_process::enumerate_roblox_processes_cached();
+                let newest = procs.iter().max_by_key(|p| p.start_ms);
+                roblox_pid = newest
                     .map(|p| p.pid)
                     // The scan can miss the player (helper names, sandboxing, permissions);
                     // a name lookup keeps CPU/RAM from sitting at `--` for the session.
                     .or_else(find_roblox_pid_by_name);
+                let logs_dir = crate::roblox_process::roblox_logs_dir();
+                player_log = newest.and_then(|p| {
+                    crate::roblox_process::find_player_log_for_proc(
+                        p,
+                        &crash_logs,
+                        logs_dir.as_deref(),
+                    )
+                });
                 if logged_pid != Some(roblox_pid) {
                     logged_pid = Some(roblox_pid);
                     crate::auth::log(&format!(
@@ -1584,11 +1757,16 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                     ));
                 }
             }
-            if let Ok(mut g) = shared.lock() {
-                g.usage.sample(roblox_pid);
+            if cfg.stats.as_ref().is_some_and(|s| s.cpu || s.ram) {
+                if let Ok(mut g) = shared.lock() {
+                    g.usage.sample(roblox_pid);
+                }
+            } else if let Ok(mut g) = shared.lock() {
+                g.usage.reset();
             }
         } else {
             // Nothing is being sampled: start clean if it is switched back on.
+            player_log = None;
             if let Ok(mut g) = shared.lock() {
                 g.usage.reset();
             }
@@ -1612,7 +1790,8 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 if let Some(target) = target {
                     if last_ping.elapsed() >= Duration::from_secs(2) {
                         last_ping = Instant::now();
-                        spawn_ping(target, Arc::clone(&ping));
+                        let region = locations.get(&target.ip).cloned();
+                        spawn_ping(target, Arc::clone(&ping), region, player_log.clone());
                     }
                 } else {
                     // A server with no address cannot be probed; say so instead of leaving

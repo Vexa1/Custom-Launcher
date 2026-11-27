@@ -1441,36 +1441,67 @@ pub fn fetch_public_server_pool(
     let mut out: Vec<ServerItem> = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..pages.clamp(1, 3) {
-        let mut url = format!(
-            "https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder={order}&limit=100"
-        );
-        if let Some(c) = cursor.as_deref().filter(|s| !s.is_empty()) {
-            url.push_str("&cursor=");
-            url.push_str(&enc(c));
-        }
-        let v = auth_get_json(&url, cookie)?;
-        for s in v["data"].as_array().into_iter().flatten() {
-            let Some(id) = s["id"].as_str().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            out.push(ServerItem {
-                id: id.to_string(),
-                playing: s["playing"].as_u64().unwrap_or(0),
-                max_players: s["maxPlayers"].as_u64().unwrap_or(0),
-                ping: s["ping"].as_u64(),
-                fps: s["fps"].as_f64(),
-            });
-        }
-        cursor = v["nextPageCursor"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        let (mut servers, next) =
+            fetch_server_page_in_order(place_id, order, cursor.as_deref(), 100, cookie)?;
+        out.append(&mut servers);
+        cursor = next;
         if cursor.is_none() {
             break;
         }
     }
     Ok(out)
+}
+
+/// One page of a place's public room list, with the cursor for its next page.
+///
+/// `limit` is clamped to the API's maximum of 100. The ping fallback reads page one first -
+/// the server the player is in is almost always there - and asks for a second page only when
+/// the first carried a cursor and had no match, which keeps the request rate low enough for
+/// Roblox's limiter.
+pub fn fetch_server_page(
+    place_id: u64,
+    cursor: Option<&str>,
+    limit: usize,
+    cookie: Option<&str>,
+) -> Result<(Vec<ServerItem>, Option<String>), String> {
+    fetch_server_page_in_order(place_id, "Desc", cursor, limit, cookie)
+}
+
+fn fetch_server_page_in_order(
+    place_id: u64,
+    order: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    cookie: Option<&str>,
+) -> Result<(Vec<ServerItem>, Option<String>), String> {
+    let mut url = format!(
+        "https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder={order}&limit={}",
+        limit.clamp(1, 100)
+    );
+    if let Some(c) = cursor.filter(|s| !s.is_empty()) {
+        url.push_str("&cursor=");
+        url.push_str(&enc(c));
+    }
+    let v = auth_get_json(&url, cookie)?;
+    let mut out: Vec<ServerItem> = Vec::new();
+    for s in v["data"].as_array().into_iter().flatten() {
+        let Some(id) = s["id"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        out.push(ServerItem {
+            id: id.to_string(),
+            playing: s["playing"].as_u64().unwrap_or(0),
+            max_players: s["maxPlayers"].as_u64().unwrap_or(0),
+            ping: s["ping"].as_u64(),
+            fps: s["fps"].as_f64(),
+        });
+    }
+    let next = v["nextPageCursor"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Ok((out, next))
 }
 
 pub use crate::party_server::{PartyServer, PartyServerError};
