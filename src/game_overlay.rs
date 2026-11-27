@@ -969,6 +969,19 @@ static PING_LIST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// while the player is still in that server.
 static PING_TARGET: Mutex<Option<(String, Arc<AtomicU32>)>> = Mutex::new(None);
 
+/// The probe path whose last attempt came back empty, shown by the HUD next to `-- ms`
+/// (`Ping     -- ms (tcp)`). `None` while a number is shown, and cleared whenever the
+/// target changes so a stale path never describes a different server.
+static PING_FAILED: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// Drops the failed-path label: no number and no current probe means there is no path to
+/// name yet.
+fn clear_ping_failed() {
+    if let Ok(mut failed) = PING_FAILED.lock() {
+        *failed = None;
+    }
+}
+
 /// A room-list ping already fetched for this job, if it is still fresh.
 ///
 /// This only reads a cache: it never performs the request, so the probe thread is never held
@@ -1124,21 +1137,34 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
             // shows what was actually attempted against which address.
             let mut misses: Vec<String> = Vec::new();
             let mut measured: Option<(&'static str, u32)> = None;
+            // The path the HUD names after `-- ms`: the last tier that came back empty,
+            // which is where the chain gave up (the room list when even the API had no
+            // number for this job).
+            let mut failed: Option<&'static str> = None;
             match crate::net_probe::icmp_rtt_traced(&server.ip) {
                 Ok(ms) => measured = Some(("icmp", ms)),
-                Err(why) => misses.push(format!("icmp {why}")),
+                Err(why) => {
+                    misses.push(format!("icmp {why}"));
+                    failed = Some("icmp");
+                }
             }
             if measured.is_none() {
                 match crate::net_probe::udp_rtt_traced(&server.ip, port) {
                     Ok(ms) => measured = Some(("raknet", ms)),
-                    Err(why) => misses.push(format!("raknet {why}")),
+                    Err(why) => {
+                        misses.push(format!("raknet {why}"));
+                        failed = Some("raknet");
+                    }
                 }
             }
             if measured.is_none() {
                 match crate::net_probe::tcp_rtt_traced(&server.ip, &crate::net_probe::TCP_PROBE_PORTS)
                 {
                     Ok(ms) => measured = Some(("tcp", ms)),
-                    Err(why) => misses.push(format!("tcp {why}")),
+                    Err(why) => {
+                        misses.push(format!("tcp {why}"));
+                        failed = Some("tcp");
+                    }
                 }
             }
             let mut rtt = measured.map(|(_, ms)| ms);
@@ -1150,11 +1176,15 @@ fn spawn_ping(server: ServerData, out: Arc<AtomicU32>) {
                 source = rtt.map(|_| "room list");
                 if rtt.is_none() {
                     misses.push(room_list_miss(&server));
+                    failed = Some("room list");
                     request_room_list_ping(server.clone());
                     log_silent_server(&server.ip, port);
                 }
             }
             log_ping_probe(&server, port, rtt, source, &misses);
+            if let Ok(mut last) = PING_FAILED.lock() {
+                *last = if rtt.is_some() { None } else { failed };
+            }
             out.store(rtt.unwrap_or(NO_PING), Ordering::Relaxed);
             PING_IN_FLIGHT.store(false, Ordering::Release);
             if let Ok(mut at) = PING_STARTED.lock() {
@@ -1342,6 +1372,7 @@ fn build_spec(g: &Shared) -> Value {
         NO_PING => None,
         p => Some(p),
     };
+    let failed = PING_FAILED.lock().ok().and_then(|p| *p);
     // The helper outlives a session (it is kept alive while Roblox runs), so the session
     // timer starts at this join, not when the helper process started.
     let session_elapsed = match server {
@@ -1369,6 +1400,7 @@ fn build_spec(g: &Shared) -> Value {
             detect_secs: g.session_start.elapsed().as_secs(),
             region,
             ping_ms: rtt,
+            ping_path: failed,
             game: g
                 .game_info
                 .as_ref()
@@ -1599,6 +1631,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 if last_ping_target != key {
                     last_ping_target = key;
                     ping.store(NO_PING, Ordering::Relaxed);
+                    clear_ping_failed();
                     last_ping = Instant::now() - Duration::from_secs(60);
                 }
                 if let Some(target) = target {
@@ -1616,6 +1649,7 @@ fn run_loop(shared: Arc<Mutex<Shared>>) {
                 // the first real measurement instead of a number from minutes ago.
                 last_ping_target = None;
                 ping.store(NO_PING, Ordering::Relaxed);
+                clear_ping_failed();
                 log_ping_idle("the Ping row is switched off in Settings");
             }
         } else {

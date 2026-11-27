@@ -74,6 +74,7 @@ fn unresolved() -> Live<'static> {
         detect_secs: 30,
         region: None,
         ping_ms: None,
+        ping_path: None,
         game: None,
         cpu_pct: None,
         ram_mb: None,
@@ -95,6 +96,7 @@ fn resolved() -> Live<'static> {
         detect_secs: 35,
         region: Some("Sydney, AU"),
         ping_ms: Some(35),
+        ping_path: None,
         game: None,
         cpu_pct: Some(12.0),
         ram_mb: Some(640.0),
@@ -192,6 +194,34 @@ fn the_server_panel_expires_only_after_its_configured_duration() {
     assert!(hidden
         .iter()
         .any(|p| p["lines"].to_string().contains("Ping     35 ms")));
+}
+
+/// `-- ms` alone does not say what failed. The HUD names the path whose probe came back
+/// empty, so the answer is on screen instead of only in `log.txt`.
+#[test]
+fn a_missing_ping_names_the_path_that_failed() {
+    let mut live = resolved();
+    live.ping_ms = None;
+    live.ping_path = Some("tcp");
+    let text = spec(&live);
+    assert!(text.contains("Ping     -- ms (tcp)"), "{text}");
+
+    // Even the room-list fallback can miss; the row says so.
+    live.ping_path = Some("room list");
+    let text = spec(&live);
+    assert!(text.contains("Ping     -- ms (room list)"), "{text}");
+
+    // A stale path never rides along with a real measurement.
+    live.ping_ms = Some(41);
+    let text = spec(&live);
+    assert!(text.contains("Ping     41 ms"), "{text}");
+    assert!(!text.contains("room list"), "{text}");
+
+    // Before the first probe there is no path to name: the row stays plain.
+    live.ping_ms = None;
+    live.ping_path = None;
+    let text = spec(&live);
+    assert!(text.contains("Ping     -- ms\""), "no suffix without a path: {text}");
 }
 
 /// One physical menu click can reach the tray thread and the window's drain (macOS delivers a

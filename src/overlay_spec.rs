@@ -77,6 +77,9 @@ pub struct Live<'a> {
     pub region: Option<&'a str>,
     /// Live RTT against the game server. `None` is the HUD's `-- ms`.
     pub ping_ms: Option<u32>,
+    /// The probe path that came back empty (`tcp`, `room list`, ...), drawn next to `-- ms`
+    /// so the HUD itself says what failed instead of leaving that to `log.txt`.
+    pub ping_path: Option<&'a str>,
     /// `(game name, players online)` once the place was looked up.
     pub game: Option<(&'a str, Option<u64>)>,
     pub cpu_pct: Option<f32>,
@@ -187,7 +190,7 @@ pub fn build(panels: &Panels, live: &Live) -> Vec<Value> {
             }
         }
         if st.ping {
-            lines.push(ping_row(live.ping_ms));
+            lines.push(ping_row(live.ping_ms, live.ping_path));
         }
         if let Some(fps) = st.fps_cap {
             lines.push(format!("FPS cap  {fps}"));
@@ -314,11 +317,15 @@ pub fn set_crosshair(spec: &mut Value, crosshair: Option<Value>) {
     }
 }
 
-/// The `Ping` row: the live game-server RTT, or `-- ms` while there is no measurement.
-pub fn ping_row(ping_ms: Option<u32>) -> String {
-    match ping_ms {
-        Some(ms) => format!("Ping     {ms} ms"),
-        None => "Ping     -- ms".to_string(),
+/// The `Ping` row: the live game-server RTT, or `-- ms` with the path that failed.
+///
+/// `Ping     -- ms (tcp)` is the same fact `log.txt` records, shown where the player is
+/// already looking: which probe was last tried and left without a number.
+pub fn ping_row(ping_ms: Option<u32>, path: Option<&str>) -> String {
+    match (ping_ms, path) {
+        (Some(ms), _) => format!("Ping     {ms} ms"),
+        (None, Some(path)) => format!("Ping     -- ms ({path})"),
+        (None, None) => "Ping     -- ms".to_string(),
     }
 }
 
