@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.20
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.21
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -397,6 +397,10 @@ and shows *"End of chart"* only when the API sends no cursor.
   parsed (`fill_labels`), so a drawn card reads strings instead of formatting numbers.
 - Thumbnails are still requested through the launcher's capped loader and
   `enforce_ram_cache_budget`, so scrolling deep does not grow RAM without bound.
+- **Type-to-filter.** The Players / Like % / Visits boxes are real `TextEdit`s whose `String`
+  lives in the app (`chart_feed::FilterBox`), not in the frame. Typing applies live (`1.5k`,
+  `2m`, `45%` and `1,250` all parse) and is never overwritten while the caret is in the box:
+  only an actual slider drag (while unfocused) or the caret leaving normalizes the text.
 
 `vm-tests/tests/charts.rs` covers the page decoder, a 1,250-game cursor walk, cross-page and
 cross-sort dedupe, the in-flight/`429` guards and the viewport row window.

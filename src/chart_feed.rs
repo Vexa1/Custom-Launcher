@@ -59,6 +59,85 @@ pub fn compact_count(n: u64) -> String {
     }
 }
 
+/// The text a filter box shows for a value: blank at zero, so the hint is what the user sees.
+pub fn filter_text(n: u64) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        compact_count(n)
+    }
+}
+
+/// Parses a typed filter amount: digits, thousands separators, a trailing `%`, and shorthand
+/// suffixes (`1.5k`, `2m`, `1b`). Returns `None` for text that is not a number yet, which is
+/// what lets a half-typed box keep its characters instead of being wiped.
+pub fn parse_filter_amount(raw: &str) -> Option<u64> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, ',' | '_' | ' ' | '\u{00a0}' | '%' | '$'))
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    let mut number = cleaned;
+    let multiplier = match number.chars().last()?.to_ascii_lowercase() {
+        'k' => {
+            number.pop();
+            1e3
+        }
+        'm' => {
+            number.pop();
+            1e6
+        }
+        'b' => {
+            number.pop();
+            1e9
+        }
+        _ => 1.0,
+    };
+    if number.is_empty() {
+        return None;
+    }
+    let value: f64 = number.parse().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    Some((value * multiplier).round() as u64)
+}
+
+/// One filter's text buffer.
+///
+/// The buffer is owned by the app and lives across frames, which is the whole point: a box the
+/// user is typing in must never be rewritten from the slider underneath it. Only an explicit
+/// slider move (while the box is unfocused) or the caret leaving the box changes the text.
+#[derive(Debug, Default, Clone)]
+pub struct FilterBox {
+    pub text: String,
+}
+
+impl FilterBox {
+    /// What the box currently means. `None` = not a number (yet), leave the filter alone.
+    pub fn edited_value(&self) -> Option<u64> {
+        if self.text.trim().is_empty() {
+            return Some(0);
+        }
+        parse_filter_amount(&self.text)
+    }
+
+    /// Mirrors a slider value into the text. A focused box is left exactly as the user typed it.
+    pub fn sync_from_slider(&mut self, value: u64, focused: bool) {
+        if !focused {
+            self.text = filter_text(value);
+        }
+    }
+
+    /// Formats the box once the user is done with it.
+    pub fn normalize(&mut self, value: u64) {
+        self.text = filter_text(value);
+    }
+}
+
 /// Fills a game's card labels. Cards read these instead of formatting numbers per frame.
 pub fn fill_labels(g: &mut Game) {
     let votes = g.up + g.down;

@@ -80,6 +80,10 @@ pub struct Creblox {
     pub scroll_to_top: bool,
     /// Cursor, dedupe set and back-off for the charts feed's infinite scroll.
     pub chart_feed: crate::chart_feed::ChartFeed,
+    /// The filter boxes' text, owned here so typing survives every frame.
+    pub chart_players_box: crate::chart_feed::FilterBox,
+    pub chart_like_box: crate::chart_feed::FilterBox,
+    pub chart_visits_box: crate::chart_feed::FilterBox,
     /// Seed of the random game order; "Shuffle" changes it.
     pub feed_salt: u64,
     /// Minimum visit count filter for the games feed.
@@ -419,6 +423,9 @@ impl Creblox {
             profile_cache: HashMap::new(),
             scroll_to_top: false,
             chart_feed: crate::chart_feed::ChartFeed::default(),
+            chart_players_box: crate::chart_feed::FilterBox::default(),
+            chart_like_box: crate::chart_feed::FilterBox::default(),
+            chart_visits_box: crate::chart_feed::FilterBox::default(),
             feed_salt: 0x5EED_1234_ABCD_0001,
             chart_min_visits: 0,
             game_visits: HashMap::new(),

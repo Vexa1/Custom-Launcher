@@ -2,7 +2,7 @@ use crate::app::Creblox;
 use crate::theme::{RED, card_frame, pal};
 use crate::types::{Action, Game, Msg};
 use crate::ui::widgets::*;
-use eframe::egui::{self, DragValue, RichText, Sense};
+use eframe::egui::{self, RichText, Sense};
 
 /// Stable pseudo-random ordering. The same salt and id always sort the same way, so the
 /// feed does not jump around while the user scrolls; "Shuffle" just changes the salt.
@@ -13,28 +13,6 @@ fn feed_key(id: u64, salt: u64) -> u64 {
     x ^= x >> 27;
     x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^ (x >> 31)
-}
-
-/// Short "1.2M" style number for the filter labels.
-fn compact(n: u64) -> String {
-    match n {
-        0 => String::new(),
-        n if n >= 1_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
-        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
-        n if n >= 1_000 => format!("{:.1}K", n as f64 / 1e3),
-        n => n.to_string(),
-    }
-}
-
-/// Filter boxes show nothing for zero (blank means "any") so typing starts cleanly
-/// instead of inserting characters into a formatted word.
-fn parse_filter_number(raw: &str) -> Option<f64> {
-    let raw = raw.trim().replace(',', "");
-    if raw.is_empty() || raw.eq_ignore_ascii_case("any") {
-        Some(0.0)
-    } else {
-        raw.parse().ok()
-    }
 }
 
 /// FNV-1a step, used to tell whether the feed cache is still valid.
@@ -71,22 +49,6 @@ fn rail_color(p: &crate::theme::Palette) -> egui::Color32 {
         base.g().saturating_add(16),
         base.b().saturating_add(18),
     )
-}
-
-/// Draws the hint inside a value box that is showing nothing, so an unset filter still looks
-/// like an editable field. It disappears as soon as the box has a value or the caret is in it.
-fn hint_when_empty(ui: &egui::Ui, resp: &egui::Response, empty: bool, text: &str) {
-    if !empty || resp.has_focus() {
-        return;
-    }
-    let rect = resp.rect.shrink2(egui::vec2(7.0, 2.0));
-    ui.painter().text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        text,
-        egui::FontId::proportional(10.5),
-        pal(ui).muted,
-    );
 }
 
 /// A filter caption painted in a box the same height as a slider row, so its baseline
@@ -169,9 +131,13 @@ impl Creblox {
         let mut min_rating = self.chart_min_rating;
         let mut min_visits = self.chart_min_visits;
         // Filters: one balanced line of three equal groups, with Clear pinned to the right.
-        // Every group is label / 6 px / rail / 6 px / value box, so the three rails start and
-        // end in the same place instead of drifting with the label widths.
+        // Each group is label / 6 px / rail / 6 px / a real text box. The box's `String` is
+        // app state: it is never rebuilt from the number while the caret is in it, which is
+        // what makes typing a value stick.
         let any_filter = min_players > 0 || min_rating > 0 || min_visits > 0;
+        let mut players_box = std::mem::take(&mut self.chart_players_box);
+        let mut like_box = std::mem::take(&mut self.chart_like_box);
+        let mut visits_box = std::mem::take(&mut self.chart_visits_box);
         card_frame(ui, 10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -187,28 +153,41 @@ impl Creblox {
                     ui.add_space(6.0);
                     let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
                     ui.spacing_mut().slider_width = rail_w;
-                    ui.scope(|ui| {
-                        ui.visuals_mut().widgets.inactive.bg_fill = rail;
-                        ui.visuals_mut().widgets.hovered.bg_fill = rail;
-                        ui.visuals_mut().widgets.active.bg_fill = rail;
-                        ui.add(
-                            egui::Slider::new(&mut min_players, 0..=100_000u32)
-                                .step_by(50.0)
-                                .show_value(false),
-                        )
-                        .on_hover_text("Minimum players in game");
-                    });
+                    let slider_changed = ui
+                        .scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.bg_fill = rail;
+                            ui.visuals_mut().widgets.hovered.bg_fill = rail;
+                            ui.visuals_mut().widgets.active.bg_fill = rail;
+                            ui.add(
+                                egui::Slider::new(&mut min_players, 0..=100_000u32)
+                                    .step_by(50.0)
+                                    .show_value(false),
+                            )
+                            .on_hover_text("Minimum players in game")
+                        })
+                        .inner
+                        .changed();
                     ui.add_space(6.0);
-                    let value = ui.add_sized(
-                        [VALUE_BOX_W, 20.0],
-                        DragValue::new(&mut min_players)
-                            .speed(50.0)
-                            .range(0..=u32::MAX)
-                            .custom_formatter(|v, _| compact(v as u64))
-                            .custom_parser(parse_filter_number),
+                    let edit = ui.add_sized(
+                        [VALUE_BOX_W, 22.0],
+                        egui::TextEdit::singleline(&mut players_box.text)
+                            .hint_text("0")
+                            .margin(egui::Margin::symmetric(5, 2)),
                     );
-                    hint_when_empty(ui, &value, min_players == 0, "0");
-                    value.on_hover_text("Type an exact minimum number of players (blank = any)");
+                    // Type-to-filter: the parsed number applies immediately, the characters
+                    // stay exactly as typed.
+                    if edit.changed() {
+                        if let Some(v) = players_box.edited_value() {
+                            min_players = v.min(u32::MAX as u64) as u32;
+                        }
+                    }
+                    if slider_changed {
+                        players_box.sync_from_slider(min_players as u64, edit.has_focus());
+                    }
+                    if edit.lost_focus() {
+                        players_box.normalize(min_players as u64);
+                    }
+                    edit.on_hover_text("Type an exact minimum number of players (blank = any)");
                 });
 
                 filter_group(ui, group_w, |ui| {
@@ -216,30 +195,35 @@ impl Creblox {
                     ui.add_space(6.0);
                     let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
                     ui.spacing_mut().slider_width = rail_w;
-                    ui.scope(|ui| {
-                        ui.visuals_mut().widgets.inactive.bg_fill = rail;
-                        ui.visuals_mut().widgets.hovered.bg_fill = rail;
-                        ui.visuals_mut().widgets.active.bg_fill = rail;
-                        ui.add(egui::Slider::new(&mut min_rating, 0..=100u8).show_value(false))
-                            .on_hover_text("Minimum like ratio");
-                    });
+                    let slider_changed = ui
+                        .scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.bg_fill = rail;
+                            ui.visuals_mut().widgets.hovered.bg_fill = rail;
+                            ui.visuals_mut().widgets.active.bg_fill = rail;
+                            ui.add(egui::Slider::new(&mut min_rating, 0..=100u8).show_value(false))
+                                .on_hover_text("Minimum like ratio")
+                        })
+                        .inner
+                        .changed();
                     ui.add_space(6.0);
-                    let value = ui.add_sized(
-                        [VALUE_BOX_W, 20.0],
-                        DragValue::new(&mut min_rating)
-                            .speed(1.0)
-                            .range(0..=100u8)
-                            .custom_formatter(|v, _| {
-                                if v < 0.5 {
-                                    String::new()
-                                } else {
-                                    format!("{v:.0}%")
-                                }
-                            })
-                            .custom_parser(parse_filter_number),
+                    let edit = ui.add_sized(
+                        [VALUE_BOX_W, 22.0],
+                        egui::TextEdit::singleline(&mut like_box.text)
+                            .hint_text("Min")
+                            .margin(egui::Margin::symmetric(5, 2)),
                     );
-                    hint_when_empty(ui, &value, min_rating == 0, "Min");
-                    value.on_hover_text("Type an exact minimum like ratio (blank = any)");
+                    if edit.changed() {
+                        if let Some(v) = like_box.edited_value() {
+                            min_rating = v.min(100) as u8;
+                        }
+                    }
+                    if slider_changed {
+                        like_box.sync_from_slider(min_rating as u64, edit.has_focus());
+                    }
+                    if edit.lost_focus() {
+                        like_box.normalize(min_rating as u64);
+                    }
+                    edit.on_hover_text("Type an exact minimum like ratio (blank = any)");
                 });
 
                 filter_group(ui, group_w, |ui| {
@@ -247,28 +231,39 @@ impl Creblox {
                     ui.add_space(6.0);
                     let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
                     ui.spacing_mut().slider_width = rail_w;
-                    ui.scope(|ui| {
-                        ui.visuals_mut().widgets.inactive.bg_fill = rail;
-                        ui.visuals_mut().widgets.hovered.bg_fill = rail;
-                        ui.visuals_mut().widgets.active.bg_fill = rail;
-                        ui.add(
-                            egui::Slider::new(&mut min_visits, 0..=100_000_000u64)
-                                .step_by(100_000.0)
-                                .show_value(false),
-                        )
-                        .on_hover_text("Minimum visits");
-                    });
+                    let slider_changed = ui
+                        .scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.bg_fill = rail;
+                            ui.visuals_mut().widgets.hovered.bg_fill = rail;
+                            ui.visuals_mut().widgets.active.bg_fill = rail;
+                            ui.add(
+                                egui::Slider::new(&mut min_visits, 0..=100_000_000u64)
+                                    .step_by(100_000.0)
+                                    .show_value(false),
+                            )
+                            .on_hover_text("Minimum visits")
+                        })
+                        .inner
+                        .changed();
                     ui.add_space(6.0);
-                    let value = ui.add_sized(
-                        [VALUE_BOX_W, 20.0],
-                        DragValue::new(&mut min_visits)
-                            .speed(100_000.0)
-                            .range(0..=u64::MAX)
-                            .custom_formatter(|v, _| compact(v as u64))
-                            .custom_parser(parse_filter_number),
+                    let edit = ui.add_sized(
+                        [VALUE_BOX_W, 22.0],
+                        egui::TextEdit::singleline(&mut visits_box.text)
+                            .hint_text("0")
+                            .margin(egui::Margin::symmetric(5, 2)),
                     );
-                    hint_when_empty(ui, &value, min_visits == 0, "0");
-                    value.on_hover_text("Type an exact minimum number of visits (blank = any)");
+                    if edit.changed() {
+                        if let Some(v) = visits_box.edited_value() {
+                            min_visits = v;
+                        }
+                    }
+                    if slider_changed {
+                        visits_box.sync_from_slider(min_visits, edit.has_focus());
+                    }
+                    if edit.lost_focus() {
+                        visits_box.normalize(min_visits);
+                    }
+                    edit.on_hover_text("Type an exact minimum number of visits (blank = any)");
                 });
 
                 ui.with_layout(
@@ -282,20 +277,22 @@ impl Creblox {
                             .stroke(egui::Stroke::new(1.0, p.border))
                             .corner_radius(12)
                             .min_size(egui::vec2(58.0, 24.0));
-                            if ui
-                                .add(clear)
-                                .on_hover_text("Clear all filters")
-                                .clicked()
-                            {
+                            if ui.add(clear).on_hover_text("Clear all filters").clicked() {
                                 min_players = 0;
                                 min_rating = 0;
                                 min_visits = 0;
+                                players_box.normalize(0);
+                                like_box.normalize(0);
+                                visits_box.normalize(0);
                             }
                         }
                     },
                 );
             });
         });
+        self.chart_players_box = players_box;
+        self.chart_like_box = like_box;
+        self.chart_visits_box = visits_box;
         if self.chart_min_players != min_players {
             self.chart_min_players = min_players;
         }

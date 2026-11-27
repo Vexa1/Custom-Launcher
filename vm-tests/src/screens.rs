@@ -339,14 +339,20 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
 
         // The filter bar: three equal groups (label / 6 px / rail / 6 px / value box) and a
         // Clear button that only exists while a filter is set.
-        // Two empty boxes (their hints show) and one set filter (so Clear is present).
+        // Two empty boxes (their hints show) and one set filter (so Clear is present). The
+        // boxes are real text boxes with app-owned buffers, exactly as the page builds them.
         let mut players = 0u32;
         let mut rating = 45u8;
         let mut visits = 0u64;
+        let mut players_box = crate::chart_feed::FilterBox::default();
+        let mut like_box = crate::chart_feed::FilterBox {
+            text: "45".to_string(),
+        };
+        let mut visits_box = crate::chart_feed::FilterBox::default();
         card(ui, probe, "charts.filters", 966.0, |ui, probe| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                let any = players > 0 || rating > 0 || visits > 0;
+                let any = !players_box.text.is_empty() || !like_box.text.is_empty();
                 let group_w = ((ui.available_width() - 58.0 - 24.0) / 3.0).floor();
 
                 ui.allocate_ui_with_layout(
@@ -387,18 +393,9 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
                         probe.widget("charts.f.players.rail", rail.rect, true);
                         ui.add_space(6.0);
                         let value = ui.add_sized(
-                            [64.0, 20.0],
-                            egui::DragValue::new(&mut players)
-                                .speed(50.0)
-                                .custom_formatter(|v, _| {
-                                    if v < 0.5 {
-                                        String::new()
-                                    } else {
-                                        format!("{:.0}", v)
-                                    }
-                                }),
+                            [64.0, 22.0],
+                            egui::TextEdit::singleline(&mut players_box.text).hint_text("0"),
                         );
-                        chart_hint(ui, &value, players == 0, "0");
                         probe.widget("charts.f.players.box", value.rect, false);
                     },
                 );
@@ -439,18 +436,9 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
                         probe.widget("charts.f.like.rail", rail.rect, true);
                         ui.add_space(6.0);
                         let value = ui.add_sized(
-                            [64.0, 20.0],
-                            egui::DragValue::new(&mut rating).speed(1.0).custom_formatter(
-                                |v, _| {
-                                    if v < 0.5 {
-                                        String::new()
-                                    } else {
-                                        format!("{v:.0}%")
-                                    }
-                                },
-                            ),
+                            [64.0, 22.0],
+                            egui::TextEdit::singleline(&mut like_box.text).hint_text("Min"),
                         );
-                        chart_hint(ui, &value, rating == 0, "Min");
                         probe.widget("charts.f.like.box", value.rect, false);
                     },
                 );
@@ -493,18 +481,9 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
                         probe.widget("charts.f.visits.rail", rail.rect, true);
                         ui.add_space(6.0);
                         let value = ui.add_sized(
-                            [64.0, 20.0],
-                            egui::DragValue::new(&mut visits)
-                                .speed(100_000.0)
-                                .custom_formatter(|v, _| {
-                                    if v < 0.5 {
-                                        String::new()
-                                    } else {
-                                        format!("{:.0}", v / 1000.0)
-                                    }
-                                }),
+                            [64.0, 22.0],
+                            egui::TextEdit::singleline(&mut visits_box.text).hint_text("0"),
                         );
-                        chart_hint(ui, &value, visits == 0, "0");
                         probe.widget("charts.f.visits.box", value.rect, false);
                     },
                 );
@@ -614,21 +593,6 @@ fn chart_card(
         });
     });
     probe.widget(format!("charts.card.{idx}"), inner.response.rect, false);
-}
-
-/// The hint painted inside an empty filter box, exactly as `page_charts::hint_when_empty`.
-fn chart_hint(ui: &egui::Ui, resp: &egui::Response, empty: bool, text: &str) {
-    if !empty {
-        return;
-    }
-    let rect = resp.rect.shrink2(Vec2::new(7.0, 2.0));
-    ui.painter().text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        text,
-        egui::FontId::proportional(10.5),
-        MUTED,
-    );
 }
 
 pub fn game_details(ui: &mut egui::Ui, probe: &mut Probe) {
