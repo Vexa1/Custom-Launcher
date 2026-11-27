@@ -1489,6 +1489,22 @@ pub fn find_server_for_party(
     })
 }
 
+/// Whether the server a party is heading to still has a free seat for `needed` members.
+///
+/// Reads the place's public room list, which is the only published source that reports
+/// how full a specific job is. Two pages cover the busy end where party hosts land.
+pub fn party_slot_state(
+    place_id: u64,
+    job_id: &str,
+    needed: usize,
+    cookie: Option<&str>,
+) -> crate::party_server::SlotState {
+    match fetch_public_server_pool(place_id, "Desc", 2, cookie) {
+        Ok(servers) => crate::party_server::slot_state(&servers, job_id, needed),
+        Err(_) => crate::party_server::SlotState::Unknown,
+    }
+}
+
 pub fn vote_game(universe_id: u64, vote: Option<bool>, cookie: &str) -> Result<(), String> {
     patch_csrf(
         &format!("https://games.roblox.com/v1/games/{universe_id}/user-votes"),

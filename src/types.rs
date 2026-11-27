@@ -1002,6 +1002,13 @@ pub enum Msg {
         game_name: String,
         result: Result<crate::api::PartyServer, crate::api::PartyServerError>,
     },
+    /// The late-joiner slot check for a party launch finished: the server to join, and
+    /// whether it still has a seat.
+    PartySlotCheck(
+        u64,
+        crate::party::PartyLaunch,
+        crate::party_server::SlotState,
+    ),
     /// Result of an off-thread "Close Roblox": how many processes were killed.
     RobloxKilled(usize),
     /// A tray Server Hop finished: the server it joined and the line to show, or why nothing

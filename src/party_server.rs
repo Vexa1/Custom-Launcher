@@ -56,6 +56,51 @@ impl PartyServerError {
     }
 }
 
+/// What the public room list says about the server a party is heading to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotState {
+    /// A seat is free for every member who still has to join.
+    Room,
+    /// Listed, but not enough seats are left.
+    Full { free_slots: u64 },
+    /// Not in the list (private, gone, or an API failure): nobody can tell, so the join is
+    /// still attempted rather than blocking a member on missing data.
+    Unknown,
+}
+
+impl SlotState {
+    /// One line for the status bar. `Room` has nothing to say.
+    pub fn message(&self) -> String {
+        match self {
+            SlotState::Room => String::new(),
+            SlotState::Full { free_slots: 0 } => {
+                "The party's server is full - it needs one with room".to_string()
+            }
+            SlotState::Full { free_slots } => format!(
+                "The party's server has only {free_slots} free slot(s) - it needs one with room"
+            ),
+            SlotState::Unknown => String::new(),
+        }
+    }
+}
+
+/// Whether the server a party is heading to still has a seat for `needed` members.
+pub fn slot_state(servers: &[ServerItem], job_id: &str, needed: usize) -> SlotState {
+    let needed = needed.max(1) as u64;
+    let Some(server) = servers.iter().find(|s| s.id == job_id) else {
+        return SlotState::Unknown;
+    };
+    if server.max_players == 0 {
+        return SlotState::Unknown;
+    }
+    let free = server.max_players.saturating_sub(server.playing);
+    if free >= needed {
+        SlotState::Room
+    } else {
+        SlotState::Full { free_slots: free }
+    }
+}
+
 /// Pick one public server with room for the whole party.
 ///
 /// Order of preference: a room with a spare seat over one that is exactly big enough (so a

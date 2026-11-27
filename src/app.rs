@@ -248,6 +248,14 @@ pub struct Creblox {
     pub party_error: Option<String>,
     pub party_invite_open: bool,
     /// Last presence sent to the party, so no repaint can spam the socket with frames.
+    /// The last party launch whose server had no seat for this member, with the free slots
+    /// the room list reported.
+    pub party_full: Option<(crate::party::PartyLaunch, u64)>,
+    /// A member who asked the host to move the party out of a full server.
+    pub party_hop_from: Option<String>,
+    /// Counts launches whose slot check is in flight, so a slower, older answer cannot
+    /// launch after a newer one has taken over.
+    party_follow_seq: u64,
     pub party_presence: Option<(crate::party::PartyStatus, u64, String)>,
     pub server_locations: HashMap<String, String>,
     pub server_location_pending: HashSet<String>,
@@ -555,6 +563,9 @@ impl Creblox {
             party_error: None,
             party_invite_open: false,
             party_presence: None,
+            party_full: None,
+            party_hop_from: None,
+            party_follow_seq: 0,
             server_locations: HashMap::new(),
             server_location_pending: HashSet::new(),
             game_overlay: crate::game_overlay::OverlayManager::new(),
@@ -2814,9 +2825,32 @@ impl Creblox {
                     crate::party::PartyEvent::Left(reason) => {
                         self.party_state = None;
                         self.party_presence = None;
+                        self.party_full = None;
+                        self.party_hop_from = None;
                         self.status = reason;
                     }
+                    crate::party::PartyEvent::HopRequest(user) => {
+                        self.party_hop_from = self
+                            .party_state
+                            .as_ref()
+                            .and_then(|p| p.members.iter().find(|m| m.user.id == user))
+                            .map(|m| m.user.name.clone());
+                        self.status =
+                            "A member cannot join: the party's server is full".to_string();
+                    }
                 },
+                Msg::PartySlotCheck(seq, launch, state) if seq == self.party_follow_seq => {
+                    match state {
+                        crate::party_server::SlotState::Room
+                        | crate::party_server::SlotState::Unknown => self.party_launch_now(launch),
+                        crate::party_server::SlotState::Full { free_slots } => {
+                            self.status = state.message();
+                            self.party_full = Some((launch, free_slots));
+                        }
+                    }
+                }
+                // A launch that has since been replaced: its answer is stale.
+                Msg::PartySlotCheck(..) => {}
                 Msg::PartyHostLaunch {
                     place_id,
                     universe_id,
@@ -3687,6 +3721,29 @@ impl Creblox {
             self.status = "Already in the party's server".to_string();
             return;
         }
+        // A late joiner can land on a server that filled up since the host picked it.
+        // Roblox would drop them back to the menu with no explanation, so check the room
+        // list first and keep the running client when there is no seat.
+        self.party_follow_seq += 1;
+        let seq = self.party_follow_seq;
+        let cookie = self.cookie.clone();
+        let target = launch.clone();
+        self.spawn(move || {
+            let state = crate::api::party_slot_state(
+                target.place_id,
+                &target.job_id,
+                1,
+                cookie.as_deref(),
+            );
+            Msg::PartySlotCheck(seq, target, state)
+        });
+        self.status = "Checking the party's server for a free slot...".to_string();
+    }
+
+    /// Open the client on the server a party launch named, once the slot check passed.
+    fn party_launch_now(&mut self, launch: crate::party::PartyLaunch) {
+        self.party_full = None;
+        self.party_hop_from = None;
         self.party.set_status(
             crate::party::PartyStatus::Launching,
             Some(launch.place_id),
@@ -3746,6 +3803,9 @@ impl Creblox {
             self.sync_tray_state();
             return;
         }
+        // The hop answers the slot check: neither notice applies once it is under way.
+        self.party_full = None;
+        self.party_hop_from = None;
         // A host hops the whole party: only servers with a free slot per member are
         // candidates, and the chosen server is broadcast once the hop succeeds.
         let needed = if self.party_coordinates_launch() {

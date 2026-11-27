@@ -646,6 +646,52 @@ fn a_socket_launch_is_not_repeated_by_the_presence_poll() {
     host.handle.leave();
 }
 
+/// Waits for a `HopRequest` naming `user_id`, consuming whatever else arrives.
+fn wait_hop(client: &mut Client, user_id: u64, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        let events = drain_for(client, 1);
+        if events
+            .iter()
+            .any(|e| matches!(e, PartyEvent::HopRequest(id) if *id == user_id))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn a_hop_request_reaches_the_host_exactly_once() {
+    // `room_of` already waited for the guest to be in the party.
+    let (mut host, mut guests) = room_of(&["guest-a"]);
+    let guest = &mut guests[0];
+
+    guest.handle.request_hop();
+    assert!(
+        wait_hop(&mut host, 2, 20),
+        "the host never saw the hop request"
+    );
+    let after = drain_for(&mut host, 2);
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e, PartyEvent::HopRequest(_))),
+        "one request produced more than one HopRequest: {after:?}"
+    );
+
+    // A plain status update is not a hop request, so the host bar stays quiet.
+    guest.handle.set_status(PartyStatus::Ready, None, None);
+    let status = drain_for(&mut host, 2);
+    assert!(
+        !status
+            .iter()
+            .any(|e| matches!(e, PartyEvent::HopRequest(_))),
+        "a status update raised a hop request: {status:?}"
+    );
+    host.handle.leave();
+}
+
 #[test]
 fn a_member_already_in_the_announced_server_is_not_relaunched() {
     let (mut host, mut guests) = room_of(&["guest-a"]);

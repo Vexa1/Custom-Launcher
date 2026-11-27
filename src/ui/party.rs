@@ -145,6 +145,7 @@ impl Creblox {
         });
 
         self.party_board_row(ui, party, me, is_host, text);
+        self.party_slot_row(ui, is_host, muted);
 
         if let Some(err) = self.party_error.clone() {
             ui.label(RichText::new(err).size(11.5).color(crate::theme::RED));
@@ -158,6 +159,66 @@ impl Creblox {
         }
         if let Some((place, job)) = join_target {
             self.launch_server(place, job);
+        }
+    }
+
+    /// The late-joiner slot check: the server the party is heading to has no seat for this
+    /// member. The host can move the party to a server with room; anybody else asks.
+    fn party_slot_row(&mut self, ui: &mut egui::Ui, is_host: bool, muted: egui::Color32) {
+        let full = self.party_full.clone();
+        let asked = self.party_hop_from.clone();
+        if full.is_none() && asked.is_none() {
+            return;
+        }
+        let mut hop = false;
+        let mut ask = false;
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if let Some((launch, free)) = &full {
+                let game = if launch.game_name.trim().is_empty() {
+                    "The party's server".to_string()
+                } else {
+                    format!("{}'s server", short(&launch.game_name))
+                };
+                let detail = if *free == 0 {
+                    "is full".to_string()
+                } else {
+                    format!("has {free} free slot(s)")
+                };
+                ui.label(
+                    RichText::new(format!("{game} {detail} - no room for you."))
+                        .size(11.5)
+                        .color(muted),
+                );
+            } else if let Some(name) = &asked {
+                ui.label(
+                    RichText::new(format!("{name} cannot join: the party's server is full."))
+                        .size(11.5)
+                        .color(muted),
+                );
+            }
+            if is_host {
+                if ui
+                    .button("Hop party to a server with room")
+                    .on_hover_text("Only servers with a seat per member are pickable")
+                    .clicked()
+                {
+                    hop = true;
+                }
+            } else if full.is_some()
+                && ui
+                    .button("Ask host to hop")
+                    .on_hover_text("The host picks a server with room for everybody")
+                    .clicked()
+            {
+                ask = true;
+            }
+        });
+        if hop {
+            self.hop_to_server(crate::server_hop::ServerHopMode::LeastPlayers);
+        } else if ask {
+            self.party.request_hop();
+            self.status = "Asked the host to hop the party".to_string();
         }
     }
 

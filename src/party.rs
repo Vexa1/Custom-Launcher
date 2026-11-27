@@ -386,6 +386,8 @@ pub enum PartyEvent {
     Launch(PartyLaunch),
     /// A one-line message for the status bar (not an error state).
     Notice(String),
+    /// A member cannot join the party's server and asks the host to move it.
+    HopRequest(u64),
     /// The party ended: left, kicked, or unrecoverable.
     Left(String),
 }
@@ -553,6 +555,9 @@ enum WireOut {
         vote: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         suggest: Option<PartySuggestion>,
+        /// A member asking the host to move the party to a server with room.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hop: Option<bool>,
     },
     Launch {
         place_id: u64,
@@ -638,6 +643,8 @@ enum PeerFrame {
         vote: Option<u64>,
         #[serde(default)]
         suggest: Option<PartySuggestion>,
+        #[serde(default)]
+        hop: Option<bool>,
     },
     Launch {
         #[serde(default)]
@@ -695,6 +702,8 @@ enum Command {
     Suggest(PartySuggestion),
     /// Vote for a suggested game.
     Vote(u64),
+    /// This member cannot join the party's server and asks the host to move it.
+    RequestHop,
     Shutdown,
 }
 
@@ -716,6 +725,12 @@ impl PartyHandle {
     /// process and is never sent to another member.
     pub fn create(&self, me: PartyUser, max: usize, cookie: Option<String>) {
         let _ = self.tx.send(Command::Create { me, max, cookie });
+    }
+
+    /// Ask the host to move the party to a server with room. Sent only when a late join
+    /// found the party's server full.
+    pub fn request_hop(&self) {
+        let _ = self.tx.send(Command::RequestHop);
     }
 
     pub fn join(&self, invite: PartyInvite, me: PartyUser, cookie: Option<String>) {
@@ -968,7 +983,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                             host.announce = true;
                         }
                         Role::Guest(guest) => {
-                            send_status(guest, local.as_ref(), None, None, None);
+                            send_status(guest, local.as_ref(), None, None, None, None);
                         }
                         Role::Idle => {}
                     }
@@ -987,7 +1002,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         }
                     }
                     Role::Guest(guest) => {
-                        send_status(guest, local.as_ref(), Some(ready), None, None);
+                        send_status(guest, local.as_ref(), Some(ready), None, None, None);
                         let me = local.as_ref().map(|l| l.me.id).unwrap_or(0);
                         guest.board.set_ready(me, ready);
                         out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local.as_ref())));
@@ -1001,7 +1016,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         }
                     }
                     Role::Guest(guest) => {
-                        send_status(guest, local.as_ref(), None, None, Some(suggestion));
+                        send_status(guest, local.as_ref(), None, None, Some(suggestion), None);
                     }
                     Role::Idle => {}
                 },
@@ -1013,12 +1028,19 @@ fn worker(rx: Receiver<Command>, tx: Sender<Msg>, ctx: egui::Context) {
                         }
                     }
                     Role::Guest(guest) => {
-                        send_status(guest, local.as_ref(), None, Some(place_id), None);
+                        send_status(guest, local.as_ref(), None, Some(place_id), None, None);
                         let me = local.as_ref().map(|l| l.me.id).unwrap_or(0);
                         guest.board.vote(me, place_id);
                         out.emit(PartyEvent::Snapshot(guest_snapshot(guest, local.as_ref())));
                     }
                     Role::Idle => {}
+                },
+                Command::RequestHop => match &mut role {
+                    Role::Guest(guest) => {
+                        send_status(guest, local.as_ref(), None, None, None, Some(true));
+                    }
+                    // The host is in the game it would hop from; asking itself does nothing.
+                    Role::Host(_) | Role::Idle => {}
                 },
                 Command::Launch(launch) => match &mut role {
                     Role::Host(host) => {
@@ -1311,6 +1333,7 @@ fn read_peers(host: &mut Host, out: &Out) {
 
     let host_id = host.invite.host_id;
     let mut launches: Vec<PartyLaunch> = Vec::new();
+    let mut hops: Vec<u64> = Vec::new();
     let mut kicks: Vec<u64> = Vec::new();
     let mut promotes: Vec<u64> = Vec::new();
     let mut refuse: Vec<usize> = Vec::new();
@@ -1331,6 +1354,7 @@ fn read_peers(host: &mut Host, out: &Out) {
                 ready,
                 vote,
                 suggest,
+                hop,
             } => {
                 peer.status = PartyStatus::from_wire(&status);
                 peer.place_id = place_id;
@@ -1343,6 +1367,9 @@ fn read_peers(host: &mut Host, out: &Out) {
                 }
                 if let Some(suggestion) = suggest {
                     host.board.suggest(suggestion);
+                }
+                if hop == Some(true) {
+                    hops.push(peer.user.id);
                 }
                 host.announce = true;
             }
@@ -1391,6 +1418,9 @@ fn read_peers(host: &mut Host, out: &Out) {
         if let Some(peer) = host.peers.get_mut(index) {
             let _ = write(&mut peer.ws, &WireIn::Pong);
         }
+    }
+    for user in hops {
+        out.emit(PartyEvent::HopRequest(user));
     }
     for index in refuse {
         if let Some(peer) = host.peers.get_mut(index) {
@@ -1658,6 +1688,7 @@ fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
                                 ready: None,
                                 vote: None,
                                 suggest: None,
+                                hop: None,
                             },
                     );
                 }
@@ -1871,6 +1902,7 @@ fn send_status(
     ready: Option<bool>,
     vote: Option<u64>,
     suggest: Option<PartySuggestion>,
+    hop: Option<bool>,
 ) {
     let (Some(local), Some(ws)) = (local, guest.ws.as_mut()) else {
         return;
@@ -1884,6 +1916,7 @@ fn send_status(
             ready,
             vote,
             suggest,
+            hop,
         },
     );
 }
@@ -2079,6 +2112,7 @@ mod tests {
             ready: None,
             vote: None,
             suggest: None,
+            hop: None,
         };
         assert_eq!(
             serde_json::to_string(&frame).unwrap(),
@@ -2091,6 +2125,7 @@ mod tests {
             ready: Some(true),
             vote: None,
             suggest: None,
+            hop: None,
         };
         assert_eq!(
             serde_json::to_string(&acted).unwrap(),

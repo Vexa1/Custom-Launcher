@@ -527,7 +527,29 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                 ui.add_space(10.0);
             }
         });
-        ui.add_space(16.0);
+        // The late-joiner slot check (`party_slot_row` in `src/ui/party.rs`): a member whose
+        // join was refused because the party's server filled up.
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            probe.label(
+                ui,
+                "party.slot.text",
+                "Adopt Me!'s server is full - no room for you.",
+                egui::FontId::proportional(11.5),
+                MUTED,
+                BG,
+            );
+            ui.add_space(8.0);
+            probe.button(
+                ui,
+                "party.slot.ask",
+                "Ask host to hop",
+                Vec2::new(122.0, 24.0),
+                SURFACE,
+                MUTED,
+            );
+        });
+        ui.add_space(12.0);
         heading(
             ui,
             probe,
