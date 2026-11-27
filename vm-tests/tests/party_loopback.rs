@@ -647,6 +647,50 @@ fn a_socket_launch_is_not_repeated_by_the_presence_poll() {
 }
 
 #[test]
+fn a_member_already_in_the_announced_server_is_not_relaunched() {
+    let (mut host, mut guests) = room_of(&["guest-a"]);
+    let guest = &mut guests[0];
+
+    // The guest is already playing in the server the host is about to announce, which is
+    // what a manual join (or a restarted party worker) looks like from here.
+    guest
+        .handle
+        .set_status(PartyStatus::InGame, Some(7001), Some("job-here".to_string()));
+    host.snapshot(20, "the guest's session", |s| {
+        s.members
+            .iter()
+            .any(|m| m.user.id == 2 && m.job_id == "job-here")
+    });
+
+    host.handle.broadcast_launch(party::PartyLaunch {
+        place_id: 7001,
+        job_id: "job-here".to_string(),
+        universe_id: 33,
+        game_name: "Here".to_string(),
+        by: 1,
+    });
+    let quiet = drain_for(guest, 3);
+    assert!(
+        launches(&quiet).is_empty(),
+        "a member already in that server was relaunched: {:?}",
+        launches(&quiet)
+    );
+
+    // A new server is still followed automatically.
+    host.handle.broadcast_launch(party::PartyLaunch {
+        place_id: 7002,
+        job_id: "job-next".to_string(),
+        universe_id: 33,
+        game_name: "Next".to_string(),
+        by: 1,
+    });
+    let launch = wait_launch(guest, 20);
+    assert_eq!(launch.job_id, "job-next");
+    assert_eq!(launch.place_id, 7002);
+    host.handle.leave();
+}
+
+#[test]
 fn a_member_that_is_slow_to_say_hello_is_still_let_in() {
     use tungstenite::client::IntoClientRequest;
     use tungstenite::http::header::{HeaderName, HeaderValue};

@@ -195,6 +195,36 @@ pub struct PartyLaunch {
     pub by: u64,
 }
 
+/// Whether this member should open a client for the server a launch names.
+///
+/// Auto-follow has two sources - the host's launch frame and the host's Roblox presence -
+/// and both can name the same server more than once. Follow each job id once, and never
+/// relaunch into the server this member is already playing in.
+pub fn should_follow(
+    last_job: Option<&str>,
+    current_job: Option<&str>,
+    place_id: u64,
+    job_id: &str,
+) -> bool {
+    if place_id == 0 || job_id.is_empty() {
+        return false;
+    }
+    last_job != Some(job_id) && current_job != Some(job_id)
+}
+
+impl Guest {
+    /// Whether to follow this server, remembering the job either way so the other follow
+    /// path (the host's frame vs. their presence) does not repeat it.
+    fn accept_launch(&mut self, local: Option<&Local>, place_id: u64, job_id: &str) -> bool {
+        let current = local.map(|l| l.job_id.as_str()).filter(|job| !job.is_empty());
+        let follow = should_follow(self.last_followed.as_deref(), current, place_id, job_id);
+        if place_id > 0 && !job_id.is_empty() {
+            self.last_followed = Some(job_id.to_string());
+        }
+        follow
+    }
+}
+
 /// One game a member suggested for the party to play next.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartySuggestion {
@@ -800,7 +830,7 @@ struct Guest {
     retry_at: Option<Instant>,
     ever_connected: bool,
     presence_at: Instant,
-    last_followed: Option<(u64, String)>,
+    last_followed: Option<String>,
     last_ping: Instant,
     degraded: bool,
     /// Terminal: kicked, the host left, or the room refused us. Nothing is retried.
@@ -1658,11 +1688,9 @@ fn read_guest(guest: &mut Guest, local: Option<&Local>, out: &Out) {
                 game_name,
                 by,
             } => {
-                let key = (place_id, job_id.clone());
-                if guest.last_followed.as_ref() == Some(&key) {
+                if !guest.accept_launch(local, place_id, &job_id) {
                     continue;
                 }
-                guest.last_followed = Some(key);
                 out.emit(PartyEvent::Launch(PartyLaunch {
                     place_id,
                     job_id,
@@ -1716,11 +1744,9 @@ fn poll_presence(guest: &mut Guest, local: Option<&Local>, out: &Out) {
     if !spot.in_game || spot.place_id == 0 || spot.job_id.is_empty() {
         return;
     }
-    let key = (spot.place_id, spot.job_id.clone());
-    if guest.last_followed.as_ref() == Some(&key) {
+    if !guest.accept_launch(local, spot.place_id, &spot.job_id) {
         return;
     }
-    guest.last_followed = Some(key);
     out.emit(PartyEvent::Launch(PartyLaunch {
         place_id: spot.place_id,
         job_id: spot.job_id,

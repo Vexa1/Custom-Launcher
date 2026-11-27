@@ -3676,6 +3676,17 @@ impl Creblox {
             self.status = "Sign in to join the party launch".to_string();
             return;
         }
+        // Auto-follow can name the server this member is already in - after a party worker
+        // restart, or when they joined the host manually - and relaunching would kill a
+        // healthy client. Dedupe by job id here as well as in the worker.
+        if self
+            .server_info
+            .as_ref()
+            .is_some_and(|s| !s.job_id.is_empty() && s.job_id == launch.job_id)
+        {
+            self.status = "Already in the party's server".to_string();
+            return;
+        }
         self.party.set_status(
             crate::party::PartyStatus::Launching,
             Some(launch.place_id),
