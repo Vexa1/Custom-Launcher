@@ -223,8 +223,15 @@ fn draw_impl(
         let view = (area.width(), area.height());
         let box_ = if saved.0 >= min && saved.1 >= min {
             crate::overlay_spec::ImageBox {
-                x: img["offset_x"].as_f64().unwrap_or(0.0) as i16,
-                y: img["offset_y"].as_f64().unwrap_or(0.0) as i16,
+                // The box's own position; a 0.5.51 spec kept it in the offsets.
+                x: img["x"]
+                    .as_f64()
+                    .or_else(|| img["offset_x"].as_f64())
+                    .unwrap_or(0.0) as i16,
+                y: img["y"]
+                    .as_f64()
+                    .or_else(|| img["offset_y"].as_f64())
+                    .unwrap_or(0.0) as i16,
                 w: saved.0 as i16,
                 h: saved.1 as i16,
             }

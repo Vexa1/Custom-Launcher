@@ -753,9 +753,11 @@ struct OverlayImage {
     opacity: f32,
     offset_x: f32,
     offset_y: f32,
-    /// The editor's saved box in points from the game area's top-left, `0` until the picture
-    /// has been dragged or resized once. With a box set, `offset_x`/`offset_y` are that
-    /// absolute position; without one they are the corner slot's fine-tune offsets.
+    /// The editor's saved box in points from the game area's top-left. `w`/`h` at 0 mean the
+    /// picture still follows `size_pct` and the corner fine-tune offsets above; the box's
+    /// position has its own fields so a dragged picture and the offset sliders cannot fight.
+    x: f32,
+    y: f32,
     w: u16,
     h: u16,
     /// Where it was drawn this frame (game-window coordinates).
@@ -1123,12 +1125,31 @@ impl OverlayWindowApp {
                 opacity: i["opacity"].as_f64().unwrap_or(0.9).clamp(0.05, 1.0) as f32,
                 offset_x: i["offset_x"].as_f64().unwrap_or(0.0) as f32,
                 offset_y: i["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                x: i["x"].as_f64().unwrap_or_else(|| {
+                    // A spec written by 0.5.51 carries the saved position in the offsets.
+                    let saved =
+                        i["w"].as_u64().unwrap_or(0) >= crate::overlay_spec::ImageBox::MIN as u64;
+                    if saved {
+                        i["offset_x"].as_f64().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    }
+                }) as f32,
+                y: i["y"].as_f64().unwrap_or_else(|| {
+                    let saved =
+                        i["h"].as_u64().unwrap_or(0) >= crate::overlay_spec::ImageBox::MIN as u64;
+                    if saved {
+                        i["offset_y"].as_f64().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    }
+                }) as f32,
                 w: i["w"].as_u64().unwrap_or(0).min(8000) as u16,
                 h: i["h"].as_u64().unwrap_or(0).min(8000) as u16,
                 rect: None,
                 saved: (
-                    i["offset_x"].as_f64().unwrap_or(0.0) as f32,
-                    i["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                    i["x"].as_f64().unwrap_or(0.0) as f32,
+                    i["y"].as_f64().unwrap_or(0.0) as f32,
                     i["w"].as_u64().unwrap_or(0).min(8000) as u16,
                     i["h"].as_u64().unwrap_or(0).min(8000) as u16,
                 ),
@@ -1959,7 +1980,6 @@ impl OverlayWindowApp {
         {
             let view = self.image_view;
             let hit = rect.translate(-self.shift);
-            let grip = 8.0;
             let corners = [
                 hit.left_top(),
                 hit.right_top(),
@@ -1969,9 +1989,8 @@ impl OverlayWindowApp {
             let hold_shift = ui.input(|i| i.modifiers.shift);
             let mut corner_hit = None;
             for (i, corner) in corners.iter().enumerate() {
-                // A 24 px target around an 8 px square: still easy to grab on a Retina
-                // display, and the smallest hit target this app allows anywhere else.
-                let _ = grip;
+                // A 24 px target around the 8 px square drawn below: still easy to grab on a
+                // Retina display, and the smallest hit target this app allows anywhere else.
                 let target = Rect::from_center_size(*corner, vec2(24.0, 24.0));
                 let response = ui.interact(
                     target,
@@ -2293,8 +2312,7 @@ impl OverlayWindowApp {
                 panel.offset = egui::Vec2::ZERO;
             }
             if let Some(img) = self.image.as_mut() {
-                img.offset_x = 0.0;
-                img.offset_y = 0.0;
+                // Dropping the box is what hands the picture back to its corner slot.
                 img.w = 0;
                 img.h = 0;
             }
@@ -2347,15 +2365,15 @@ impl OverlayWindowApp {
                 panel.saved = panel.offset;
             }
             if let Some(img) = self.image.as_mut() {
-                img.saved = (img.offset_x, img.offset_y, img.w, img.h);
+                img.saved = (img.x, img.y, img.w, img.h);
             }
         } else {
             for panel in &mut self.panels {
                 panel.offset = panel.saved;
             }
             if let Some(img) = self.image.as_mut() {
-                img.offset_x = img.saved.0;
-                img.offset_y = img.saved.1;
+                img.x = img.saved.0;
+                img.y = img.saved.1;
                 img.w = img.saved.2;
                 img.h = img.saved.3;
             }
@@ -2454,8 +2472,8 @@ fn image_rect(
     let min = crate::overlay_spec::ImageBox::MIN as u16;
     let box_ = if img.w >= min && img.h >= min {
         crate::overlay_spec::ImageBox {
-            x: img.offset_x.round() as i16,
-            y: img.offset_y.round() as i16,
+            x: img.x.round() as i16,
+            y: img.y.round() as i16,
             w: img.w as i16,
             h: img.h as i16,
         }
@@ -2493,8 +2511,8 @@ fn paint_image_rect(painter: &egui::Painter, rect: Rect, opacity: f32, tex: &egu
 
 /// Writes an edited image box back onto the live picture and marks the layout stale.
 fn apply_image_box(img: &mut OverlayImage, box_: crate::overlay_spec::ImageBox) {
-    img.offset_x = box_.x as f32;
-    img.offset_y = box_.y as f32;
+    img.x = box_.x as f32;
+    img.y = box_.y as f32;
     img.w = box_.w.max(0) as u16;
     img.h = box_.h.max(0) as u16;
 }

@@ -6137,8 +6137,8 @@ impl eframe::App for Creblox {
                         // The picture's box, when the editor moved or resized it. It is drawn
                         // from these exact points during live gameplay.
                         if let Some(img) = result.image {
-                            self.settings.overlay_image_offset_x = img.x;
-                            self.settings.overlay_image_offset_y = img.y;
+                            self.settings.overlay_image_x = img.x;
+                            self.settings.overlay_image_y = img.y;
                             self.settings.overlay_image_w = img.w.max(0) as u16;
                             self.settings.overlay_image_h = img.h.max(0) as u16;
                         }

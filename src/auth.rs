@@ -436,6 +436,39 @@ pub fn load_settings() -> Settings {
             .and_then(|n| u16::try_from(n).ok())
             .filter(|n| *n >= crate::overlay_spec::ImageBox::MIN as u16)
             .unwrap_or(def.overlay_image_h),
+        // The box's position has its own fields. A file written by 0.5.51 stored the dragged
+        // position in the offset sliders, so a saved box without `x`/`y` is read from there
+        // once - the picture stays exactly where the user left it.
+        overlay_image_x: v["overlay_image_x"]
+            .as_i64()
+            .map(|n| n.clamp(0, 8000) as i16)
+            .unwrap_or_else(|| {
+                let saved = v["overlay_image_w"].as_u64().unwrap_or(0)
+                    >= crate::overlay_spec::ImageBox::MIN as u64;
+                if saved {
+                    v["overlay_image_offset_x"]
+                        .as_i64()
+                        .unwrap_or(0)
+                        .clamp(0, 8000) as i16
+                } else {
+                    def.overlay_image_x
+                }
+            }),
+        overlay_image_y: v["overlay_image_y"]
+            .as_i64()
+            .map(|n| n.clamp(0, 8000) as i16)
+            .unwrap_or_else(|| {
+                let saved = v["overlay_image_h"].as_u64().unwrap_or(0)
+                    >= crate::overlay_spec::ImageBox::MIN as u64;
+                if saved {
+                    v["overlay_image_offset_y"]
+                        .as_i64()
+                        .unwrap_or(0)
+                        .clamp(0, 8000) as i16
+                } else {
+                    def.overlay_image_y
+                }
+            }),
         crosshair_enabled: v["crosshair_enabled"]
             .as_bool()
             .unwrap_or(def.crosshair_enabled),
@@ -595,6 +628,8 @@ pub fn save_settings(s: &Settings) {
         "overlay_image_opacity": s.overlay_image_opacity,
         "overlay_image_offset_x": s.overlay_image_offset_x,
         "overlay_image_offset_y": s.overlay_image_offset_y,
+        "overlay_image_x": s.overlay_image_x,
+        "overlay_image_y": s.overlay_image_y,
         "overlay_image_w": s.overlay_image_w,
         "overlay_image_h": s.overlay_image_h,
         "crosshair_enabled": s.crosshair_enabled,

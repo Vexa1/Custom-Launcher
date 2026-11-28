@@ -293,13 +293,17 @@ fn the_custom_image_moves_and_resizes_from_its_saved_box() {
     let mut spec = spec_with_panel_positions();
     // A picture the editor already dragged to a non-default spot and resized: these are the
     // points the live HUD draws it at, not a corner slot.
+    // The offsets deliberately disagree with the box: with a saved box they are the corner
+    // fine-tune sliders and must not move the picture.
     spec["image"] = serde_json::json!({
         "path": "/tmp/creblox-logo.png",
         "corner": 0,
         "size": 25,
         "opacity": 0.95,
-        "offset_x": 412,
-        "offset_y": 236,
+        "offset_x": 30,
+        "offset_y": -20,
+        "x": 412,
+        "y": 236,
         "w": 320,
         "h": 128
     });

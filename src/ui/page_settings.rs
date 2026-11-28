@@ -1386,8 +1386,8 @@ impl Creblox {
                                 "Saved from the HUD editor: {} x {} at {}, {}. Use Edit HUD positions… to move it again, or Reset there to go back to the corner.",
                                 self.settings.overlay_image_w,
                                 self.settings.overlay_image_h,
-                                self.settings.overlay_image_offset_x,
-                                self.settings.overlay_image_offset_y
+                                self.settings.overlay_image_x,
+                                self.settings.overlay_image_y
                             )
                         } else {
                             "The picture keeps its aspect ratio and is scaled by height. Use the offsets to fine-tune the corner placement, or drag it in Edit HUD positions…."

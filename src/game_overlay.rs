@@ -99,7 +99,10 @@ pub struct ImageOverlayCfg {
     pub opacity: f32,
     pub offset_x: i16,
     pub offset_y: i16,
-    /// The editor's saved box, `0` when the picture still follows `size_pct`.
+    /// The editor's saved box in points from the game area's top-left; `w`/`h` at 0 mean the
+    /// picture still follows `size_pct` and the corner offsets.
+    pub x: i16,
+    pub y: i16,
     pub w: u16,
     pub h: u16,
 }
@@ -201,6 +204,8 @@ impl OverlayConfig {
                 opacity: s.overlay_image_opacity.clamp(0.1, 1.0),
                 offset_x: s.overlay_image_offset_x,
                 offset_y: s.overlay_image_offset_y,
+                x: s.overlay_image_x,
+                y: s.overlay_image_y,
                 w: s.overlay_image_w,
                 h: s.overlay_image_h,
             })
@@ -1660,6 +1665,8 @@ fn build_spec(g: &Shared) -> Value {
             "opacity": img.opacity,
             "offset_x": img.offset_x,
             "offset_y": img.offset_y,
+            "x": img.x,
+            "y": img.y,
             "w": img.w,
             "h": img.h,
         });
