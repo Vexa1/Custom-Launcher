@@ -2955,6 +2955,27 @@ impl Creblox {
                     self.status = "Automatic updates off — checks stay manual.".to_string();
                 }
             }
+            if self.settings.auto_update {
+                let stage = match self.auto_updater.stage() {
+                    crate::auto_update::Stage::Checking => {
+                        Some("Checking GitHub for a newer release...")
+                    }
+                    crate::auto_update::Stage::Downloading => {
+                        Some("Downloading and verifying the update automatically...")
+                    }
+                    crate::auto_update::Stage::Installing => Some("Installing automatically..."),
+                    crate::auto_update::Stage::Restarting => {
+                        Some("Restarting into the new version...")
+                    }
+                    crate::auto_update::Stage::WaitingForLobby => {
+                        Some("Update ready; installing when your Roblox match ends.")
+                    }
+                    crate::auto_update::Stage::Failed | crate::auto_update::Stage::Idle => None,
+                };
+                if let Some(line) = stage {
+                    small_text(ui, line.to_string());
+                }
+            }
             if let Some(failed) = self.auto_update_failed_note.clone() {
                 small_text(
                     ui,

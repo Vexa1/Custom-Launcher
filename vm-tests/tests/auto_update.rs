@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use creblox_vm_tests::auto_update::{AutoUpdate, CHECK_INTERVAL, Decision};
+use creblox_vm_tests::auto_update::{AutoUpdate, CHECK_INTERVAL, Decision, Stage};
 use creblox_vm_tests::settings::Settings;
 use creblox_vm_tests::settings_json::{load_settings_from, save_settings_to};
 
@@ -43,6 +43,69 @@ fn a_check_runs_at_thirty_second_intervals() {
     // A check still running never stacks a second one, however long its answer takes.
     updater.begin_check(now + CHECK_INTERVAL);
     assert!(!updater.due(now + CHECK_INTERVAL + Duration::from_secs(90)));
+}
+
+#[test]
+fn enabled_auto_update_runs_check_download_install_restart_without_a_click() {
+    let now = Instant::now();
+    let mut updater = AutoUpdate::new(true);
+
+    assert!(updater.due(now), "the first frame starts the loop");
+    updater.begin_check(now);
+    assert_eq!(updater.stage(), Stage::Checking);
+
+    assert_eq!(
+        updater.on_release("v0.5.72", false),
+        Decision::Install,
+        "a newer tag outside a match proceeds on its own"
+    );
+    assert_eq!(updater.stage(), Stage::Downloading);
+    // The check answer arriving late must not erase the pending install.
+    updater.finish_check();
+    assert_eq!(updater.stage(), Stage::Downloading);
+
+    updater.begin_download();
+    assert_eq!(
+        updater.download_ready(false),
+        Decision::Install,
+        "finishing the download starts the install, not a prompt"
+    );
+    assert_eq!(updater.stage(), Stage::Installing);
+
+    updater.install_started();
+    assert_eq!(updater.stage(), Stage::Installing);
+    updater.restarting();
+    assert_eq!(updater.stage(), Stage::Restarting);
+}
+
+#[test]
+fn a_download_that_finishes_in_a_match_parks_at_the_lobby() {
+    let mut updater = AutoUpdate::new(true);
+    assert_eq!(updater.on_release("v0.5.72", true), Decision::Defer);
+    assert_eq!(updater.stage(), Stage::WaitingForLobby);
+
+    // A download already in flight when the match started also waits here.
+    assert_eq!(updater.download_ready(true), Decision::Defer);
+    assert_eq!(updater.stage(), Stage::WaitingForLobby);
+
+    assert_eq!(updater.take_deferred().as_deref(), Some("v0.5.72"));
+    assert_eq!(updater.on_release("v0.5.72", false), Decision::Install);
+    assert_eq!(updater.stage(), Stage::Downloading);
+}
+
+#[test]
+fn a_failed_tag_moves_the_pipeline_to_failed_until_retry() {
+    let mut updater = AutoUpdate::new(true);
+    updater.on_release("v0.5.72", false);
+    updater.install_started();
+    updater.on_failure("v0.5.72");
+    assert_eq!(updater.stage(), Stage::Failed);
+    assert_eq!(updater.on_release("v0.5.72", false), Decision::Skip);
+    assert_eq!(updater.stage(), Stage::Failed, "a skipped tag stays failed");
+    updater.retry();
+    assert_eq!(updater.stage(), Stage::Idle);
+    assert_eq!(updater.on_release("v0.5.72", false), Decision::Install);
+    assert_eq!(updater.stage(), Stage::Downloading);
 }
 
 #[test]

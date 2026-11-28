@@ -11,6 +11,19 @@ use std::time::{Duration, Instant};
 /// How often the latest GitHub release is checked while automatic updates are on.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Where a hands-free update currently is. The launcher drives every transition itself;
+/// no stage waits for a button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Idle,
+    Checking,
+    Downloading,
+    Installing,
+    Restarting,
+    WaitingForLobby,
+    Failed,
+}
+
 /// What a freshly detected release should make the launcher do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -29,6 +42,7 @@ pub struct AutoUpdate {
     check_running: bool,
     failed_tag: Option<String>,
     deferred: Option<String>,
+    stage: Stage,
 }
 
 impl AutoUpdate {
@@ -39,7 +53,12 @@ impl AutoUpdate {
             check_running: false,
             failed_tag: None,
             deferred: None,
+            stage: Stage::Idle,
         }
+    }
+
+    pub fn stage(&self) -> Stage {
+        self.stage
     }
 
     /// Follows the settings switch. Turning it on checks immediately instead of waiting out
@@ -53,6 +72,7 @@ impl AutoUpdate {
         self.last_check = None;
         if !enabled {
             self.deferred = None;
+            self.stage = Stage::Idle;
         }
     }
 
@@ -85,10 +105,39 @@ impl AutoUpdate {
     pub fn begin_check(&mut self, now: Instant) {
         self.check_running = true;
         self.last_check = Some(now);
+        self.stage = Stage::Checking;
     }
 
     pub fn finish_check(&mut self) {
         self.check_running = false;
+        if self.stage == Stage::Checking {
+            self.stage = Stage::Idle;
+        }
+    }
+
+    /// The automatic download started; the install follows its completion without a click.
+    pub fn begin_download(&mut self) {
+        self.stage = Stage::Downloading;
+    }
+
+    /// A download finished while the loop owned it. In a match this parks the install until
+    /// the lobby; otherwise it reports `Install` and moves straight to `Installing`.
+    pub fn download_ready(&mut self, in_game: bool) -> Decision {
+        if in_game {
+            self.stage = Stage::WaitingForLobby;
+            Decision::Defer
+        } else {
+            self.stage = Stage::Installing;
+            Decision::Install
+        }
+    }
+
+    pub fn install_started(&mut self) {
+        self.stage = Stage::Installing;
+    }
+
+    pub fn restarting(&mut self) {
+        self.stage = Stage::Restarting;
     }
 
     /// Applies the gameplay guard to a detected release and returns what to do next.
@@ -102,9 +151,11 @@ impl AutoUpdate {
         }
         if in_game {
             self.deferred = Some(tag.to_string());
+            self.stage = Stage::WaitingForLobby;
             Decision::Defer
         } else {
             self.deferred = None;
+            self.stage = Stage::Downloading;
             Decision::Install
         }
     }
@@ -124,6 +175,7 @@ impl AutoUpdate {
     pub fn on_failure(&mut self, tag: &str) {
         self.failed_tag = Some(tag.to_string());
         self.check_running = false;
+        self.stage = Stage::Failed;
     }
 
     /// The user pressed Install / Retry: forget the failure and check again on the next tick.
@@ -132,6 +184,7 @@ impl AutoUpdate {
         self.deferred = None;
         self.last_check = None;
         self.check_running = false;
+        self.stage = Stage::Idle;
     }
 
     /// A manual install press re-arms the same tag without touching the 30-second clock.

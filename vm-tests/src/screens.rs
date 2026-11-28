@@ -1309,7 +1309,7 @@ pub fn settings_auto_update(ui: &mut egui::Ui, probe: &mut Probe) {
                 ui,
                 probe,
                 "settings.auto.available.title",
-                "New version ready: v0.5.70",
+                "New version ready: v0.5.72",
                 14.0,
             );
             ui.add_space(6.0);
@@ -1353,6 +1353,14 @@ pub fn settings_auto_update(ui: &mut egui::Ui, probe: &mut Probe) {
             ui.checkbox(
                 &mut download,
                 "Download updates automatically when available (install stays manual)",
+            );
+            ui.add_space(4.0);
+            body(
+                ui,
+                probe,
+                "settings.auto.stage",
+                "Checking GitHub for a newer release...",
+                MUTED(),
             );
         });
     });

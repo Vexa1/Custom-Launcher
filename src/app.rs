@@ -929,6 +929,7 @@ impl Creblox {
         self.app_update_error = None;
         self.app_update_error_log.clear();
         self.app_update_error_open = false;
+        self.auto_updater.install_started();
         self.app_update_installing = true;
         self.app_update_status = Some(format!("Installing v{version}..."));
         self.status = format!("Installing CREBLOX v{version}...");
@@ -990,8 +991,13 @@ impl Creblox {
     }
 
     /// Any Roblox match in progress: the installer waits for the lobby.
+    ///
+    /// The place id is the cheap signal; `session_banner_active` covers logs the parser could
+    /// not classify into a place id. It reads processes and logs, so it is only consulted at
+    /// the decision points (release found, download finished), never on every frame.
     pub fn in_active_game(&self) -> bool {
         self.active_roblox_place_id.is_some()
+            || (self.roblox_running && crate::roblox_process::session_banner_active())
     }
 
     /// The automatic-update loop, called once per frame.
@@ -1006,7 +1012,9 @@ impl Creblox {
         }
         self.auto_updater.set_enabled(true);
         let now = Instant::now();
-        if !self.in_active_game() {
+        // The cheap place-id check is what runs every frame; the log scan inside
+        // `in_active_game` is reserved for the release/download decision points.
+        if self.active_roblox_place_id.is_none() {
             if let Some(tag) = self.auto_updater.take_deferred() {
                 // Reuse the release that was seen during the match. Asking GitHub again would
                 // answer 304 with no payload, and the deferred install would be forgotten.
@@ -1021,9 +1029,7 @@ impl Creblox {
                         }
                     }
                     Some(rel)
-                        if cfg!(target_os = "macos")
-                            && rel.zip_url.is_some()
-                            && !self.app_update_downloading =>
+                        if rel.zip_url.is_some() && !self.app_update_downloading =>
                     {
                         self.start_auto_update_download();
                     }
@@ -1093,6 +1099,7 @@ impl Creblox {
             return;
         }
         self.auto_update_download = true;
+        self.auto_updater.begin_download();
         self.start_app_update_download(false);
     }
 
@@ -4371,15 +4378,12 @@ impl Creblox {
                             {
                                 if self.app_update_zip.is_some() {
                                     self.install_app_update();
-                                } else if cfg!(target_os = "macos")
-                                    && release.zip_url.is_some()
-                                {
+                                } else if release.zip_url.is_some() {
                                     self.start_auto_update_download();
                                 }
                             }
                             if decision != crate::auto_update::Decision::Defer
                                 && self.settings.auto_download_updates
-                                && cfg!(target_os = "macos")
                                 && release.zip_url.is_some()
                                 && self.app_update_zip.is_none()
                             {
@@ -4453,13 +4457,20 @@ impl Creblox {
                             self.auto_update_download = false;
                             if matches!(&self.app_update_available, Some(r) if r.version == ver) {
                                 self.app_update_zip = Some(path);
-                                self.app_update_status =
-                                    Some(format!("v{ver} downloaded — ready to install."));
-                                self.status =
-                                    format!("v{ver} downloaded — click Install & Restart.");
+                                if auto {
+                                    self.status = format!("v{ver} downloaded — installing...");
+                                } else {
+                                    self.app_update_status =
+                                        Some(format!("v{ver} downloaded — ready to install."));
+                                    self.status =
+                                        format!("v{ver} downloaded — click Install & Restart.");
+                                }
                             }
                             if auto {
-                                if self.in_active_game() {
+                                // The installer starts on this same message: no confirmation.
+                                if self.auto_updater.download_ready(self.in_active_game())
+                                    == crate::auto_update::Decision::Defer
+                                {
                                     let tag = self
                                         .app_update_available
                                         .as_ref()
@@ -4470,7 +4481,7 @@ impl Creblox {
                                     self.app_update_status = Some(format!(
                                         "v{ver} downloaded — installs when your match ends."
                                     ));
-                                } else {
+                                } else if self.app_update_zip.is_some() {
                                     self.install_app_update();
                                 }
                             }
@@ -4494,6 +4505,7 @@ impl Creblox {
                 }
                 Msg::AppInstallDone(ver, res, log) => match res {
                     Ok(()) => {
+                        self.auto_updater.restarting();
                         self.app_update_status =
                             Some(format!("Restarting CREBLOX v{ver}..."));
                         self.status = "Update installed - restarting CREBLOX...".to_string();
