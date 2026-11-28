@@ -114,6 +114,87 @@ pub fn fetch_inventory_tab(
     Ok(out)
 }
 
+/// Downloads the `150x150` thumbnails for a batch of inventory items.
+///
+/// The thumbnail endpoints are metadata, not images: one request per kind (assets, badge icons,
+/// game pass icons) answers with `targetId` + `imageUrl`, and the images themselves are then
+/// fetched in parallel. Anything that fails is simply left out, so the card keeps its
+/// placeholder instead of drawing a broken-image glyph.
+pub fn fetch_inventory_thumbnails(
+    items: Vec<(u64, crate::inventory::ThumbKind)>,
+) -> Vec<(u64, egui::ColorImage)> {
+    use crate::inventory::{ThumbKind, parse_thumbnail_batch, thumbnail_batch_url};
+    use std::collections::HashMap;
+    use std::io::Read;
+
+    let mut by_kind: HashMap<ThumbKind, Vec<u64>> = HashMap::new();
+    for (id, kind) in items {
+        if id != 0 {
+            by_kind.entry(kind).or_default().push(id);
+        }
+    }
+
+    let mut urls: Vec<(u64, String)> = Vec::new();
+    for (kind, ids) in by_kind {
+        for chunk in ids.chunks(50) {
+            let Some(url) = thumbnail_batch_url(kind, chunk) else {
+                continue;
+            };
+            let json = agent()
+                .get(&url)
+                .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+                .call()
+                .ok()
+                .and_then(|r| r.into_json::<Value>().ok());
+            if let Some(json) = json {
+                urls.extend(parse_thumbnail_batch(&json));
+            }
+        }
+    }
+
+    let download = |url: &str| -> Option<egui::ColorImage> {
+        let mut bytes = Vec::new();
+        agent()
+            .get(url)
+            .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+            .call()
+            .ok()?
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let image = image::load_from_memory(&bytes).ok()?;
+        let rgba = image.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            rgba.as_flat_samples().as_slice(),
+        ))
+    };
+
+    // Eight at a time: a page of thumbnails is a dozen small PNGs, and they are independent.
+    let mut out: Vec<(u64, egui::ColorImage)> = Vec::new();
+    std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for (id, url) in urls {
+            handles.push(s.spawn(move || (id, download(&url))));
+            if handles.len() >= 8 {
+                for handle in handles.drain(..) {
+                    if let Ok((id, Some(image))) = handle.join() {
+                        out.push((id, image));
+                    }
+                }
+            }
+        }
+        for handle in handles.drain(..) {
+            if let Ok((id, Some(image))) = handle.join() {
+                out.push((id, image));
+            }
+        }
+    });
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
+
 /// One Roblox GET with the inventory policy attached: 403 becomes `Private`, 429 carries its
 /// `Retry-After` when Roblox sends one, everything else keeps its status.
 fn inventory_get(url: &str, cookie: Option<&str>) -> Result<Value, crate::inventory::FetchError> {

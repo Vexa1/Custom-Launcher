@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.24
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.25
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -341,6 +341,8 @@ overlay process owns the pointer while the launcher owns the config.
 
 Open it from a profile's **•••** menu, a friend's right-click menu (*View Inventory*) or a
 party member's context menu. It is one modal over the current page and it never prefetches.
+The page keeps its full brightness: the dimming scrim is painted on egui's *middle* layer,
+strictly behind the opaque card, so it never darkens the inventory or its own cards.
 
 | Tab | Roblox asset types |
 |---|---|
@@ -352,9 +354,11 @@ party member's context menu. It is one modal over the current page and it never 
 
 - **Lazy per-tab fetching.** Only the clicked tab is requested, from
   `inventory.roblox.com/v2/users/{id}/inventory/{assetTypeId}?limit=50&sortOrder=Desc`.
-  Results are cached per `(user_id, category)` in an 8-entry LRU, so switching back to a tab
-  is instant and never repeats a request; a tab already in flight is never asked for twice
-  (`needs_fetch`).
+  That endpoint names its rows `assetId` / `assetName` (badges and passes use `id` / `name`),
+  so `parse_inventory` accepts both spellings; a row with no id is dropped rather than
+  becoming `0`. Results are cached per `(user_id, category)` in an 8-entry LRU, so switching
+  back to a tab is instant and never repeats a request; a tab already in flight is never asked
+  for twice (`needs_fetch`).
 - **Privacy is terminal.** A `403` or Roblox's *"User's inventory is hidden"* becomes the
   "This player's inventory is private" state, cached with the tab: no retry loop, no error
   spam.
@@ -362,15 +366,20 @@ party member's context menu. It is one modal over the current page and it never 
   retries once; other statuses keep their message.
 - **Culled grid.** `ScrollArea::show_rows` lays out only the visible rows, so a 5,000-item
   inventory costs the same per frame as a 50-item one.
-- **Bounded thumbnails.** `150x150` textures are requested only for visible cards, at most
-  three new ones per frame, and only once per asset; encryption/eviction is the launcher's
-  existing `enforce_ram_cache_budget`.
+- **Batched thumbnails.** Only the cards the grid actually laid out are requested, 24 at a
+  time, through the thumbnail *metadata* endpoint for their kind
+  (`/v1/assets`, `/v1/badges/icons`, `/v1/game-passes` at `150x150`); the `imageUrl`s are then
+  downloaded eight at a time on a worker and uploaded as textures, capped at 320 per viewer.
+  Cards paint a decoded texture or the type label - never a per-card HTTP request, which used
+  to receive JSON and draw a broken-image glyph. Zero ids are never requested.
 - **Card actions.** Click opens the catalog page; right-click offers *Open on Roblox*, *Copy
   Asset ID* and, in your own inventory, *Try On*. The full name is the hover tooltip.
 
-`vm-tests/tests/inventory.rs` covers the JSON (including badges and cursors), the private and
-429 policies and the LRU/in-flight rules without a network; `screens.rs` renders the populated
-grid and the private empty state as `inventory-*.png`.
+`vm-tests/tests/inventory.rs` covers the JSON (a real `assetId`/`assetName` page, badges,
+cursors, thumbnail batching), the private and 429 policies and the LRU/in-flight rules without
+a network; `screens.rs` renders the populated grid and the private empty state as
+`inventory-*.png`, and the navigation rail as `sidebar-*.png` (a label wider than its item box
+fails the layout check, which is the `Notificat` clipping).
 
 #### Game Charts: an endless feed (`chart_feed.rs`, `ui/page_charts.rs`)
 

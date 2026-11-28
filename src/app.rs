@@ -5242,7 +5242,9 @@ impl eframe::App for Creblox {
             let unread_notifs = self.notification_history.iter().filter(|n| !n.read).count();
             egui::Panel::left("nav")
                 .resizable(false)
-                .exact_size(78.0)
+                // Wide enough for "Notifications" at the rail's label size; 78 px clipped the
+                // last character of every long item.
+                .exact_size(92.0)
                 .show_separator_line(self.settings.glass_edition)
                 .frame(egui::Frame::new().fill(chrome_fill).inner_margin(4))
                 .show(ui, |ui| {

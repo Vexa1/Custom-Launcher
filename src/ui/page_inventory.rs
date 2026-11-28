@@ -10,21 +10,25 @@
 //!
 //! A private inventory is a terminal state: the error is cached, so the tab never retries.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
 
 use crate::inventory::{
-    Category, FetchError, InventoryItem, Page, TabCache, TabEntry, needs_fetch, thumbnails_url,
+    Category, FetchError, InventoryItem, Page, TabCache, TabEntry, ThumbKind, needs_fetch,
 };
 use crate::theme::{font_meta, pal};
 use crate::types::Action;
 
-/// New thumbnail textures a single frame may start. The grid only asks for the cards the
-/// viewport actually shows, so this caps how fast a fling can pile work onto the loader.
-pub const THUMBS_PER_FRAME: usize = 3;
+/// Thumbnails per metadata request and image batch. The grid only asks for the cards the
+/// viewport actually shows, so one `thumbnails/v1` call covers a screenful regardless of how
+/// far the inventory was scrolled.
+pub const THUMBS_PER_BATCH: usize = 24;
+/// Decoded thumbnails kept alive. Beyond this the oldest texture is dropped; scrolling back
+/// re-fetches, which is cheaper than an unbounded texture atlas on a RAM-budgeted launcher.
+pub const THUMB_TEXTURE_CAP: usize = 320;
 /// Tabs kept in memory (most recent last). One user's five tabs fit with room for a second.
 pub const TAB_CACHE_CAPACITY: usize = 8;
 
@@ -46,8 +50,14 @@ pub struct InventoryView {
     in_flight: Option<(u64, Category, bool, Receiver<FetchResult>)>,
     /// When a rate-limited tab may be tried again.
     retry_at: Option<Instant>,
-    /// Thumbnails already requested in this session, so each asset is asked for once.
-    admitted: HashSet<u64>,
+    /// Decoded thumbnails, keyed by asset id.
+    thumbs: HashMap<u64, egui::TextureHandle>,
+    /// Ids already requested (in flight, done or failed): an asset is asked for once.
+    thumb_requested: HashSet<u64>,
+    /// Insertion order, so the texture cap can drop the oldest one.
+    thumb_order: Vec<u64>,
+    /// The thumbnail batch in flight, if any.
+    thumb_rx: Option<Receiver<Vec<(u64, egui::ColorImage)>>>,
     cookie: Option<String>,
     pub open: bool,
 }
@@ -62,9 +72,80 @@ impl InventoryView {
             cache: TabCache::new(TAB_CACHE_CAPACITY),
             in_flight: None,
             retry_at: None,
-            admitted: HashSet::new(),
+            thumbs: HashMap::new(),
+            thumb_requested: HashSet::new(),
+            thumb_order: Vec::new(),
+            thumb_rx: None,
             cookie,
             open: true,
+        }
+    }
+
+    /// Uploads the thumbnails a worker finished decoding, and keeps the atlas bounded.
+    fn poll_thumbs(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.thumb_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(batch) => {
+                for (id, image) in batch {
+                    let texture = ctx.load_texture(
+                        format!("creblox-inventory-thumb-{id}"),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    if self.thumbs.insert(id, texture).is_none() {
+                        self.thumb_order.push(id);
+                    }
+                }
+                while self.thumb_order.len() > THUMB_TEXTURE_CAP {
+                    let oldest = self.thumb_order.remove(0);
+                    self.thumbs.remove(&oldest);
+                }
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                self.thumb_rx = Some(rx);
+                ctx.request_repaint_after(Duration::from_millis(60));
+            }
+            Err(TryRecvError::Disconnected) => {}
+        }
+    }
+
+    /// Starts one thumbnail batch for the cards that are on screen right now.
+    fn request_thumbs(
+        &mut self,
+        ctx: &egui::Context,
+        visible: &[(u64, ThumbKind)],
+    ) {
+        if self.thumb_rx.is_some() {
+            return;
+        }
+        let mut batch: Vec<(u64, ThumbKind)> = Vec::new();
+        for (id, kind) in visible {
+            if *id == 0 || self.thumbs.contains_key(id) {
+                continue;
+            }
+            if !self.thumb_requested.insert(*id) {
+                continue;
+            }
+            batch.push((*id, *kind));
+            if batch.len() >= THUMBS_PER_BATCH {
+                break;
+            }
+        }
+        if batch.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("creblox-inventory-thumbs".to_string())
+            .spawn(move || {
+                let _ = tx.send(crate::api::fetch_inventory_thumbnails(batch));
+            });
+        if spawned.is_ok() {
+            self.thumb_rx = Some(rx);
+            ctx.request_repaint();
         }
     }
 
@@ -222,24 +303,31 @@ impl InventoryView {
             ctx.request_repaint_after(wait.min(Duration::from_millis(500)));
         }
 
+        self.poll_thumbs(ctx);
         let screen = ctx.input(|i| i.content_rect());
+        // The scrim belongs on the *middle* layer: above the page, strictly below this
+        // foreground modal. Painted on the foreground layer it was ordered against the modal
+        // itself, so it dimmed the inventory's own card - and every card inside it.
         ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::unique("creblox-inventory-backdrop"),
+            egui::Order::Middle,
+            egui::Id::unique("creblox-inventory-scrim"),
         ))
-        .rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(160));
+        .rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(96));
 
         let Self {
             user_name,
             is_self,
             active,
             cache,
-            admitted,
+            thumbs,
             in_flight,
             open,
             user_id,
             ..
         } = self;
+        // Cards the grid actually laid out this frame; their thumbnails are requested after
+        // the modal is built, one batch at a time.
+        let mut visible: Vec<(u64, ThumbKind)> = Vec::new();
         let key = (*user_id, *active);
         let mut tab_changed = false;
         let mut load_more = false;
@@ -310,7 +398,15 @@ impl InventoryView {
                         ui.add_space(10.0);
 
                         let entry = cache.get_mut(key);
-                        body(ui, entry, in_flight.is_some(), admitted, *is_self, &mut acts);
+                        body(
+                            ui,
+                            entry,
+                            in_flight.is_some(),
+                            thumbs,
+                            &mut visible,
+                            *is_self,
+                            &mut acts,
+                        );
 
                         if let Some(entry) = cache.get_mut(key) {
                             if !entry.complete
@@ -333,7 +429,9 @@ impl InventoryView {
 
         if close {
             *open = false;
+            return acts;
         }
+        self.request_thumbs(ctx, &visible);
         if tab_changed {
             self.start(false);
             ctx.request_repaint();
@@ -352,7 +450,8 @@ fn body(
     ui: &mut egui::Ui,
     entry: Option<&mut TabEntry>,
     loading: bool,
-    admitted: &mut HashSet<u64>,
+    thumbs: &HashMap<u64, egui::TextureHandle>,
+    visible: &mut Vec<(u64, ThumbKind)>,
     is_self: bool,
     acts: &mut Vec<Action>,
 ) {
@@ -394,7 +493,7 @@ fn body(
         }
         return;
     }
-    grid(ui, &entry.items, admitted, is_self, acts);
+    grid(ui, &entry.items, thumbs, visible, is_self, acts);
 }
 
 fn centered_note(ui: &mut egui::Ui, title: &str, detail: &str, p: &crate::theme::Palette) {
@@ -410,7 +509,8 @@ fn centered_note(ui: &mut egui::Ui, title: &str, detail: &str, p: &crate::theme:
 fn grid(
     ui: &mut egui::Ui,
     items: &[InventoryItem],
-    admitted: &mut HashSet<u64>,
+    thumbs: &HashMap<u64, egui::TextureHandle>,
+    visible: &mut Vec<(u64, ThumbKind)>,
     is_self: bool,
     acts: &mut Vec<Action>,
 ) {
@@ -418,8 +518,6 @@ fn grid(
     let columns = (((ui.available_width() + GAP) / (CARD_W + GAP)).floor() as usize).max(1);
     let rows = items.len().div_ceil(columns);
     let row_h = CARD_H + GAP;
-    let mut started = 0usize;
-    let mut pending = false;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -431,35 +529,20 @@ fn grid(
                         let Some(item) = items.get(row * columns + column) else {
                             break;
                         };
-                        // Thumbnails: visible cards only, `THUMBS_PER_FRAME` new ones a frame.
-                        if !admitted.contains(&item.id) {
-                            if started < THUMBS_PER_FRAME {
-                                admitted.insert(item.id);
-                                started += 1;
-                            } else {
-                                pending = true;
-                            }
-                        }
-                        card(ui, item, admitted.contains(&item.id), is_self, &p, acts);
+                        // Only the cards actually laid out are asked for a thumbnail.
+                        visible.push((item.id, ThumbKind::of(item)));
+                        card(ui, item, thumbs.get(&item.id), is_self, &p, acts);
                     }
                 });
                 ui.add_space(GAP);
             }
         });
-
-    if started > 0 {
-        // A texture that just started may need a frame to be ready, and `pending` cards need
-        // the next frame's budget; one repaint covers both.
-        ui.ctx().request_repaint();
-    } else if pending {
-        ui.ctx().request_repaint_after(Duration::from_millis(16));
-    }
 }
 
 fn card(
     ui: &mut egui::Ui,
     item: &InventoryItem,
-    thumb_ready: bool,
+    thumb: Option<&egui::TextureHandle>,
     is_self: bool,
     p: &crate::theme::Palette,
     acts: &mut Vec<Action>,
@@ -479,20 +562,26 @@ fn card(
                 CornerRadius::same(6),
                 p.placeholder,
             );
-            if thumb_ready {
-                if let Some(url) = thumbnails_url(&[item.id]) {
-                    egui::Image::new(url.as_str())
-                        .corner_radius(6)
-                        .paint_at(ui, rect);
+            match thumb {
+                // A decoded texture: no per-card HTTP request, no broken-image glyph.
+                Some(tex) => {
+                    ui.painter().image(
+                        tex.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
                 }
-            } else {
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "…",
-                    egui::FontId::proportional(18.0),
-                    p.muted,
-                );
+                // Not downloaded yet (or its thumbnail is unavailable): the type, quietly.
+                None => {
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        item.type_label(),
+                        egui::FontId::proportional(11.0),
+                        p.muted,
+                    );
+                }
             }
             ui.add_space(6.0);
             ui.add(

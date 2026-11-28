@@ -46,6 +46,7 @@ pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
         ("overlay", overlay),
         ("inventory", inventory),
         ("inventory-private", inventory_private),
+        ("sidebar", sidebar),
     ]
 }
 
@@ -1085,6 +1086,128 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
 }
 
 // ---------------------------------------------------------------------------
+// Left navigation rail (`src/app.rs` + `src/ui/menu.rs`)
+// ---------------------------------------------------------------------------
+
+/// Shipped widths: the `nav` panel in `app.rs` and the item box in `menu.rs`.
+const RAIL_WIDTH: f32 = 92.0;
+const NAV_ITEM_WIDTH: f32 = 84.0;
+const NAV_ITEM_HEIGHT: f32 = 58.0;
+
+/// Same rule as `menu::fitted_label_font`: the largest size at or under 11 that fits.
+fn nav_font(ui: &egui::Ui, label: &str, width: f32) -> egui::FontId {
+    let mut size = 11.0f32;
+    loop {
+        let font = egui::FontId::proportional(size);
+        let measured = ui
+            .ctx()
+            .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), TEXT))
+            .size()
+            .x;
+        if measured <= width || size <= 8.5 {
+            return font;
+        }
+        size -= 0.5;
+    }
+}
+
+/// The navigation rail next to a page. A label wider than its item box is the clipping bug
+/// that shipped (`Notificat`, `Profil`), and the layout check fails on it.
+pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
+    let screen = ui.ctx().viewport_rect();
+    ui.painter()
+        .rect_filled(screen, CornerRadius::ZERO, BG);
+
+    let rail = egui::Rect::from_min_size(screen.min, Vec2::new(RAIL_WIDTH, screen.height()));
+    ui.painter()
+        .rect_filled(rail, CornerRadius::ZERO, CARD);
+    probe.widget("nav.rail", rail, false);
+
+    let items = [
+        ("Home", true),
+        ("Charts", false),
+        ("Profile", false),
+        ("Avatar", false),
+        ("Notifications", false),
+        ("Settings", false),
+    ];
+    let mut y = screen.min.y + 10.0;
+    for (i, (label, selected)) in items.iter().enumerate() {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(screen.min.x, y),
+            Vec2::new(NAV_ITEM_WIDTH, NAV_ITEM_HEIGHT),
+        );
+        if *selected {
+            ui.painter()
+                .rect_filled(rect.shrink(3.0), CornerRadius::same(10), SELECTED);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + 2.0, rect.center().y - 11.0),
+                    egui::pos2(rect.left() + 5.0, rect.center().y + 11.0),
+                ),
+                CornerRadius::same(2),
+                GREEN,
+            );
+        }
+        // The shipped rail paints a 20 px icon here; the slot is what the layout needs.
+        let icon = egui::Rect::from_center_size(
+            rect.center() - Vec2::new(0.0, 8.0),
+            Vec2::splat(20.0),
+        );
+        ui.painter().rect_filled(
+            icon,
+            CornerRadius::same(5),
+            if *selected { HOVER } else { SURFACE },
+        );
+        let font = nav_font(ui, label, rect.width() - 6.0);
+        let color = if *selected { TEXT } else { MUTED };
+        let measured = ui
+            .ctx()
+            .fonts_mut(|f| f.layout_no_wrap((*label).to_owned(), font.clone(), color))
+            .size();
+        ui.painter().text(
+            rect.center() + Vec2::new(0.0, 15.0),
+            egui::Align2::CENTER_CENTER,
+            *label,
+            font,
+            color,
+        );
+        probe.text(
+            format!("nav.label.{i}"),
+            egui::Rect::from_center_size(
+                egui::pos2(rect.center().x, rect.center().y + 15.0),
+                Vec2::new(NAV_ITEM_WIDTH - 6.0, measured.y),
+            ),
+            measured,
+        );
+        probe.contrast(format!("nav.label.{i}"), color, CARD);
+        probe.widget(format!("nav.item.{i}"), rect, true);
+        y += NAV_ITEM_HEIGHT;
+    }
+
+    // A page beside the rail, so the screenshot shows the rail against real content.
+    let page = egui::Rect::from_min_max(
+        egui::pos2(rail.right() + 24.0, screen.top() + 24.0),
+        egui::pos2(screen.right() - 24.0, screen.bottom() - 24.0),
+    );
+    ui.painter()
+        .rect_filled(page, CornerRadius::same(RADIUS), CARD);
+    probe.widget("page.content", page, false);
+    probe.text(
+        "page.title",
+        egui::Rect::from_min_size(page.min + Vec2::new(20.0, 20.0), Vec2::new(220.0, 22.0)),
+        Vec2::new(64.0, 20.0),
+    );
+    ui.painter().text(
+        page.min + Vec2::new(20.0, 30.0),
+        egui::Align2::LEFT_CENTER,
+        "Home",
+        egui::FontId::proportional(18.0),
+        TEXT,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Player Inventory Viewer (`src/ui/page_inventory.rs`)
 // ---------------------------------------------------------------------------
 
@@ -1203,8 +1326,9 @@ pub fn inventory(ui: &mut egui::Ui, probe: &mut Probe) {
     });
 }
 
-/// One card: thumbnail slot, name, type badge. The real card paints the 150 px thumbnail
-/// once its texture is admitted; the fixture keeps the same slot with a placeholder.
+/// One card: thumbnail slot, name, type badge. The real card paints a decoded 150 px texture
+/// and falls back to the type label while one is on its way; the fixture stands in for the
+/// texture with a two-tone tile, because it cannot reach Roblox.
 fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, kind: &str) {
     let frame = egui::Frame::new()
         .fill(SURFACE)
@@ -1217,11 +1341,43 @@ fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, 
             let (thumb, _) = ui.allocate_exact_size(Vec2::splat(108.0), egui::Sense::hover());
             ui.painter()
                 .rect_filled(thumb, CornerRadius::same(6), HOVER);
-            ui.painter().circle_filled(
-                thumb.center(),
-                16.0,
-                Color32::from_rgb(0x2E, 0x34, 0x44),
-            );
+            if idx % 7 == 6 {
+                // Not downloaded yet: the real card shows the type label here, never an icon.
+                ui.painter().text(
+                    thumb.center(),
+                    egui::Align2::CENTER_CENTER,
+                    kind,
+                    egui::FontId::proportional(11.0),
+                    MUTED,
+                );
+            } else {
+                // Stand-in for the decoded thumbnail: a soft two-tone tile.
+                let tint = match idx % 5 {
+                    0 => BLUE,
+                    1 => GREEN,
+                    2 => ORANGE,
+                    3 => RED,
+                    _ => RAIL,
+                };
+                ui.painter().rect_filled(
+                    thumb.shrink(6.0),
+                    CornerRadius::same(5),
+                    Color32::from_rgb(0x24, 0x2A, 0x38),
+                );
+                ui.painter().circle_filled(
+                    thumb.center() - Vec2::new(0.0, 8.0),
+                    30.0,
+                    tint.gamma_multiply(0.55),
+                );
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(
+                        thumb.center() + Vec2::new(0.0, 30.0),
+                        Vec2::new(64.0, 10.0),
+                    ),
+                    CornerRadius::same(3),
+                    Color32::from_rgb(0x36, 0x3D, 0x4E),
+                );
+            }
             probe.widget(format!("inventory.card.{idx}.thumb"), thumb, false);
             ui.add_space(6.0);
             probe.label(

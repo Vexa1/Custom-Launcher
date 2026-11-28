@@ -5,8 +5,9 @@
 //! retry loop against a private inventory.
 
 use creblox_vm_tests::inventory::{
-    Category, FetchError, InventoryItem, Page, TabCache, TabEntry, classify_error, inventory_url,
-    needs_fetch, parse_badges, parse_inventory, thumbnails_url, type_label,
+    Category, FetchError, InventoryItem, Page, TabCache, TabEntry, ThumbKind, classify_error,
+    inventory_url, needs_fetch, parse_badges, parse_inventory, parse_thumbnail_batch,
+    thumbnail_batch_url, type_label,
 };
 
 fn sample_page() -> serde_json::Value {
@@ -153,5 +154,108 @@ fn a_second_page_appends_to_the_tab_in_the_cache() {
     assert!(page.complete);
     assert_eq!(type_label(79), "DYNAMIC HEAD");
     assert_eq!(type_label(61), "EMOTE");
-    assert!(thumbnails_url(&[1, 2]).unwrap().contains("size=150x150"));
+    assert!(
+        thumbnail_batch_url(ThumbKind::Asset, &[1, 2])
+            .unwrap()
+            .contains("size=150x150")
+    );
+}
+
+/// The payload `inventory.roblox.com/v2/users/{id}/inventory/{assetTypeId}` really returns:
+/// `assetId` and `assetName`, never `id` or `name`.
+const REAL_PAGE: &str = r#"{
+    "previousPageCursor": null,
+    "nextPageCursor": "cd9f4e13%3D",
+    "data": [
+        {
+            "userAssetId": 5512345678,
+            "assetId": 165220748,
+            "assetName": "Sparkle Time Fedora",
+            "assetType": 8,
+            "created": "2023-08-14T03:11:20.117Z",
+            "updated": "2024-01-02T09:00:00Z"
+        },
+        {
+            "userAssetId": 5512345679,
+            "assetId": 4816988581,
+            "assetName": "Brown Hair",
+            "assetType": 41,
+            "created": "2024-02-03T10:00:00Z"
+        }
+    ]
+}"#;
+
+#[test]
+fn the_real_v2_payload_yields_asset_ids_and_names() {
+    let value: serde_json::Value = serde_json::from_str(REAL_PAGE).expect("valid json");
+    let page = parse_inventory(&value, 8).expect("valid page");
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].id, 165220748, "assetId is the item id");
+    assert_eq!(page.items[0].name, "Sparkle Time Fedora", "assetName is the title");
+    assert_eq!(page.items[0].asset_type, 8);
+    assert_eq!(page.items[0].type_label(), "HAT");
+    assert_eq!(page.items[1].id, 4816988581);
+    assert_eq!(page.items[1].name, "Brown Hair");
+    assert_eq!(page.items[1].type_label(), "HAIR");
+    // Nothing may come out with the id the cards used to request (and fail to load).
+    assert!(page.items.iter().all(|item| item.id != 0));
+    assert!(page.items.iter().all(|item| !item.name.is_empty()));
+    assert_eq!(page.cursors, vec![Some("cd9f4e13%3D".to_string())]);
+}
+
+#[test]
+fn a_payload_without_any_id_is_dropped_instead_of_becoming_zero() {
+    let value = serde_json::json!({
+        "data": [
+            {"assetName": "No id at all", "assetType": 8},
+            {"assetId": 0, "assetName": "Zero id", "assetType": 8},
+            {"assetId": 77, "assetName": "Real", "assetType": 8}
+        ],
+        "nextPageCursor": null
+    });
+    let page = parse_inventory(&value, 8).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, 77);
+}
+
+#[test]
+fn thumbnails_are_batched_per_kind_and_never_ask_for_zero() {
+    let assets = thumbnail_batch_url(ThumbKind::Asset, &[10, 0, 11]).expect("url");
+    assert!(assets.starts_with("https://thumbnails.roblox.com/v1/assets?assetIds=10,11"), "{assets}");
+    assert!(assets.contains("size=150x150"), "{assets}");
+    assert!(assets.contains("isCircular=false"), "{assets}");
+    assert!(!assets.contains("assetIds=10,0"), "a zero id must be dropped: {assets}");
+    assert!(thumbnail_batch_url(ThumbKind::Asset, &[0]).is_none());
+
+    let badges = thumbnail_batch_url(ThumbKind::Badge, &[9001]).expect("url");
+    assert!(badges.contains("/v1/badges/icons?badgeIds=9001"), "{badges}");
+    let passes = thumbnail_batch_url(ThumbKind::GamePass, &[42]).expect("url");
+    assert!(passes.contains("/v1/game-passes?gamePassIds=42"), "{passes}");
+
+    // The card picks the endpoint from the item itself.
+    let badge = InventoryItem { id: 9001, name: "B".into(), asset_type: 21, is_badge: true };
+    let pass = InventoryItem { id: 42, name: "P".into(), asset_type: 34, is_badge: false };
+    let hat = InventoryItem { id: 8, name: "H".into(), asset_type: 8, is_badge: false };
+    assert_eq!(ThumbKind::of(&badge), ThumbKind::Badge);
+    assert_eq!(ThumbKind::of(&pass), ThumbKind::GamePass);
+    assert_eq!(ThumbKind::of(&hat), ThumbKind::Asset);
+}
+
+#[test]
+fn a_thumbnail_metadata_page_maps_ids_to_image_urls() {
+    let value = serde_json::json!({
+        "data": [
+            {"targetId": 10, "state": "Completed", "imageUrl": "https://tr.rbxcdn.com/a/150/150/Asset/Png"},
+            {"targetId": 11, "state": "Pending", "imageUrl": ""},
+            {"targetId": 12, "state": "Completed", "imageUrl": ""},
+            {"targetId": 0, "state": "Completed", "imageUrl": "https://tr.rbxcdn.com/zero"},
+            {"state": "Completed", "imageUrl": "https://tr.rbxcdn.com/no-id"}
+        ]
+    });
+    let pairs = parse_thumbnail_batch(&value);
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].0, 10);
+    assert!(pairs[0].1.ends_with("/Asset/Png"));
+    // A malformed payload is empty, not a panic.
+    assert!(parse_thumbnail_batch(&serde_json::json!({})).is_empty());
 }

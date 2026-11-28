@@ -17,6 +17,26 @@ pub fn nav_item(ui: &mut egui::Ui, icon: NavIcon, label: &str, selected: bool) -
     nav_item_badged(ui, icon, label, selected, 0, false)
 }
 
+/// The largest label size that draws `label` inside `width` points.
+///
+/// The rail used to switch a long label to a smaller fixed size and still clip it ("Notificat")
+/// and "Profil", because the size was guessed from the character count rather than measured.
+fn fitted_label_font(ui: &egui::Ui, label: &str, width: f32) -> egui::FontId {
+    let mut size = 11.0f32;
+    loop {
+        let font = egui::FontId::proportional(size);
+        let measured = ui
+            .ctx()
+            .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), egui::Color32::WHITE))
+            .size()
+            .x;
+        if measured <= width || size <= 8.5 {
+            return font;
+        }
+        size -= 0.5;
+    }
+}
+
 pub fn nav_item_badged(
     ui: &mut egui::Ui,
     icon: NavIcon,
@@ -26,7 +46,7 @@ pub fn nav_item_badged(
     silent: bool,
 ) -> bool {
     let p = pal(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(70.0, 58.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(84.0, 58.0), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let id = ui.scope_id().with(("nav_item", label));
     let hover_t = ui.ctx().animate_bool(id.with("hover"), resp.hovered());
@@ -73,12 +93,12 @@ pub fn nav_item_badged(
         let badge_c = if silent { p.muted } else { GREEN };
         ui.painter().circle_filled(dot_pos, 4.0, badge_c);
     }
-    let font_size = if label.len() > 9 { 9.5 } else { 11.0 };
+    let font = fitted_label_font(ui, label, rect.width() - 6.0);
     ui.painter().text(
         rect.center() + egui::vec2(0.0, 15.0 - lift * 0.35),
         egui::Align2::CENTER_CENTER,
         label,
-        egui::FontId::proportional(font_size),
+        font,
         color,
     );
     resp.clicked()

@@ -166,20 +166,78 @@ pub fn badges_url(user_id: u64, cursor: Option<&str>) -> String {
     url
 }
 
-/// The thumbnail request for a batch of assets, `150x150` as the grid draws them.
-pub fn thumbnails_url(ids: &[u64]) -> Option<String> {
-    if ids.is_empty() {
+/// Which thumbnail endpoint a card asks.
+///
+/// Badges and game passes are not assets: they have their own icon endpoints, and asking the
+/// asset endpoint for their ids returns an empty `data` array - which the card then drew as a
+/// failed image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ThumbKind {
+    Asset,
+    Badge,
+    GamePass,
+}
+
+impl ThumbKind {
+    pub fn of(item: &InventoryItem) -> ThumbKind {
+        if item.is_badge {
+            ThumbKind::Badge
+        } else if item.asset_type == 34 {
+            ThumbKind::GamePass
+        } else {
+            ThumbKind::Asset
+        }
+    }
+}
+
+/// The `150x150` thumbnail *metadata* request for a batch of ids.
+///
+/// This is the endpoint that answers with `{"data":[{"targetId":…,"imageUrl":…}]}`, not an
+/// image; [`parse_thumbnail_batch`] reads it and the caller downloads the `imageUrl`s. Ids of
+/// `0` are dropped: an unparsed item used to be requested as `assetId=0`, so every one of them
+/// came back as a failed image (the red warning glyph on the card).
+pub fn thumbnail_batch_url(kind: ThumbKind, ids: &[u64]) -> Option<String> {
+    let list: Vec<String> = ids
+        .iter()
+        .copied()
+        .filter(|id| *id != 0)
+        .take(50)
+        .map(|id| id.to_string())
+        .collect();
+    if list.is_empty() {
         return None;
     }
-    let list = ids
-        .iter()
-        .take(50)
-        .map(u64::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    Some(format!(
-        "https://thumbnails.roblox.com/v1/assets?assetIds={list}&size=150x150&format=Png&isCircular=false"
-    ))
+    let list = list.join(",");
+    let base = match kind {
+        ThumbKind::Asset => format!("https://thumbnails.roblox.com/v1/assets?assetIds={list}"),
+        ThumbKind::Badge => format!("https://thumbnails.roblox.com/v1/badges/icons?badgeIds={list}"),
+        ThumbKind::GamePass => {
+            format!("https://thumbnails.roblox.com/v1/game-passes?gamePassIds={list}")
+        }
+    };
+    Some(format!("{base}&size=150x150&format=Png&isCircular=false"))
+}
+
+/// Reads a thumbnail metadata response into `(id, image url)` pairs.
+///
+/// Entries still rendering (`state != "Completed"`) and entries without a URL are skipped, so
+/// the caller never tries to download an empty string.
+pub fn parse_thumbnail_batch(v: &Value) -> Vec<(u64, String)> {
+    v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            if let Some(state) = entry["state"].as_str() {
+                if !state.eq_ignore_ascii_case("completed") {
+                    return None;
+                }
+            }
+            let id = entry["targetId"].as_u64().filter(|id| *id != 0)?;
+            let url = entry["imageUrl"].as_str().filter(|u| !u.trim().is_empty())?;
+            Some((id, url.to_string()))
+        })
+        .collect()
 }
 
 /// Percent-encodes a cursor for the query string (cursors can carry `+`, `/`, `=`).
@@ -215,20 +273,42 @@ pub fn classify_error(status: u16, body: &str) -> FetchError {
 
 /// Parses one inventory page. `asset_type` is the type that was requested, used when the
 /// payload leaves it out.
+///
+/// `inventory.roblox.com/v2` names an item `assetId` / `assetName`, while the badges and game
+/// pass endpoints use `id` / `name`; both spellings are accepted here. The old parser only knew
+/// `name`, so every real card came out unnamed, and an item without `assetId` fell through to
+/// `id` - which on this endpoint is absent, giving id 0 and a doomed thumbnail request.
 pub fn parse_inventory(v: &Value, asset_type: u32) -> Result<Page, FetchError> {
     let data = v["data"]
         .as_array()
         .ok_or_else(|| FetchError::Other("unexpected inventory response".to_string()))?;
     let mut items = Vec::with_capacity(data.len());
     for item in data {
-        let Some(id) = item["assetId"].as_u64().or_else(|| item["id"].as_u64()) else {
+        let Some(id) = item["assetId"]
+            .as_u64()
+            .or_else(|| item["id"].as_u64())
+            .or_else(|| item["userAssetId"].as_u64())
+            .filter(|id| *id != 0)
+        else {
             continue;
         };
+        let name = item["assetName"]
+            .as_str()
+            .or_else(|| item["name"].as_str())
+            .or_else(|| item["displayName"].as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         items.push(InventoryItem {
             id,
-            name: item["name"].as_str().unwrap_or_default().to_string(),
+            name: if name.is_empty() {
+                format!("Item {id}")
+            } else {
+                name
+            },
             asset_type: item["assetType"]
                 .as_u64()
+                .or_else(|| item["assetTypeId"].as_u64())
                 .and_then(|t| u32::try_from(t).ok())
                 .unwrap_or(asset_type),
             is_badge: false,
@@ -249,9 +329,20 @@ pub fn parse_badges(v: &Value) -> Result<Page, FetchError> {
     let items = data
         .iter()
         .filter_map(|badge| {
+            let id = badge["id"].as_u64().filter(|id| *id != 0)?;
+            let name = badge["name"]
+                .as_str()
+                .or_else(|| badge["displayName"].as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             Some(InventoryItem {
-                id: badge["id"].as_u64()?,
-                name: badge["name"].as_str().unwrap_or_default().to_string(),
+                id,
+                name: if name.is_empty() {
+                    format!("Badge {id}")
+                } else {
+                    name
+                },
                 asset_type: 21,
                 is_badge: true,
             })
@@ -362,9 +453,11 @@ mod tests {
 
     #[test]
     fn thumbnails_are_requested_at_150() {
-        let url = thumbnails_url(&[1, 2, 3]).expect("url");
+        let url = thumbnail_batch_url(ThumbKind::Asset, &[1, 2, 3]).expect("url");
         assert!(url.contains("assetIds=1,2,3"), "{url}");
         assert!(url.contains("size=150x150"), "{url}");
-        assert!(thumbnails_url(&[]).is_none());
+        assert!(thumbnail_batch_url(ThumbKind::Asset, &[]).is_none());
+        // A zero id is never requested.
+        assert!(thumbnail_batch_url(ThumbKind::Asset, &[0, 0]).is_none());
     }
 }
