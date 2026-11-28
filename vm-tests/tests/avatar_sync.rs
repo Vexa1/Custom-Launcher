@@ -61,11 +61,12 @@ fn rapid_clicks_coalesce_into_one_request_after_the_debounce() {
     sync.toggle(&shirt, now + Duration::from_millis(60));
     sync.toggle(&hat, now + Duration::from_millis(120));
 
-    // Still inside the 300–400 ms window: nothing is sent yet.
+    // Still inside the debounce window: nothing is sent yet.
     assert!(sync
         .take_request(now + Duration::from_millis(200))
         .is_none());
-    assert_eq!(EQUIP_DEBOUNCE, Duration::from_millis(350));
+    // The save is a background concern, so its wait is only about coalescing clicks.
+    assert_eq!(EQUIP_DEBOUNCE, Duration::from_millis(400));
 
     let (revision, assets) = sync
         .take_request(now + Duration::from_millis(120) + EQUIP_DEBOUNCE)

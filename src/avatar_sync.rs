@@ -128,8 +128,11 @@ pub fn compute_toggled_assets(
     (next, true)
 }
 
-/// How long the editor waits after the last click before sending one request.
-pub const EQUIP_DEBOUNCE: Duration = Duration::from_millis(350);
+/// How long the editor waits after the last click before sending one *background* request.
+///
+/// Nothing the user sees waits for it: the 3D viewport is already showing the click, and the
+/// request is a silent save that never triggers a re-render of the composite.
+pub const EQUIP_DEBOUNCE: Duration = Duration::from_millis(400);
 
 /// The editor's equip state machine.
 #[derive(Debug, Default)]

@@ -1147,3 +1147,135 @@ impl AnimPlayer {
         }
     }
 }
+/// A compact island id per triangle: two triangles that share an OBJ vertex are in the same
+/// island, so accessories and body parts separate even though the file names nothing.
+pub fn island_ids(tri_verts: &[[u32; 3]]) -> Vec<u32> {
+    let count = tri_verts.len();
+    let mut parent: Vec<usize> = (0..count).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (t, verts) in tri_verts.iter().enumerate() {
+        for &v in verts {
+            if v == u32::MAX {
+                continue;
+            }
+            match owner.get(&v) {
+                Some(&first) => {
+                    let a = root(&mut parent, first);
+                    let b = root(&mut parent, t);
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+                None => {
+                    owner.insert(v, t);
+                }
+            }
+        }
+    }
+    // Compact the roots so an id is dense and stable (and cheap to bucket).
+    let mut compact: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(count);
+    for t in 0..count {
+        let r = root(&mut parent, t);
+        let next = compact.len() as u32;
+        out.push(*compact.entry(r).or_insert(next));
+    }
+    out
+}
+
+/// Which triangles belong to an item worn on top of the body rather than to the body itself.
+///
+/// Roblox renders "the avatar" as one composite: the body plus every worn item, with no asset
+/// ids anywhere in the file. The geometry still separates: in a composite each rig part of the
+/// body is one island, so when a part carries several islands the body's own is the one with
+/// the largest bounding volume and the rest are what the user put on it.
+///
+/// This is a heuristic, so callers must treat the result as "probably the item" and check that
+/// what they extracted is small relative to the whole render before drawing it. An empty mask
+/// (one island per part) means the split found nothing and the composite should be kept whole.
+pub fn accessory_triangle_mask(parts: &[Part], islands: &[u32], tri_pos: &[[[f32; 3]; 3]]) -> Vec<bool> {
+    let count = parts.len();
+    let mut out = vec![false; count];
+    if count == 0 || islands.len() != count || tri_pos.len() != count {
+        return out;
+    }
+    // Bounding volume per island: the body's part encloses more space than the item sitting on
+    // it, which separates a head from a hat even when the hat is the denser mesh.
+    let mut volume: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+    let mut tris: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let mut bounds: std::collections::HashMap<u32, ([f32; 3], [f32; 3])> =
+        std::collections::HashMap::new();
+    let mut island_parts: std::collections::HashMap<u32, std::collections::HashSet<u8>> =
+        std::collections::HashMap::new();
+    for i in 0..count {
+        let island = islands[i];
+        island_parts
+            .entry(island)
+            .or_default()
+            .insert(parts[i].index() as u8);
+        let entry = bounds
+            .entry(island)
+            .or_insert(([f32::MAX; 3], [f32::MIN; 3]));
+        for p in &tri_pos[i] {
+            for a in 0..3 {
+                entry.0[a] = entry.0[a].min(p[a]);
+                entry.1[a] = entry.1[a].max(p[a]);
+            }
+        }
+        *tris.entry(island).or_insert(0) += 1;
+    }
+    for (island, (min, max)) in &bounds {
+        let size = [
+            (max[0] - min[0]).max(0.0),
+            (max[1] - min[1]).max(0.0),
+            (max[2] - min[2]).max(0.0),
+        ];
+        volume.insert(*island, size[0] * size[1] * size[2]);
+    }
+    // An island covering several parts is the torso (or a welded whole body): it is the body,
+    // never an accessory, because a body part cannot be shoulder-height *and* waist-height.
+    let spans = |island: u32| island_parts.get(&island).map_or(0, |p| p.len()) > 1;
+
+    let mut body: std::collections::HashMap<u8, u32> = std::collections::HashMap::new();
+    for island in bounds.keys().copied() {
+        if spans(island) {
+            continue;
+        }
+        let part = *island_parts
+            .get(&island)
+            .and_then(|p| p.iter().next())
+            .unwrap_or(&0);
+        // A part's islands are a small set; the body's is the largest by volume, then by
+        // triangle count, then the lowest id so the split is deterministic.
+        let better = match body.get(&part) {
+            None => true,
+            Some(current) => {
+                let v = volume.get(&island).copied().unwrap_or(0.0);
+                let cv = volume.get(current).copied().unwrap_or(0.0);
+                let t = tris.get(&island).copied().unwrap_or(0);
+                let ct = tris.get(current).copied().unwrap_or(0);
+                (v, t) > (cv, ct) || ((v, t) == (cv, ct) && island < *current)
+            }
+        };
+        if better {
+            body.insert(part, island);
+        }
+    }
+    for i in 0..count {
+        let part = parts[i].index() as u8;
+        out[i] = match body.get(&part) {
+            Some(body_island) => *body_island != islands[i],
+            // A part with no single-island body of its own (the welded torso) has nothing to
+            // compare against, so its geometry stays with the body.
+            None => false,
+        };
+    }
+    out
+}

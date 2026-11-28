@@ -906,6 +906,9 @@ pub enum Action {
     RefreshAvatarTab(AvatarTab),
     LoadMoreAvatarTab(AvatarTab),
     ToggleWearAsset(AvatarAsset),
+    /// The pointer is resting on this item: fetch its 3D mesh now, so clicking it does not
+    /// have to wait for the download.
+    PrefetchWearAsset(u64),
     UnequipAccessories,
     WearOutfit(OutfitItem),
     SaveOutfit(String),
@@ -984,6 +987,12 @@ pub enum Msg {
         u64,
         Result<(avatar_3d::Avatar3DModel, Vec<avatar_3d::LoadedTexture>), String>,
     ),
+    /// One item's own 3D mesh arrived (or never will), fetched on its own instead of waiting
+    /// for the whole avatar to be re-rendered by Roblox.
+    AvatarAssetMesh(u64, Result<avatar_3d::OverlayMesh, String>),
+    /// The texture hashes of one worn item's render, used to find that item's triangles in
+    /// the avatar composite.
+    AvatarAssetTextures(u64, Result<Vec<String>, String>),
     AuthSession(Result<(Profile, Vec<User>), String>),
     QuickLoginCreated {
         code: String,

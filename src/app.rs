@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::*;
 use crate::auth::*;
-use crate::avatar_3d::{Avatar3DState, load_avatar_3d_data_ex};
+use crate::avatar_3d::{
+    fetch_asset_overlay, fetch_asset_texture_hashes, load_avatar_3d_data_ex, Avatar3DState,
+};
 use crate::discord_rpc::{DiscordActivity, DiscordRpcClient, DiscordRpcConfig};
 use crate::fastflags::{FastFlagsConfig, load_fastflags, save_fastflags, sync_client_fastflags};
 use crate::roblox_process::*;
@@ -1162,6 +1164,76 @@ impl Creblox {
                 apply_avatar_assets(uid, &cookie, &assets, "Avatar updated.".to_string()),
             )
         });
+    }
+
+    /// Makes the 3D viewport match the worn set on this frame.
+    ///
+    /// The composite and its per-asset groups are already in memory, so hiding an item is a
+    /// visibility flip, and so is showing one that the composite already contains. Items the
+    /// composite has never had are fetched one at a time - the texture list that splits the
+    /// composite by asset, and the item's own mesh - and appear the moment they arrive.
+    /// Nothing here waits for `set-wearing-assets` and nothing here reloads the composite.
+    pub fn refresh_avatar_scene(&mut self) {
+        let worn: Vec<u64> = self
+            .avatar_sync
+            .desired
+            .iter()
+            .filter(|a| {
+                let kind = if a.asset_type_id != 0 {
+                    a.asset_type_id
+                } else {
+                    crate::avatar_sync::asset_type_id_from_name(&a.asset_type_name)
+                };
+                // Animations, emotes and body-scale entries are not geometry; an item whose
+                // type could not be named is still worth a look, so it is included.
+                kind == 0 || crate::avatar_scene::is_worn_geometry(kind)
+            })
+            .map(|a| a.id)
+            .filter(|id| *id != 0)
+            .collect();
+        let changed = self.avatar_3d.scene.apply_worn(&worn);
+
+        // One mesh request per item the viewport has not decoded yet, started on the click
+        // that wore it (or earlier, when the pointer rested on its card).
+        let decoded: std::collections::HashSet<u64> =
+            self.avatar_3d.overlays.keys().copied().collect();
+        for id in self.avatar_3d.scene.queue(|id| decoded.contains(&id)) {
+            self.spawn(move || Msg::AvatarAssetMesh(id, fetch_asset_overlay(id)));
+        }
+
+        // Which materials of the composite belong to which item. One small manifest per worn
+        // item, once per session; without it the composite stays whole under `BASE`.
+        for id in worn {
+            if self.avatar_3d.asset_textures.contains_key(&id) {
+                continue;
+            }
+            self.avatar_3d.asset_textures.insert(id, Vec::new());
+            self.spawn(move || Msg::AvatarAssetTextures(id, fetch_asset_texture_hashes(id)));
+        }
+
+        debug_assert_eq!(
+            self.avatar_3d.scene.base_reloads, 0,
+            "equipping an item must never re-render the composite"
+        );
+        if changed {
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// Splits the composite by asset: a material whose texture belongs to a worn item is that
+    /// item's group. Re-run whenever a texture set arrives or a new model is adopted.
+    fn refresh_material_owners(&mut self) {
+        let Some(model) = self.avatar_3d.model.as_ref() else {
+            return;
+        };
+        let owners = crate::avatar_scene::owners_from_textures(
+            &model.texture_hashes,
+            &self.avatar_3d.asset_textures,
+        );
+        if owners != self.avatar_3d.material_owners {
+            self.avatar_3d.material_owners = owners;
+            self.ctx.request_repaint();
+        }
     }
 
     pub fn load_avatar_3d(&mut self) {
@@ -2376,6 +2448,10 @@ impl Creblox {
                             let wearing = state.wearing.clone();
                             self.avatar_state = Some(state);
                             self.avatar_sync.seed(&wearing);
+                            // The composite arrives without a map of which item owns which
+                            // triangles; ask for the worn items' texture sets up front so the
+                            // first unequip is already local.
+                            self.refresh_avatar_scene();
                             if !palette.is_empty() {
                                 self.avatar_palette = palette;
                             }
@@ -2468,6 +2544,7 @@ impl Creblox {
                                 self.avatar_state = Some(state);
                                 self.avatar_sync.seed(&wearing);
                                 self.avatar_err = None;
+                                self.refresh_avatar_scene();
                             }
                             if let Some(prof) = &mut self.me {
                                 if !avatar_url.is_empty() {
@@ -2530,9 +2607,10 @@ impl Creblox {
                                 }
                                 self.avatar_err = None;
                                 self.status = note;
-                                self.avatar_3d.loaded_user_id = None;
-                                self.avatar_3d.expect_change = true;
-                                self.load_avatar_3d();
+                                // The save landed, but the viewport has been showing this
+                                // look since the click: it is never re-rendered for it, so
+                                // the equip costs no composite download at all.
+                                self.refresh_avatar_scene();
                             }
                         }
                         Err(e) => {
@@ -2548,6 +2626,9 @@ impl Creblox {
                                 }
                                 self.avatar_err = None;
                                 self.status = "Avatar change reverted.".to_string();
+                                // Roll the viewport back with the set: the geometry was only
+                                // hidden, so the item reappears without a reload.
+                                self.refresh_avatar_scene();
                                 let body = self
                                     .avatar_sync
                                     .take_error()
@@ -2584,6 +2665,8 @@ impl Creblox {
                             self.avatar_3d.loaded_user_id = Some(uid);
                             self.avatar_3d.model = Some(model);
                             self.avatar_3d.err = None;
+                            // A new composite: find each worn item's groups in it again.
+                            self.refresh_material_owners();
                             // Already decoded on the loader thread; queued here so the
                             // whole set is adopted a couple of textures at a time rather
                             // than landing in this one frame.
@@ -2597,6 +2680,38 @@ impl Creblox {
                     if run_again {
                         self.avatar_3d.expect_change = true;
                         self.load_avatar_3d();
+                    }
+                }
+                Msg::AvatarAssetMesh(id, r) => {
+                    if !logged_in {
+                        continue;
+                    }
+                    match r {
+                        Ok(mesh) => {
+                            // Decoded off the UI thread: showing it is a visibility flip on
+                            // this very frame.
+                            let asset_id = mesh.asset_id;
+                            self.avatar_3d.overlays.insert(asset_id, mesh);
+                            self.avatar_3d.scene.mesh_ready(asset_id);
+                        }
+                        Err(_) => {
+                            // No mesh of its own (or no preview yet). The item still shows
+                            // with the next composite render; it is never asked for again,
+                            // so a failing item cannot spin.
+                            self.avatar_3d.scene.mesh_unavailable(id);
+                        }
+                    }
+                    self.ctx.request_repaint();
+                }
+                Msg::AvatarAssetTextures(id, r) => {
+                    if !logged_in {
+                        continue;
+                    }
+                    let hashes = r.unwrap_or_default();
+                    if !hashes.is_empty() {
+                        self.avatar_3d.asset_textures.insert(id, hashes);
+                        self.refresh_material_owners();
+                        self.ctx.request_repaint();
                     }
                 }
                 Msg::AuthSession(r) => {
@@ -5959,6 +6074,10 @@ impl eframe::App for Creblox {
                         st.wearing = wearing;
                     }
                     self.avatar_err = None;
+                    // The viewport follows the click on this frame: a worn item is hidden and
+                    // an unworn one is shown from memory, its own mesh, or - for an item this
+                    // session has never drawn - as soon as that mesh lands.
+                    self.refresh_avatar_scene();
                     // Animation items preview immediately on the 3D avatar, on top of the
                     // normal equip sync.
                     if let Some(kind) = crate::avatar_anim::AnimationKind::from_asset(
@@ -5977,6 +6096,16 @@ impl eframe::App for Creblox {
                     self.ctx
                         .request_repaint_after(crate::avatar_sync::EQUIP_DEBOUNCE);
                 }
+                Action::PrefetchWearAsset(id) => {
+                    // Hovering a card starts its mesh download, so the click is instant. One
+                    // request per item: the scene remembers what is cached, on its way, or
+                    // has no mesh at all.
+                    if id != 0 && self.avatar_3d.scene.prefetch(id) {
+                        self.spawn(move || {
+                            Msg::AvatarAssetMesh(id, fetch_asset_overlay(id))
+                        });
+                    }
+                }
                 Action::UnequipAccessories => {
                     self.avatar_sync.retain_where(
                         |a| !matches!(a.asset_type_id, 8 | 41..=47),
@@ -5987,6 +6116,7 @@ impl eframe::App for Creblox {
                         st.wearing = wearing;
                     }
                     self.avatar_err = None;
+                    self.refresh_avatar_scene();
                     self.status = "Removed hats & accessories.".to_string();
                     self.ctx
                         .request_repaint_after(crate::avatar_sync::EQUIP_DEBOUNCE);

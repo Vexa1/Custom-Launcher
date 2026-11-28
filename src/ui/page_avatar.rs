@@ -155,6 +155,9 @@ fn avatar_assets_grid(
                 // fling cards sweep past and neither the cursor nor a tooltip means anything.
                 if resp.hovered() && !flinging {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    // Warm the item's mesh while the pointer rests here: by the time it is
+                    // clicked the download is usually done, so the equip is instant.
+                    acts.push(Action::PrefetchWearAsset(item.id));
                     let tip = if is_worn {
                         format!("Click to unequip {}", item.name)
                     } else {

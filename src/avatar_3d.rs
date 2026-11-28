@@ -3,9 +3,12 @@
 
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use crate::avatar_anim::{
-    classify_triangles, AnimPlayer, AnimationKind, Part, PartCounts, Pose, Skeleton, PART_COUNT,
+    accessory_triangle_mask, classify_triangles, island_ids, AnimPlayer, AnimationKind, Mat4, Part,
+    PartCounts, Pose, Skeleton, PART_COUNT,
 };
+use crate::avatar_scene::{self, Scene};
 use crate::avatar_sync::MeshStore;
+use std::collections::HashMap;
 use serde_json::Value;
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -163,6 +166,191 @@ pub fn decode_texture(hash: String, bytes: &[u8]) -> Option<LoadedTexture> {
     })
 }
 
+/// One item's own decoded mesh, ready to be drawn on top of the avatar composite.
+///
+/// `assets-thumbnail-3d` renders the item on a standard body, so [`overlay_from_model`] strips
+/// the body out and keeps only the item's islands. Positions stay in that render's own space;
+/// `origin` and `scale` map them into the same normalised space the composite is drawn in,
+/// which is what lets a hat downloaded a second ago sit on a model downloaded an hour ago.
+pub struct OverlayMesh {
+    pub asset_id: u64,
+    pub origin: [f32; 3],
+    pub scale: f32,
+    pub triangles: Vec<AvatarTriangle>,
+    pub texture_hashes: Vec<String>,
+    pub textures: Vec<LoadedTexture>,
+}
+
+/// Min and max corner over a set of triangles.
+fn model_bounds(tris: &[[[f32; 3]; 3]]) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for tri in tris {
+        for p in tri {
+            for a in 0..3 {
+                min[a] = min[a].min(p[a]);
+                max[a] = max[a].max(p[a]);
+            }
+        }
+    }
+    (min, max)
+}
+
+/// Keeps only the item's triangles from "the item worn on a standard body".
+///
+/// Each rig part of that body is a single mesh island, so whatever else is classified onto a
+/// part - a hat and a hair cap on the head, boots over the feet - is the item. Nothing is
+/// kept when the split finds no extra island, so a clothing item that merges with the body is
+/// never drawn as a second avatar.
+pub fn overlay_from_model(
+    asset_id: u64,
+    model: Avatar3DModel,
+    textures: Vec<LoadedTexture>,
+) -> Result<OverlayMesh, String> {
+    let tri_verts: Vec<[u32; 3]> = model.triangles.iter().map(|t| t.vidx).collect();
+    let islands = island_ids(&tri_verts);
+    let parts: Vec<Part> = model
+        .triangles
+        .iter()
+        .map(|t| {
+            Part::ALL
+                .get(t.part as usize)
+                .copied()
+                .unwrap_or(Part::LowerTorso)
+        })
+        .collect();
+    let tri_pos: Vec<[[f32; 3]; 3]> = model
+        .triangles
+        .iter()
+        .map(|t| [t.v[0].pos, t.v[1].pos, t.v[2].pos])
+        .collect();
+    let bounds = model_bounds(&tri_pos);
+    let mask = accessory_triangle_mask(&parts, &islands, &tri_pos);
+    let triangles: Vec<AvatarTriangle> = model
+        .triangles
+        .iter()
+        .zip(mask.iter())
+        .filter(|(_, keep)| **keep)
+        .map(|(t, _)| t.clone())
+        .collect();
+    if triangles.is_empty() {
+        return Err("this item has no mesh of its own".to_string());
+    }
+    // Guards against a mis-split: a fragment spanning most of the body, or half of the whole
+    // render, is a body part that slipped through rather than the item. Drawing that would
+    // put a second body on the avatar, so it is refused and the item waits for the composite.
+    let kept = model_bounds(
+        &triangles
+            .iter()
+            .map(|t| [t.v[0].pos, t.v[1].pos, t.v[2].pos])
+            .collect::<Vec<_>>(),
+    );
+    let full_h = (bounds.1[1] - bounds.0[1]).max(1e-4);
+    if (kept.1[1] - kept.0[1]) / full_h > 0.6 || triangles.len() * 2 > model.triangles.len() {
+        return Err("could not separate this item from the body".to_string());
+    }
+    Ok(OverlayMesh {
+        asset_id,
+        origin: model.center,
+        scale: model.scale,
+        triangles,
+        texture_hashes: model.texture_hashes,
+        textures,
+    })
+}
+
+/// The 3D preview of one asset: `assets-thumbnail-3d` reports a render URL once Roblox has
+/// drawn it. Nothing is polled: a preview that is not ready yet simply reports so, and the
+/// viewport falls back to the composite.
+fn asset_3d_manifest(asset_id: u64) -> Result<Value, String> {
+    let url = format!("https://thumbnails.roblox.com/v1/assets-thumbnail-3d?assetId={asset_id}");
+    let json: Value = ureq::get(&url)
+        .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+        .set("Referer", "https://www.roblox.com/")
+        .call()
+        .map_err(|e| format!("asset 3D API: {e}"))?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let image_url = json["imageUrl"]
+        .as_str()
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "3D preview is {} yet",
+                json["state"].as_str().unwrap_or("not ready")
+            )
+        })?;
+    let manifest: Value = ureq::get(image_url)
+        .set("User-Agent", "Mozilla/5.0")
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    Ok(manifest)
+}
+
+fn manifest_textures(manifest: &Value) -> Vec<String> {
+    manifest["textures"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The texture hashes an asset's own render uses.
+///
+/// This is how the composite is split by asset: Roblox draws each worn item with its own
+/// texture atlas, so a material whose `map_Kd` is one of these belongs to that item. One small
+/// manifest request per worn item, and unequipping it becomes a local visibility flip.
+pub fn fetch_asset_texture_hashes(asset_id: u64) -> Result<Vec<String>, String> {
+    let manifest = asset_3d_manifest(asset_id)?;
+    let hashes = manifest_textures(&manifest);
+    if hashes.is_empty() {
+        return Err("no textures in the asset render".to_string());
+    }
+    Ok(hashes)
+}
+
+/// Downloads one asset's own mesh and decodes it, ready to draw immediately.
+pub fn fetch_asset_overlay(asset_id: u64) -> Result<OverlayMesh, String> {
+    let manifest = asset_3d_manifest(asset_id)?;
+    let obj_hash = manifest["obj"]
+        .as_str()
+        .filter(|h| !h.is_empty())
+        .ok_or("no obj in the asset render")?
+        .to_string();
+    let mtl_hash = manifest["mtl"].as_str().map(|s| s.to_string());
+    let tex_hashes = manifest_textures(&manifest);
+
+    let (obj, mtl, textures) = std::thread::scope(|s| {
+        let obj_job = s.spawn(|| download_rbx_asset(&obj_hash));
+        let mtl_job = s.spawn(|| mtl_hash.as_deref().and_then(|h| download_rbx_asset(h).ok()));
+        let tex_jobs: Vec<_> = tex_hashes
+            .iter()
+            .map(|h| {
+                s.spawn(move || {
+                    download_rbx_asset(h)
+                        .ok()
+                        .and_then(|bytes| decode_texture(h.clone(), &bytes))
+                })
+            })
+            .collect();
+        let obj = obj_job.join().unwrap_or_else(|_| Err("OBJ thread failed".to_string()));
+        let mtl = mtl_job.join().unwrap_or(None);
+        let textures: Vec<LoadedTexture> = tex_jobs
+            .into_iter()
+            .filter_map(|j| j.join().ok().flatten())
+            .collect();
+        (obj, mtl, textures)
+    });
+    let model = parse_avatar_3d(&obj?, mtl.as_deref(), &tex_hashes)?;
+    overlay_from_model(asset_id, model, textures)
+}
+
 /// State container for the 3D avatar viewport
 pub struct Avatar3DState {
     pub is_3d: bool,
@@ -171,6 +359,16 @@ pub struct Avatar3DState {
     pub zoom: f32,
     pub model: Option<Avatar3DModel>,
     pub textures: Vec<LoadedTexture>,
+    /// Which asset each material of the composite belongs to (`avatar_scene::BASE` for the
+    /// body), in the model's texture order.
+    pub material_owners: Vec<u64>,
+    /// Texture hashes learned for each worn asset, used to split the composite by asset.
+    pub asset_textures: HashMap<u64, Vec<String>>,
+    /// Decoded meshes of individual items, drawn over the composite while the composite does
+    /// not have them yet. Equipping an item that is already here costs no network at all.
+    pub overlays: HashMap<u64, OverlayMesh>,
+    /// What the viewport shows, independent of the composite.
+    pub scene: Scene,
     /// Decoded textures waiting to be adopted, a couple per frame (see `scroll::adopt_budget`).
     pub pending_textures: Vec<LoadedTexture>,
     pub loading: bool,
@@ -202,6 +400,10 @@ impl Default for Avatar3DState {
             zoom: 1.0,
             model: None,
             textures: Vec::new(),
+            material_owners: Vec::new(),
+            asset_textures: HashMap::new(),
+            overlays: HashMap::new(),
+            scene: Scene::default(),
             pending_textures: Vec::new(),
             loading: false,
             err: None,
@@ -848,6 +1050,8 @@ struct RasterKey {
     obj_hash: String,
     tri_count: usize,
     anim_frame: u32,
+    /// Which asset groups are drawn and which item meshes are ready.
+    scene_stamp: u64,
     textures: Vec<(String, [usize; 2])>,
 }
 
@@ -867,6 +1071,9 @@ pub fn render_avatar_3d_mesh(
     painter: &Painter,
     model: &Avatar3DModel,
     textures: &[LoadedTexture],
+    scene: &Scene,
+    material_owners: &[u64],
+    overlays: &HashMap<u64, OverlayMesh>,
     yaw: f32,
     pitch: f32,
     zoom: f32,
@@ -912,6 +1119,9 @@ pub fn render_avatar_3d_mesh(
         obj_hash: model.obj_hash.clone(),
         tri_count: model.triangles.len(),
         anim_frame,
+        // Which groups are drawn and which item meshes are ready. An equip or unequip
+        // changes this, so the picture is redrawn on the spot - no network involved.
+        scene_stamp: scene.stamp(),
         textures: textures
             .iter()
             .map(|t| (t.hash.clone(), t.image.size))
@@ -934,7 +1144,8 @@ pub fn render_avatar_3d_mesh(
         None => {
             let started = std::time::Instant::now();
             let image = rasterize_avatar(
-                model, textures, yaw, pitch, zoom, width, height, pose, anim_frame,
+                model, textures, scene, material_owners, overlays, yaw, pitch, zoom, width, height,
+                pose, anim_frame,
             );
             if anim_frame != 0 {
                 raster_ms = Some(started.elapsed().as_secs_f32() * 1000.0);
@@ -984,58 +1195,46 @@ fn sample_texture(img: &egui::ColorImage, u: f32, v: f32) -> Color32 {
     Color32::from_rgb(c.r(), c.g(), c.b())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rasterize_avatar(
-    model: &Avatar3DModel,
-    textures: &[LoadedTexture],
-    yaw: f32,
-    pitch: f32,
-    zoom: f32,
+/// The rasteriser's target: the picture, a depth buffer and the camera.
+///
+/// Both the avatar composite and an individual item's mesh go through [`Raster::triangle`], so
+/// a separately downloaded hat is depth-tested against the body it lands on instead of being
+/// painted over it.
+struct Raster<'a> {
+    pixels: &'a mut [Color32],
+    zbuf: &'a mut [f32],
     width: usize,
     height: usize,
-    pose: &Pose,
-    anim_frame: u32,
-) -> egui::ColorImage {
-    let mut pixels = vec![Color32::TRANSPARENT; width * height];
-    let mut zbuf = vec![f32::INFINITY; width * height];
+    cx: f32,
+    cy: f32,
+    aspect_scale: f32,
+    cos_y: f32,
+    sin_y: f32,
+    cos_p: f32,
+    sin_p: f32,
+    dist: f32,
+}
 
-    let wf = width as f32;
-    let hf = height as f32;
-    let cx = wf * 0.5;
-    let cy = hf * 0.5;
-    let aspect_scale = hf * 0.49 * zoom;
-
-    let cos_y = yaw.cos();
-    let sin_y = yaw.sin();
-    let cos_p = pitch.cos();
-    let sin_p = pitch.sin();
-    let dist = 4.8f32;
-
-    // Material texture indices point into `texture_hashes`; resolve them by hash so a texture
-    // that failed to download cannot shift every later texture onto the wrong body part.
-    // Striking the pose: one hierarchical FK pass, then each triangle is carried by its limb.
-    let transforms = if anim_frame == 0 {
-        None
-    } else {
-        Some(model.skeleton.transforms(pose))
-    };
-
-    let lookup: Vec<Option<&LoadedTexture>> = model
-        .texture_hashes
-        .iter()
-        .map(|hash| textures.iter().find(|t| &t.hash == hash))
-        .collect();
-
-    for tri in &model.triangles {
+impl Raster<'_> {
+    /// Draws one triangle.
+    ///
+    /// `limb` is the animation's transform for the triangle's rig part, and `origin`/`scale`
+    /// map the triangle's own coordinates into the normalised space the camera looks at: the
+    /// composite's centre and scale for its own triangles, the item render's for an overlay.
+    fn triangle(
+        &mut self,
+        tri: &AvatarTriangle,
+        limb: Option<Mat4>,
+        origin: [f32; 3],
+        scale: f32,
+        lookup: &[Option<&LoadedTexture>],
+    ) {
+        let hf = self.height as f32;
+        let wf = self.width as f32;
         let mut screen = [Pos2::ZERO; 3];
         let mut zs = [0.0f32; 3];
         let mut persp = [0.0f32; 3];
         let mut view = [[0.0f32; 3]; 3];
-
-        let limb = transforms
-            .as_ref()
-            .and_then(|t| t.get(tri.part as usize))
-            .copied();
 
         for i in 0..3 {
             let v = &tri.v[i];
@@ -1043,18 +1242,18 @@ fn rasterize_avatar(
                 Some(m) => m.transform_point(v.pos),
                 None => v.pos,
             };
-            let px = (pos[0] - model.center[0]) * model.scale;
-            let py = (pos[1] - model.center[1]) * model.scale;
-            let pz = (pos[2] - model.center[2]) * model.scale;
+            let px = (pos[0] - origin[0]) * scale;
+            let py = (pos[1] - origin[1]) * scale;
+            let pz = (pos[2] - origin[2]) * scale;
 
-            let rx = px * cos_y + pz * sin_y;
-            let rz = -px * sin_y + pz * cos_y;
-            let fy = py * cos_p - rz * sin_p;
-            let fz = py * sin_p + rz * cos_p;
+            let rx = px * self.cos_y + pz * self.sin_y;
+            let rz = -px * self.sin_y + pz * self.cos_y;
+            let fy = py * self.cos_p - rz * self.sin_p;
+            let fz = py * self.sin_p + rz * self.cos_p;
 
-            let p = dist / (dist + fz);
-            let sx = cx + rx * p * aspect_scale;
-            let sy = cy - fy * p * aspect_scale + hf * 0.02;
+            let p = self.dist / (self.dist + fz);
+            let sx = self.cx + rx * p * self.aspect_scale;
+            let sy = self.cy - fy * p * self.aspect_scale + hf * 0.02;
 
             screen[i] = Pos2::new(sx, sy);
             zs[i] = fz;
@@ -1064,13 +1263,13 @@ fn rasterize_avatar(
 
         let total = edge_fn(screen[0], screen[1], screen[2].x, screen[2].y);
         if total.abs() < 1e-6 {
-            continue;
+            return;
         }
         // Keep the same faces the old 2D cross-product cull kept.
         let cross = (screen[1].x - screen[0].x) * (screen[2].y - screen[0].y)
             - (screen[1].y - screen[0].y) * (screen[2].x - screen[0].x);
         if cross <= 0.0 {
-            continue;
+            return;
         }
 
         let tex = tri
@@ -1099,7 +1298,7 @@ fn rasterize_avatar(
                 Some(tri.base_color)
             };
             let c = shade_studio_vertex(
-                view[i], vnormal, normal, cos_y, sin_y, cos_p, sin_p, base,
+                view[i], vnormal, normal, self.cos_y, self.sin_y, self.cos_p, self.sin_p, base,
             );
             colors[i] = [c.r() as f32, c.g() as f32, c.b() as f32];
         }
@@ -1135,12 +1334,12 @@ fn rasterize_avatar(
             .ceil()
             .min(hf - 1.0);
         if max_x < min_x || max_y < min_y {
-            continue;
+            return;
         }
 
         for y in (min_y as usize)..=(max_y as usize) {
             let py = y as f32 + 0.5;
-            let row = y * width;
+            let row = y * self.width;
             for x in (min_x as usize)..=(max_x as usize) {
                 let px = x as f32 + 0.5;
                 let e0 = edge_fn(screen[1], screen[2], px, py) / total;
@@ -1160,10 +1359,10 @@ fn rasterize_avatar(
                 }
                 let z = (i0 * zs[0] + i1 * zs[1] + i2 * zs[2]) / inv;
                 let idx = row + x;
-                if z >= zbuf[idx] {
+                if z >= self.zbuf[idx] {
                     continue;
                 }
-                zbuf[idx] = z;
+                self.zbuf[idx] = z;
 
                 let lr = (i0 * colors[0][0] + i1 * colors[1][0] + i2 * colors[2][0]) / inv;
                 let lg = (i0 * colors[0][1] + i1 * colors[1][1] + i2 * colors[2][1]) / inv;
@@ -1182,7 +1381,7 @@ fn rasterize_avatar(
                     (lr, lg, lb)
                 };
 
-                pixels[idx] = Color32::from_rgb(
+                self.pixels[idx] = Color32::from_rgb(
                     r.round().clamp(0.0, 255.0) as u8,
                     g.round().clamp(0.0, 255.0) as u8,
                     b.round().clamp(0.0, 255.0) as u8,
@@ -1190,6 +1389,98 @@ fn rasterize_avatar(
             }
         }
     }
+}
+
+/// Renders the avatar: the composite's visible groups, then any item mesh the composite does
+/// not have yet.
+///
+/// Nothing in here waits for `set-wearing-assets`: an unequip is a group that is no longer
+/// drawn, and an equip is either geometry that was already in the model or a decoded mesh the
+/// caller has in hand.
+#[allow(clippy::too_many_arguments)]
+fn rasterize_avatar(
+    model: &Avatar3DModel,
+    textures: &[LoadedTexture],
+    scene: &Scene,
+    material_owners: &[u64],
+    overlays: &HashMap<u64, OverlayMesh>,
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+    width: usize,
+    height: usize,
+    pose: &Pose,
+    anim_frame: u32,
+) -> egui::ColorImage {
+    let mut pixels = vec![Color32::TRANSPARENT; width * height];
+    let mut zbuf = vec![f32::INFINITY; width * height];
+
+    let hf = height as f32;
+    let wf = width as f32;
+    let mut raster = Raster {
+        pixels: &mut pixels,
+        zbuf: &mut zbuf,
+        width,
+        height,
+        cx: wf * 0.5,
+        cy: hf * 0.5,
+        aspect_scale: hf * 0.49 * zoom,
+        cos_y: yaw.cos(),
+        sin_y: yaw.sin(),
+        cos_p: pitch.cos(),
+        sin_p: pitch.sin(),
+        dist: 4.8,
+    };
+
+    // Striking the pose: one hierarchical FK pass, then each triangle is carried by its limb.
+    let transforms = if anim_frame == 0 {
+        None
+    } else {
+        Some(model.skeleton.transforms(pose))
+    };
+
+    // Material texture indices point into `texture_hashes`; resolve them by hash so a texture
+    // that failed to download cannot shift every later texture onto the wrong body part.
+    let lookup: Vec<Option<&LoadedTexture>> = model
+        .texture_hashes
+        .iter()
+        .map(|hash| textures.iter().find(|t| &t.hash == hash))
+        .collect();
+
+    for tri in &model.triangles {
+        // A group the user has unequipped stays in the model and is simply not drawn, which
+        // is what makes the toggle instant and keeps the geometry for a re-equip.
+        let owner = avatar_scene::triangle_owner(material_owners, tri.texture_index);
+        if !scene.shows(owner) {
+            continue;
+        }
+        let limb = transforms
+            .as_ref()
+            .and_then(|t| t.get(tri.part as usize))
+            .copied();
+        raster.triangle(tri, limb, model.center, model.scale, &lookup);
+    }
+
+    // Items this composite never had (equipped a moment ago): their own decoded mesh, drawn
+    // on the frame it became ready. The shared depth buffer sorts them against the body.
+    for (asset_id, overlay) in overlays {
+        if !scene.shows_mesh(*asset_id) {
+            continue;
+        }
+        let lookup: Vec<Option<&LoadedTexture>> = overlay
+            .texture_hashes
+            .iter()
+            .map(|hash| overlay.textures.iter().find(|t| &t.hash == hash))
+            .collect();
+        for tri in &overlay.triangles {
+            let limb = transforms
+                .as_ref()
+                .and_then(|t| t.get(tri.part as usize))
+                .copied();
+            raster.triangle(tri, limb, overlay.origin, overlay.scale, &lookup);
+        }
+    }
+    drop(raster);
 
     egui::ColorImage::new([width, height], pixels)
 }
@@ -1287,6 +1578,9 @@ pub fn render_avatar_viewport(
             &painter,
             model,
             &state.textures,
+            &state.scene,
+            &state.material_owners,
+            &state.overlays,
             state.yaw,
             state.pitch,
             state.zoom,

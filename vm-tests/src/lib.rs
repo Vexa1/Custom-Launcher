@@ -21,6 +21,9 @@ pub mod shots;
 #[path = "../../src/avatar_anim.rs"]
 pub mod avatar_anim;
 
+#[path = "../../src/avatar_scene.rs"]
+pub mod avatar_scene;
+
 #[path = "../../src/avatar_sync.rs"]
 pub mod avatar_sync;
 
