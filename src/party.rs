@@ -551,12 +551,31 @@ pub fn parse_invite(raw: &str) -> Option<PartyInvite> {
 // Wire protocol
 // ---------------------------------------------------------------------------------------
 
+/// The party size travels as a fixed 16-bit number.
+///
+/// It is a `usize` in memory, but a `usize` on the wire would make the JSON a macOS host
+/// writes depend on that process's pointer width - and a Windows guest parse it through its
+/// own. Nothing else in any frame is a platform-width integer: ids are `u64`, counts arrive
+/// as `u16`, and every string is UTF-8 JSON.
+mod wire_size {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &usize, s: S) -> Result<S::Ok, S::Error> {
+        ((*value).min(u16::MAX as usize) as u16).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+        Ok(u16::deserialize(d)? as usize)
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum WireOut {
     Join {
         code: String,
         user: PartyUser,
+        #[serde(with = "wire_size")]
         max: usize,
     },
     Leave,
@@ -591,10 +610,12 @@ enum WireIn {
     Welcome {
         code: String,
         host: u64,
+        #[serde(with = "wire_size")]
         max: usize,
     },
     Members {
         host: u64,
+        #[serde(with = "wire_size")]
         max: usize,
         members: Vec<WireMember>,
         /// Ready Check and Game Vote. An unknown key for a 0.5.5 guest, which ignores it.

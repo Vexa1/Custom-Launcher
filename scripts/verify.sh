@@ -32,6 +32,12 @@ fi
 echo "== vm-tests: stand-ins still match the launcher's types and signatures"
 cargo test --locked --manifest-path vm-tests/Cargo.toml --test stub_drift
 
+# Both shipping platforms in one room: a macOS-tagged client and a Windows-tagged client host,
+# join, sync HUD statuses and launch games over loopback. A change that only breaks one OS
+# fails here by name instead of inside the full run below.
+echo "== vm-tests: macOS <-> Windows party interoperability"
+cargo test --locked --manifest-path vm-tests/Cargo.toml --test party_cross_platform
+
 echo "== vm-tests: real party + server-hop code on this host"
 cargo test --locked --manifest-path vm-tests/Cargo.toml
 
