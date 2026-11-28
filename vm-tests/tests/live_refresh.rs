@@ -149,7 +149,7 @@ fn a_first_load_becomes_silent_once_it_has_data() {
 }
 
 #[test]
-fn a_charts_refresh_merges_ranks_in_place() {
+fn a_charts_refresh_follows_the_fresh_ranking() {
     let mut sorts = vec![
         Sort {
             title: "Top Trending".to_string(),
@@ -179,25 +179,93 @@ fn a_charts_refresh_merges_ranks_in_place() {
     ];
     let stats = live_refresh::merge_sorts(&mut sorts, fresh);
 
-    assert_eq!(sorts.len(), 3, "the new sort is appended, none disappear");
+    assert_eq!(sorts.len(), 3, "the new sort is appended, no sort disappears");
     assert_eq!(stats.updated, 2, "1 and 3 took the new numbers");
     assert_eq!(stats.added, 2, "4 and the new sort's 5 are new cards");
-    // The row on screen keeps its order, so nothing jumps while the user is reading it.
+    // A sort is a ranking: the row takes the fresh order, so ranks are not stale positions.
     assert_eq!(
         sorts[0].games.iter().map(|g| g.universe_id).collect::<Vec<_>>(),
-        vec![1, 2, 4]
+        vec![1, 4]
     );
     assert_eq!(before, vec![1, 2]);
-    assert_eq!(sorts[0].games[0].playing, 900);
+    assert!(
+        !sorts[0].games.iter().any(|g| g.universe_id == 2),
+        "a game that fell out of the ranking leaves it"
+    );
+    assert_eq!(sorts[0].games[0].playing, 900, "the row is the fresh list, numbers included");
     assert_eq!(sorts[1].games[0].playing, 330);
     assert_eq!(sorts[2].games[0].universe_id, 5);
+}
+
+#[test]
+fn a_charts_refresh_can_reverse_a_ranking() {
+    let mut sorts = vec![Sort {
+        title: "Top Trending".to_string(),
+        games: vec![game(1, 100), game(2, 200), game(3, 300)],
+    }];
+    // The same three games, now ranked the other way round.
+    let fresh = vec![Sort {
+        title: "Top Trending".to_string(),
+        games: vec![game(3, 900), game(2, 800), game(1, 700)],
+    }];
+    let cache = thumbs(&sorts[0].games);
+    let stats = live_refresh::merge_sorts(&mut sorts, fresh);
+
+    assert_eq!(
+        sorts[0].games.iter().map(|g| g.universe_id).collect::<Vec<_>>(),
+        vec![3, 2, 1],
+        "rows move when the ranking moves"
+    );
+    assert_eq!(stats.updated, 3);
+    assert_eq!(stats.added, 0);
+    // Reordering never changes an id, so every loaded texture still resolves.
+    assert_eq!(would_fetch(&cache, &sorts[0].games), Vec::<u64>::new());
+}
+
+#[test]
+fn a_refresh_never_grows_a_home_row_past_24_cards() {
+    let mut recent: Vec<Game> = (1..=24).map(|id| game(id, id)).collect();
+    let head: Vec<u64> = recent.iter().map(|g| g.universe_id).collect();
+    let cache = thumbs(&recent);
+
+    // One game left the list and a new one joined it: merging alone would make 25 cards.
+    let fresh: Vec<Game> = (1..=23).map(|id| game(id, id * 10)).chain([game(25, 250)]).collect();
+    let stats = live_refresh::apply_refresh(&mut recent, Some(fresh));
+
+    assert_eq!(
+        recent.len(),
+        live_refresh::HOME_ROW_CAP,
+        "the row is trimmed back to the size the page is laid out for"
+    );
+    assert_eq!(stats.kept, 24);
+    assert_eq!(
+        recent.iter().map(|g| g.universe_id).collect::<Vec<_>>(),
+        (1..=23).chain([25]).collect::<Vec<_>>(),
+        "the card the answer dropped is the one that goes, and the row keeps its order"
+    );
+    assert_eq!(recent[0].playing, 10, "merged numbers survive the trim");
+    // The trim drops a card, not a texture: the cache is keyed by id and still has them all.
+    for id in head {
+        assert!(cache.contains_key(&id), "texture for {id} was dropped");
+    }
+
+    // A full row plus more newcomers is still capped, and the head is untouched.
+    let mut favs: Vec<Game> = (1..=24).map(|id| game(id, id)).collect();
+    let before: Vec<u64> = favs.iter().map(|g| g.universe_id).collect();
+    let fresh: Vec<Game> = (1..=24)
+        .map(|id| game(id, id * 10))
+        .chain([game(25, 1), game(26, 2), game(27, 3)])
+        .collect();
+    live_refresh::apply_refresh(&mut favs, Some(fresh));
+    assert_eq!(favs.len(), live_refresh::HOME_ROW_CAP);
+    assert_eq!(favs.iter().map(|g| g.universe_id).collect::<Vec<_>>(), before);
 }
 
 #[test]
 fn game_details_revalidate_without_losing_the_open_game() {
     // What `open_game_details` models: the game on screen, its details, and its hero texture.
     let mut open = game(42, 500);
-    let mut details_playing = open.playing;
+    let details_playing_before = open.playing;
     let hero = thumbs(std::slice::from_ref(&open));
     let mut freshness = Freshness::default();
     freshness.succeed();
@@ -210,11 +278,12 @@ fn game_details_revalidate_without_losing_the_open_game() {
 
     // The revalidated numbers land.
     let fresh = game(42, 650);
-    details_playing = fresh.playing;
+    let details_playing = fresh.playing;
     open = fresh;
     freshness.succeed();
 
     assert_eq!(details_playing, 650);
+    assert!(details_playing > details_playing_before);
     assert_eq!(open.name, "Game 42", "identity does not change");
     assert_eq!(open.universe_id, 42);
     assert_eq!(freshness.phase(), Phase::Ready);

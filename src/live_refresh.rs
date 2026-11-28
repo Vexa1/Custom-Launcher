@@ -5,10 +5,14 @@
 //! skeleton is only for the first load of an empty page, and a refresh that comes back empty or
 //! fails leaves the visible list exactly as it was. The incoming data is merged by
 //! `universe_id`, so a card keeps its id - and therefore its cached texture - and only its
-//! numbers change.
+//! numbers change. Home rows stay at [`HOME_ROW_CAP`] cards however often they refresh, and a
+//! chart sort follows the fresh ranking rather than stale positions.
 
 use crate::types::Game;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// How many cards a Home row (Continue, Favourites) is laid out for.
+pub const HOME_ROW_CAP: usize = 24;
 
 /// What a list is doing right now, as far as drawing is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,9 +98,9 @@ pub struct MergeStats {
 /// Merges `fresh` into `old` in place, by `universe_id`.
 ///
 /// Games already on screen keep their position and take the fresh numbers (player counts,
-/// likes, formatted labels, name); ids that are new are appended. Nothing is removed, so a
+/// likes, formatted labels, name); ids that are new are appended. Nothing is removed here, so a
 /// narrower remote list never makes cards disappear, and no card changes id - which is what
-/// keeps its thumbnail texture.
+/// keeps its thumbnail texture. The Home rows are capped afterwards by [`apply_refresh`].
 pub fn merge_games(old: &mut Vec<Game>, fresh: Vec<Game>) -> MergeStats {
     let mut stats = MergeStats::default();
     let mut by_id: HashMap<u64, Game> = fresh
@@ -119,32 +123,66 @@ pub fn merge_games(old: &mut Vec<Game>, fresh: Vec<Game>) -> MergeStats {
     stats
 }
 
-/// Applies a refresh result to a visible list.
+/// Applies a refresh result to a Home row.
 ///
 /// `None` (the fetch failed) and `Some(empty)` (it answered with nothing) both leave the list
 /// exactly as it was: stale is better than a blank row that flickers back in a second later.
+/// A merge only ever appends, so the row is then trimmed back to [`HOME_ROW_CAP`] - otherwise a
+/// long-lived session would grow it by a card on every refresh.
 pub fn apply_refresh(old: &mut Vec<Game>, fresh: Option<Vec<Game>>) -> MergeStats {
-    match fresh {
-        Some(fresh) if !fresh.is_empty() => merge_games(old, fresh),
-        _ => MergeStats {
-            updated: 0,
-            added: 0,
-            kept: old.len(),
-        },
+    let mut stats = MergeStats {
+        updated: 0,
+        added: 0,
+        kept: old.len(),
+    };
+    if let Some(fresh) = fresh.filter(|fresh| !fresh.is_empty()) {
+        let listed: HashSet<u64> = fresh.iter().map(|g| g.universe_id).collect();
+        stats = merge_games(old, fresh);
+        trim_to_row_cap(old, &listed);
+        stats.kept = old.len();
+    }
+    stats
+}
+
+/// Trims an over-full row back to [`HOME_ROW_CAP`], dropping cards the fresh answer no longer
+/// lists before it drops any it does - from the tail each time, so the head of the row is the
+/// part that stays put. A just-favourited or just-launched game is in the answer, so it is the
+/// stale card behind it that falls off, not the game the user is looking at.
+fn trim_to_row_cap(games: &mut Vec<Game>, listed: &HashSet<u64>) {
+    while games.len() > HOME_ROW_CAP {
+        let victim = games
+            .iter()
+            .rposition(|g| !listed.contains(&g.universe_id))
+            .unwrap_or(games.len() - 1);
+        games.remove(victim);
     }
 }
 
-/// Merges a fresh page of sorts into the ones on screen, matching sorts by title and games by
-/// `universe_id`. Rows keep their position (nothing jumps while it is being read), a sort the
-/// app has never shown is appended, and a sort missing from the answer keeps its cards.
+/// Merges a fresh page of sorts into the ones on screen, matching sorts by title.
+///
+/// A sort is a *ranking*, so a sort the answer contains takes the fresh games in the **fresh
+/// order**: the row shows the new positions instead of where those cards happened to sit
+/// before, and a game that dropped out of the top of the chart leaves it. Textures do not care -
+/// they are keyed by `universe_id`, which a reorder never changes. Sorts themselves keep their
+/// place on the page, a sort the app has never shown is appended, and a sort missing from the
+/// answer keeps its cards.
 pub fn merge_sorts(old: &mut Vec<crate::types::Sort>, fresh: Vec<crate::types::Sort>) -> MergeStats {
     let mut stats = MergeStats::default();
     let mut added_sorts: Vec<crate::types::Sort> = Vec::new();
-    for sort in fresh {
+    for mut sort in fresh {
         if let Some(existing) = old.iter_mut().find(|shown| shown.title == sort.title) {
-            let merged = merge_games(&mut existing.games, sort.games);
-            stats.updated += merged.updated;
-            stats.added += merged.added;
+            // A repeated id inside one answer is one card, not two rows at the same rank.
+            let mut seen: HashSet<u64> = HashSet::with_capacity(sort.games.len());
+            sort.games.retain(|g| seen.insert(g.universe_id));
+            let shown: HashSet<u64> = existing.games.iter().map(|g| g.universe_id).collect();
+            for game in &sort.games {
+                if shown.contains(&game.universe_id) {
+                    stats.updated += 1;
+                } else {
+                    stats.added += 1;
+                }
+            }
+            existing.games = sort.games;
         } else {
             stats.added += sort.games.len();
             added_sorts.push(sort);
