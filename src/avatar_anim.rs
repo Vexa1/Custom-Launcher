@@ -53,6 +53,27 @@ impl Part {
         self as usize
     }
 
+    /// `LowerTorso` and friends: the names used in the log and the dump file.
+    pub fn label(self) -> &'static str {
+        match self {
+            Part::LowerTorso => "LowerTorso",
+            Part::UpperTorso => "UpperTorso",
+            Part::Head => "Head",
+            Part::LeftUpperArm => "LeftUpperArm",
+            Part::LeftLowerArm => "LeftLowerArm",
+            Part::LeftHand => "LeftHand",
+            Part::RightUpperArm => "RightUpperArm",
+            Part::RightLowerArm => "RightLowerArm",
+            Part::RightHand => "RightHand",
+            Part::LeftUpperLeg => "LeftUpperLeg",
+            Part::LeftLowerLeg => "LeftLowerLeg",
+            Part::LeftFoot => "LeftFoot",
+            Part::RightUpperLeg => "RightUpperLeg",
+            Part::RightLowerLeg => "RightLowerLeg",
+            Part::RightFoot => "RightFoot",
+        }
+    }
+
     pub fn parent(self) -> Option<Part> {
         match self {
             Part::LowerTorso => None,
@@ -71,6 +92,12 @@ impl Part {
     }
 
     /// Material/object names from Roblox's avatar OBJ (R15, R6 and layered clothing names).
+    ///
+    /// Roblox's own OBJ writer does not actually emit body-part names: its materials are
+    /// `Part12Mtl`-style counters and its objects are `Object_7`, so on the models the launcher
+    /// downloads this returns `None` and [`classify_triangles`] places the mesh instead. The
+    /// table still covers the exports that *do* name parts (Studio "Export Selection", R6's
+    /// `Left Arm`/`Right Leg`, layered-clothing part names).
     pub fn from_name(name: &str) -> Option<Part> {
         let n: String = name
             .chars()
@@ -111,9 +138,51 @@ impl Part {
             .map(|(_, p)| *p)
     }
 
+    /// Places a whole mesh island from its own bounds: the head and anything riding on it
+    /// (hat, hair, face accessory) is called by where it sits, everything else by its centroid.
+    pub fn from_bounds(
+        min: [f32; 3],
+        max: [f32; 3],
+        model_min: [f32; 3],
+        model_max: [f32; 3],
+        bands: RigBands,
+    ) -> Part {
+        let h = (model_max[1] - model_min[1]).max(1e-4);
+        let top = (max[1] - model_min[1]) / h;
+        let cx = (model_min[0] + model_max[0]) * 0.5;
+        let half = ((model_max[0] - model_min[0]) * 0.5).max(1e-4);
+        let centre_x = ((min[0] + max[0]) * 0.5 - cx) / half;
+        // A hat hangs *above* the head and a hair cap covers its top, so both are decided by
+        // how high the island reaches rather than by where its centre is.
+        if top > bands.head + 0.05 && centre_x.abs() < 0.55 {
+            return Part::Head;
+        }
+        Part::from_position_with(
+            [
+                (min[0] + max[0]) * 0.5,
+                (min[1] + max[1]) * 0.5,
+                (min[2] + max[2]) * 0.5,
+            ],
+            model_min,
+            model_max,
+            bands,
+        )
+    }
+
     /// Geometric fallback for meshes whose materials carry no body-part names: the centroid's
     /// height band and side decide the limb, using the model's overall bounds.
+    #[allow(dead_code)] // the default-band form is read by `vm-tests/tests/avatar_anim.rs`
     pub fn from_position(p: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Part {
+        Self::from_position_with(p, min, max, RigBands::DEFAULT)
+    }
+
+    /// [`Part::from_position`] against explicit joint heights.
+    pub fn from_position_with(
+        p: [f32; 3],
+        min: [f32; 3],
+        max: [f32; 3],
+        bands: RigBands,
+    ) -> Part {
         let h = (max[1] - min[1]).max(1e-4);
         let frac = (p[1] - min[1]) / h;
         let cx = (min[0] + max[0]) * 0.5;
@@ -121,54 +190,319 @@ impl Part {
         let nx = (p[0] - cx) / half;
         let left = nx < 0.0;
 
-        if frac > 0.86 {
+        if frac > bands.head {
             return Part::Head;
         }
-        if nx.abs() > 0.58 && (0.28..0.84).contains(&frac) {
-            let side_upper = if left {
+        // Arms hang outside the torso's silhouette, between the hips and the shoulders; their
+        // height inside that span decides the segment, not the height inside the whole body.
+        // Below the hips that far out is a foot, not a hand.
+        if nx.abs() > 0.58 && frac > bands.hip * 0.9 && frac < bands.shoulder {
+            let upper = if left {
                 Part::LeftUpperArm
             } else {
                 Part::RightUpperArm
             };
-            let side_lower = if left {
+            let lower = if left {
                 Part::LeftLowerArm
             } else {
                 Part::RightLowerArm
             };
-            let side_hand = if left { Part::LeftHand } else { Part::RightHand };
-            return if frac > 0.56 {
-                side_upper
-            } else if frac > 0.40 {
-                side_lower
+            let hand = if left { Part::LeftHand } else { Part::RightHand };
+            return if frac > bands.elbow {
+                upper
+            } else if frac > bands.wrist {
+                lower
             } else {
-                side_hand
+                hand
             };
         }
-        if frac > 0.55 {
+        if frac > bands.waist {
             return Part::UpperTorso;
         }
-        if frac > 0.42 {
+        if frac > bands.hip {
             return Part::LowerTorso;
         }
-        let side_upper = if left {
+        let upper = if left {
             Part::LeftUpperLeg
         } else {
             Part::RightUpperLeg
         };
-        let side_lower = if left {
+        let lower = if left {
             Part::LeftLowerLeg
         } else {
             Part::RightLowerLeg
         };
-        let side_foot = if left { Part::LeftFoot } else { Part::RightFoot };
-        if frac > 0.20 {
-            side_upper
-        } else if frac > 0.07 {
-            side_lower
+        let foot = if left { Part::LeftFoot } else { Part::RightFoot };
+        if frac > bands.knee {
+            upper
+        } else if frac > bands.ankle {
+            lower
         } else {
-            side_foot
+            foot
         }
     }
+}
+
+/// Where the joints sit vertically, as fractions of the model's own height.
+///
+/// Defaults are measured off a standard R15 avatar (hips at 0.34 of the character, waist at
+/// 0.50, jaw at 0.80), which is why the plain constants are not simply evenly spaced. A model
+/// wearing a tall hat is *taller* than the character, so [`RigBands::from_islands`] calibrates
+/// them against the head the model actually has; without that, a hat pushed the whole torso
+/// down into the legs' band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigBands {
+    /// Jaw line: everything above is the head or an accessory riding on it.
+    pub head: f32,
+    pub shoulder: f32,
+    pub elbow: f32,
+    pub wrist: f32,
+    pub waist: f32,
+    pub hip: f32,
+    pub knee: f32,
+    pub ankle: f32,
+}
+
+impl RigBands {
+    pub const DEFAULT: RigBands = RigBands {
+        head: 0.80,
+        shoulder: 0.76,
+        elbow: 0.55,
+        wrist: 0.42,
+        waist: 0.50,
+        hip: 0.34,
+        knee: 0.19,
+        ankle: 0.05,
+    };
+
+    /// Calibrates the bands against the head the model actually has, given every island's
+    /// bounds. The jaw is the lowest point of whatever is up there (the head, plus the hat and
+    /// hair above it), so a tall accessory no longer squashes every band below it.
+    pub fn from_islands(
+        bounds: impl Iterator<Item = ([f32; 3], [f32; 3])>,
+        model_min: [f32; 3],
+        model_max: [f32; 3],
+    ) -> RigBands {
+        let h = (model_max[1] - model_min[1]).max(1e-4);
+        let cx = (model_min[0] + model_max[0]) * 0.5;
+        let half = ((model_max[0] - model_min[0]) * 0.5).max(1e-4);
+        let mut jaw = f32::MAX;
+        for (min, max) in bounds {
+            let top = (max[1] - model_min[1]) / h;
+            let centre_x = ((min[0] + max[0]) * 0.5 - cx) / half;
+            if top >= 0.86 && centre_x.abs() < 0.55 {
+                jaw = jaw.min((min[1] - model_min[1]) / h);
+            }
+        }
+        let head = if jaw.is_finite() && (0.45..0.92).contains(&jaw) {
+            jaw
+        } else {
+            RigBands::DEFAULT.head
+        };
+        RigBands::from_head(head)
+    }
+
+    /// The band layout for a given jaw height. R15 proportions: shoulders just under the jaw,
+    /// hips at 0.44 of the jaw height, knees at 0.55 of the hips, arms down to just below the
+    /// hips.
+    pub fn from_head(head: f32) -> RigBands {
+        let head = head.clamp(0.45, 0.92);
+        let shoulder = head - 0.04;
+        let hip = 0.44 * head;
+        let arm_bottom = hip + 0.07;
+        let arm = (shoulder - arm_bottom).max(0.05);
+        RigBands {
+            head,
+            shoulder,
+            elbow: shoulder - 0.49 * arm,
+            wrist: shoulder - 0.85 * arm,
+            waist: hip + 0.45 * (shoulder - hip),
+            hip,
+            knee: 0.55 * hip,
+            ankle: 0.16 * hip,
+        }
+    }
+}
+
+/// How many triangles each rig part ended up with, plus the leftovers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartCounts {
+    pub per_part: [usize; PART_COUNT],
+    pub unclassified: usize,
+}
+
+impl PartCounts {
+    pub fn from_parts(parts: &[Part]) -> PartCounts {
+        let mut counts = PartCounts::default();
+        for p in parts {
+            counts.per_part[p.index()] += 1;
+        }
+        counts
+    }
+
+    #[allow(dead_code)] // read by the avatar tests
+    pub fn total(&self) -> usize {
+        self.per_part.iter().sum::<usize>() + self.unclassified
+    }
+
+    /// One line for the log: `LowerTorso 96 UpperTorso 144 ... unclassified 0`.
+    pub fn report(&self) -> String {
+        let mut out = String::new();
+        for part in Part::ALL {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{} {}", part.label(), self.per_part[part.index()]));
+        }
+        out.push_str(&format!(" unclassified {}", self.unclassified));
+        out
+    }
+
+    /// Parts that got no geometry at all: an R6 rig never has lower arms, so this is only a
+    /// debugging signal, not an error.
+    pub fn empty(&self) -> Vec<Part> {
+        Part::ALL
+            .iter()
+            .copied()
+            .filter(|p| self.per_part[p.index()] == 0)
+            .collect()
+    }
+}
+
+/// Assigns every triangle a rig part, working from welded mesh islands rather than one triangle
+/// at a time.
+///
+/// Roblox's avatar OBJ does not name its body parts: the MTL has `newmtl Part12Mtl` entries and
+/// the OBJ has `o Object_7`, so material names identify nothing. The geometry still does: each
+/// body part and each accessory is its own island, so an island's own bounds say where it goes
+/// on the rig. Deciding per island also means a triangle on a seam can no longer be pulled onto
+/// a neighbouring limb mid-animation, which is what tore clothing apart.
+///
+/// `tri_verts` holds the OBJ vertex index of each corner (`u32::MAX` when the file did not give
+/// one), `tri_pos` the corners themselves, and `named` the part a material/object name asked for.
+/// A part named in the file wins for the whole island; a tall central island (the torso, a
+/// welded full body, a shirt wrapping the waist) is split by height so the waist can bend.
+pub fn classify_triangles(
+    tri_verts: &[[u32; 3]],
+    tri_pos: &[[[f32; 3]; 3]],
+    named: &[Option<Part>],
+    model_min: [f32; 3],
+    model_max: [f32; 3],
+) -> Vec<Part> {
+    let count = tri_pos.len();
+    let mut out = vec![Part::LowerTorso; count];
+    if count == 0 {
+        return out;
+    }
+
+    // Union-find over shared vertices: two triangles in the same island share a corner.
+    let mut parent: Vec<usize> = (0..count).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (t, verts) in tri_verts.iter().enumerate() {
+        for &v in verts {
+            if v == u32::MAX {
+                continue;
+            }
+            match owner.get(&v) {
+                Some(&first) => {
+                    let a = root(&mut parent, first);
+                    let b = root(&mut parent, t);
+                    if a != b {
+                        parent[a] = b;
+                    }
+                }
+                None => {
+                    owner.insert(v, t);
+                }
+            }
+        }
+    }
+
+    let mut islands: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    for t in 0..count {
+        let r = root(&mut parent, t);
+        islands.entry(r).or_default().push(t);
+    }
+
+    let height = (model_max[1] - model_min[1]).max(1e-4);
+    let centre_x = (model_min[0] + model_max[0]) * 0.5;
+    let half_width = ((model_max[0] - model_min[0]) * 0.5).max(1e-4);
+
+    // Island bounds come first: the joint heights are calibrated from the head this model has.
+    let mut shape: Vec<(Vec<usize>, [f32; 3], [f32; 3])> = Vec::with_capacity(islands.len());
+    for tris in islands.into_values() {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for &t in &tris {
+            for p in &tri_pos[t] {
+                for a in 0..3 {
+                    min[a] = min[a].min(p[a]);
+                    max[a] = max[a].max(p[a]);
+                }
+            }
+        }
+        shape.push((tris, min, max));
+    }
+    let bands = RigBands::from_islands(
+        shape.iter().map(|(_, min, max)| (*min, *max)),
+        model_min,
+        model_max,
+    );
+
+    for (tris, min, max) in &shape {
+        let (min, max) = (*min, *max);
+        // A body-part name in the file is authoritative for the whole island.
+        let mut votes = [0usize; PART_COUNT];
+        for &t in tris {
+            if let Some(part) = named.get(t).copied().flatten() {
+                votes[part.index()] += 1;
+            }
+        }
+        if let Some(best) = (0..PART_COUNT).max_by_key(|&i| votes[i]) {
+            if votes[best] * 2 > tris.len() {
+                let part = Part::ALL[best];
+                for &t in tris {
+                    out[t] = part;
+                }
+                continue;
+            }
+        }
+
+        // The torso (or a welded whole body, or a shirt over the waist) covers several rig
+        // parts: split it by height so the hips and the waist can bend independently.
+        let tall = (max[1] - min[1]) > height * 0.30;
+        let central = (((min[0] + max[0]) * 0.5 - centre_x) / half_width).abs() < 0.40;
+        if tall && central {
+            for &t in tris {
+                let mut tmin = [f32::MAX; 3];
+                let mut tmax = [f32::MIN; 3];
+                for p in &tri_pos[t] {
+                    for a in 0..3 {
+                        tmin[a] = tmin[a].min(p[a]);
+                        tmax[a] = tmax[a].max(p[a]);
+                    }
+                }
+                // `from_bounds` puts the triangle's height band on the model's scale, which
+                // is the split this torso blob needs.
+                out[t] = Part::from_bounds(tmin, tmax, model_min, model_max, bands);
+            }
+        } else {
+            let part = Part::from_bounds(min, max, model_min, model_max, bands);
+            for &t in tris {
+                out[t] = part;
+            }
+        }
+    }
+
+    out
 }
 
 /// A 3x4 affine transform stored column-major in a 4x4 array (the last row is always 0,0,0,1).
@@ -645,11 +979,43 @@ fn sample(kind: AnimationKind, t: f32) -> Pose {
 ///
 /// When `playing` is false nothing advances and the renderer is handed the rest pose, so a
 /// stopped preview costs exactly nothing per frame.
-#[derive(Clone, Debug, Default)]
+///
+/// A posed frame is a full software re-rasterisation of the whole avatar, so the player also
+/// keeps its own frame pacing: [`AnimPlayer::note_frame_cost`] feeds it the measured cost of the
+/// last posed raster and the viewport asks for the next frame only after [`frame_interval`],
+/// which keeps the preview inside half of a frame's wall time.
+///
+/// [`frame_interval`]: AnimPlayer::frame_interval
+#[derive(Clone, Debug)]
 pub struct AnimPlayer {
     pub kind: Option<AnimationKind>,
     playing: bool,
     time: f32,
+    /// Seconds between posed frames. Starts at the 30 fps cap and stretches when a raster is
+    /// expensive, so a heavy avatar degrades smoothly instead of saturating the CPU.
+    interval: f32,
+    /// Smoothed cost of one posed raster, in milliseconds.
+    cost_ms: f32,
+    /// Whether this play session has already logged its measured frame cost.
+    reported: bool,
+}
+
+/// The preview redraws at most this often.
+const MIN_FRAME_INTERVAL: f32 = 1.0 / 30.0;
+/// ...and never less often than this, even if one posed raster is slow.
+const MAX_FRAME_INTERVAL: f32 = 0.2;
+
+impl Default for AnimPlayer {
+    fn default() -> Self {
+        AnimPlayer {
+            kind: None,
+            playing: false,
+            time: 0.0,
+            interval: MIN_FRAME_INTERVAL,
+            cost_ms: 0.0,
+            reported: false,
+        }
+    }
 }
 
 impl AnimPlayer {
@@ -657,6 +1023,9 @@ impl AnimPlayer {
         self.kind = Some(kind);
         self.playing = true;
         self.time = 0.0;
+        self.interval = MIN_FRAME_INTERVAL;
+        self.cost_ms = 0.0;
+        self.reported = false;
     }
 
     pub fn stop(&mut self) {
@@ -726,5 +1095,55 @@ impl AnimPlayer {
     /// The viewport schedules frames only while this is true.
     pub fn needs_repaint(&self) -> bool {
         self.is_playing()
+    }
+
+    /// Records how long one posed raster took and paces the preview to stay inside half of
+    /// the frame time it spends drawing faces.
+    ///
+    /// Cheap avatars keep the 30 fps cap; an expensive one is drawn less often instead of
+    /// trying to keep up and maxing a core. Nothing is scheduled while stopped, so this never
+    /// runs when the preview is idle.
+    pub fn note_frame_cost(&mut self, ms: f32) {
+        if !ms.is_finite() || ms <= 0.0 {
+            return;
+        }
+        // React to a slow frame at once (so the next one is already spaced out) and recover
+        // gently once the cost drops again.
+        self.cost_ms = if self.cost_ms <= 0.0 || ms > self.cost_ms {
+            ms
+        } else {
+            self.cost_ms * 0.8 + ms * 0.2
+        };
+        self.interval = (2.0 * self.cost_ms / 1000.0).clamp(MIN_FRAME_INTERVAL, MAX_FRAME_INTERVAL);
+    }
+
+    /// Seconds until the next posed frame may be drawn (the viewport uses
+    /// `request_repaint_after`).
+    pub fn frame_interval(&self) -> f32 {
+        if self.is_playing() {
+            self.interval
+        } else {
+            MIN_FRAME_INTERVAL
+        }
+    }
+
+    /// The rate the preview is currently being redrawn at, for the log.
+    pub fn effective_fps(&self) -> f32 {
+        1.0 / self.frame_interval()
+    }
+
+    /// Smoothed cost of one posed raster in milliseconds (0 until the first frame is timed).
+    pub fn frame_cost_ms(&self) -> f32 {
+        self.cost_ms
+    }
+
+    /// True once per play session, so the measured cost is logged exactly once.
+    pub fn take_cost_report(&mut self) -> bool {
+        if self.is_playing() && !self.reported && self.cost_ms > 0.0 {
+            self.reported = true;
+            true
+        } else {
+            false
+        }
     }
 }

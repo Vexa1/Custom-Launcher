@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.23
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.24
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -528,11 +528,20 @@ src/
                      rasteriser with a real z-buffer, cached per (yaw,pitch,zoom);
                      decoded looks are kept in a bounded RAM cache keyed by mesh +
                      texture hashes, so re-equipping a recent item paints in 0 ms.
-                     Triangles are grouped into R15/R6 limbs, so clicking an
-                     animation item poses the mesh per frame in the viewport.
+                     Triangles are grouped into R15/R6 limbs by welding them into
+                     mesh islands and placing each island from its own bounds
+                     (Roblox's OBJ calls its materials `Part12Mtl`, so the names
+                     identify nothing), so clicking an animation item poses the
+                     mesh per frame in the viewport. Every download is dumped to
+                     `<data dir>/avatar3d/` with its per-part triangle counts in
+                     the log, and posed frames are timed so a heavy avatar is
+                     redrawn less often instead of saturating a core.
   avatar_anim.rs     R15/R6 joint hierarchy, hierarchical forward kinematics, the
-                     keyframed Idle/Walk/Run/Jump/Fall/Swim/Climb/Emote clips and
-                     the click-to-play player (no work while stopped).
+                     joint bands calibrated against the head the model actually
+                     has (a tall hat must not move the waist), the keyframed
+                     Idle/Walk/Run/Jump/Fall/Swim/Climb/Emote clips and the
+                     click-to-play player (no work while stopped, cost-paced
+                     while playing).
   avatar_sync.rs     Avatar editor equip state: optimistic toggles, the 350 ms
                      single-request debounce, the monotonic revision that discards
                      stale 3D responses, rollback on failure and the mesh cache's

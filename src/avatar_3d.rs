@@ -2,7 +2,9 @@
 // Real-time 3D Roblox Avatar parser, loader, and GPU-accelerated egui renderer
 
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
-use crate::avatar_anim::{AnimPlayer, AnimationKind, Part, Pose, Skeleton, PART_COUNT};
+use crate::avatar_anim::{
+    classify_triangles, AnimPlayer, AnimationKind, Part, PartCounts, Pose, Skeleton, PART_COUNT,
+};
 use crate::avatar_sync::MeshStore;
 use serde_json::Value;
 use std::io::Read;
@@ -64,9 +66,12 @@ pub struct AvatarTriangle {
     pub texture_index: Option<usize>,
     pub base_color: Color32,
     pub normal: [f32; 3],
-    /// Rig part this triangle belongs to (`Part` index, 255 = unclassified until bounds are
-    /// known). Drives the per-limb transform during an animation.
+    /// Rig part this triangle belongs to (`Part` index). Drives the per-limb transform during
+    /// an animation.
     pub part: u8,
+    /// OBJ vertex index of each corner (`u32::MAX` when the face did not name one). Triangles
+    /// that share a vertex belong to the same mesh island, which is how the rig is found.
+    pub vidx: [u32; 3],
 }
 
 /// Parsed 3D model with normalized coordinates
@@ -81,6 +86,19 @@ pub struct Avatar3DModel {
     pub obj_hash: String,
     /// Joint pivots derived from each limb's bounding box.
     pub skeleton: Skeleton,
+    /// How the triangles split across the rig: logged and written next to the dumped model.
+    pub part_counts: PartCounts,
+}
+
+impl Avatar3DModel {
+    /// `LowerTorso 96 UpperTorso 144 ... unclassified 0` for the log and the dump.
+    pub fn part_report(&self) -> String {
+        format!(
+            "{} triangles: {}",
+            self.triangles.len(),
+            self.part_counts.report()
+        )
+    }
 }
 
 /// Loaded texture data ready for egui
@@ -397,6 +415,16 @@ pub fn parse_avatar_3d(
                 }
             };
 
+            // The raw OBJ index of each corner: two triangles sharing one are one mesh
+            // island, which is what the rig classification groups on.
+            let vert_index = |tok: &str| -> u32 {
+                tok.split('/')
+                    .next()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|i| if i > 0 { (i - 1) as u32 } else { u32::MAX })
+                    .unwrap_or(u32::MAX)
+            };
+
             let v0 = parse_vertex(face_tokens[0]);
             let (tex_idx, base_col) = if let Some(m) = materials.get(current_mtl_idx) {
                 let tidx = m
@@ -452,6 +480,11 @@ pub fn parse_avatar_3d(
                     base_color: base_col,
                     normal: fnorm,
                     part: current_part.map(|p| p.index() as u8).unwrap_or(255),
+                    vidx: [
+                        vert_index(face_tokens[0]),
+                        vert_index(face_tokens[i]),
+                        vert_index(face_tokens[i + 1]),
+                    ],
                 });
             }
         }
@@ -470,19 +503,18 @@ pub fn parse_avatar_3d(
     let extent_y = (max_pos[1] - min_pos[1]).max(1.0);
     let scale = 2.0 / extent_y;
 
-    // Materials without a part name fall back to the centroid's height band and side.
-    for (tri, part) in triangles.iter_mut().zip(triangle_parts.iter()) {
-        if let Some(p) = part {
-            tri.part = p.index() as u8;
-            continue;
-        }
-        let c = [
-            (tri.v[0].pos[0] + tri.v[1].pos[0] + tri.v[2].pos[0]) / 3.0,
-            (tri.v[0].pos[1] + tri.v[1].pos[1] + tri.v[2].pos[1]) / 3.0,
-            (tri.v[0].pos[2] + tri.v[1].pos[2] + tri.v[2].pos[2]) / 3.0,
-        ];
-        tri.part = Part::from_position(c, min_pos, max_pos).index() as u8;
+    // Roblox's OBJ does not name body parts (`Part12Mtl`, `Object_7`), so the islands are
+    // placed on the rig from their own bounds; a name in the file still wins where present.
+    let tri_verts: Vec<[u32; 3]> = triangles.iter().map(|t| t.vidx).collect();
+    let tri_pos: Vec<[[f32; 3]; 3]> = triangles
+        .iter()
+        .map(|t| [t.v[0].pos, t.v[1].pos, t.v[2].pos])
+        .collect();
+    let parts = classify_triangles(&tri_verts, &tri_pos, &triangle_parts, min_pos, max_pos);
+    for (tri, part) in triangles.iter_mut().zip(parts.iter()) {
+        tri.part = part.index() as u8;
     }
+    let part_counts = PartCounts::from_parts(&parts);
     let skeleton = build_skeleton(&triangles, center, extent_y);
 
     Ok(Avatar3DModel {
@@ -492,6 +524,7 @@ pub fn parse_avatar_3d(
         texture_hashes,
         obj_hash: String::new(),
         skeleton,
+        part_counts,
     })
 }
 
@@ -520,6 +553,38 @@ fn build_skeleton(triangles: &[AvatarTriangle], center: [f32; 3], extent_y: f32)
         }
     }
     Skeleton::from_part_bounds(&bounds, center, extent_y)
+}
+
+/// Keeps the avatar the launcher just downloaded next to its log, and logs the limb split.
+///
+/// The 3D avatar OBJ is only served to a signed-in session, so the material names and the
+/// per-part triangle counts can only be seen on a real account. Writing the pair to
+/// `<data dir>/avatar3d/` (one look, overwritten each time) makes that inspectable, and the
+/// one-line report in the log says whether the rig actually found every limb.
+fn save_avatar_dump(user_id: u64, obj: &[u8], mtl: Option<&[u8]>, model: &Avatar3DModel) {
+    let report = model.part_report();
+    crate::auth::log(&format!("Avatar 3D {user_id}: {report}"));
+
+    let dir = crate::auth::data_dir().join("avatar3d");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // Bounded on purpose: one look's worth of downloads, and nothing unreasonable in size.
+    if obj.len() <= 16 * 1024 * 1024 {
+        let _ = std::fs::write(dir.join("avatar.obj"), obj);
+    }
+    if let Some(mtl) = mtl.filter(|m| m.len() <= 2 * 1024 * 1024) {
+        let _ = std::fs::write(dir.join("avatar.mtl"), mtl);
+    }
+    let _ = std::fs::write(
+        dir.join("avatar_parts.txt"),
+        format!(
+            "user {user_id}\nobj hash {}\n{}\n\nempty parts: {:?}\n",
+            model.obj_hash,
+            report,
+            model.part_counts.empty()
+        ),
+    );
 }
 
 /// Fetch avatar 3D data from Roblox thumbnails API and CDN
@@ -648,6 +713,7 @@ pub fn load_avatar_3d_data_ex(
 
     let mut model = parse_avatar_3d(&obj_bytes, mtl_bytes.as_deref(), &tex_hashes)?;
     model.obj_hash = obj_hash_owned.clone();
+    save_avatar_dump(user_id, &obj_bytes, mtl_bytes.as_deref(), &model);
 
     // Keep the decoded result, bounded by the shared RAM budget, so coming back to this look
     // is a memory copy rather than another round trip.
@@ -808,9 +874,9 @@ pub fn render_avatar_3d_mesh(
     textures_ready: bool,
     pose: &Pose,
     anim_frame: u32,
-) {
+) -> Option<f32> {
     if viewport_rect.width() < 2.0 || viewport_rect.height() < 2.0 {
-        return;
+        return None;
     }
     // Textures are adopted a couple per frame, so mid-load the set is incomplete. Rasterising
     // it would burn a full software render per frame and flicker material colours, so keep
@@ -825,7 +891,7 @@ pub fn render_avatar_3d_mesh(
                 Color32::WHITE,
             );
         }
-        return;
+        return None;
     }
     // Rasterise a little above screen resolution so the GPU's linear filtering smooths the
     // triangle edges out again.
@@ -860,12 +926,19 @@ pub fn render_avatar_3d_mesh(
         }
     });
 
+    // A posed frame re-rasterises the whole avatar, so its cost is measured and handed back:
+    // the player uses it to space the next frame. Cache hits cost nothing and return None.
+    let mut raster_ms = None;
     let handle = match cached {
         Some(handle) => handle,
         None => {
+            let started = std::time::Instant::now();
             let image = rasterize_avatar(
                 model, textures, yaw, pitch, zoom, width, height, pose, anim_frame,
             );
+            if anim_frame != 0 {
+                raster_ms = Some(started.elapsed().as_secs_f32() * 1000.0);
+            }
             let existing = RASTER_CACHE.with(|c| c.borrow().as_ref().map(|(_, h)| h.clone()));
             let handle = match existing {
                 Some(mut handle) => {
@@ -889,6 +962,7 @@ pub fn render_avatar_3d_mesh(
         Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
         Color32::WHITE,
     );
+    raster_ms
 }
 
 fn edge_fn(a: Pos2, b: Pos2, px: f32, py: f32) -> f32 {
@@ -1140,7 +1214,11 @@ pub fn render_avatar_viewport(
     if state.is_3d && state.model.is_some() && state.anim.needs_repaint() {
         let dt = ui.input(|i| i.stable_dt);
         state.anim.advance(dt);
-        ui.ctx().request_repaint();
+        // Paced, not every frame: a posed frame is a full software render, and the interval is
+        // whatever keeps that inside half of the frame budget (30 fps cap by default).
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(
+            state.anim.frame_interval(),
+        ));
     }
 
     // 1. Studio backdrop gradient
@@ -1205,7 +1283,7 @@ pub fn render_avatar_viewport(
     let pose = state.anim.pose();
     let anim_frame = state.anim.frame_index();
     if let (true, Some(model)) = (state.is_3d, state.model.as_ref()) {
-        render_avatar_3d_mesh(
+        let raster_ms = render_avatar_3d_mesh(
             &painter,
             model,
             &state.textures,
@@ -1217,6 +1295,16 @@ pub fn render_avatar_viewport(
             &pose,
             anim_frame,
         );
+        if let Some(ms) = raster_ms {
+            state.anim.note_frame_cost(ms);
+            if state.anim.take_cost_report() {
+                crate::auth::log(&format!(
+                    "Avatar animation: posed raster {:.1} ms, preview at {:.0} fps",
+                    state.anim.frame_cost_ms(),
+                    state.anim.effective_fps()
+                ));
+            }
+        }
     } else {
         // Fallback to high-resolution 2D avatar preview.
         // Roblox's full-body render is square, so painting it into the wide viewport rect
