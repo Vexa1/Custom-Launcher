@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use creblox_vm_tests::live_refresh::{apply_refresh, patch_games, patch_sorts};
-use creblox_vm_tests::refresh_policy::should_refresh;
+use creblox_vm_tests::refresh_policy::{should_refresh, thumb_refresh_age};
 use creblox_vm_tests::types::{Game, Sort};
 
 fn game(universe: u64, playing: u64) -> Game {
@@ -86,6 +86,40 @@ fn with_auto_refresh_on_the_same_ticks_do_fetch() {
         Some(now - Duration::from_secs(5)),
         Duration::from_secs(1),
         now,
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Thumbnails follow the same switch: loaded art is not re-downloaded, missing art still is.
+
+#[test]
+fn with_auto_refresh_off_a_loaded_thumbnail_is_never_refetched() {
+    let now = Instant::now();
+    let loaded_two_minutes_ago = Some(now - Duration::from_secs(120));
+    let off = thumb_refresh_age(false);
+    assert!(
+        !should_refresh(true, loaded_two_minutes_ago, None, off, now),
+        "the 120 s re-fetch must not fire while automatic refresh is off"
+    );
+    assert!(
+        !should_refresh(true, Some(now - Duration::from_secs(24 * 60 * 60)), None, off, now),
+        "not even a day later"
+    );
+    // A picture with no texture is still missing, so its retry window is untouched.
+    assert!(should_refresh(
+        true,
+        Some(now - Duration::from_secs(10)),
+        None,
+        Duration::from_secs(10),
+        now
+    ));
+    // And with the switch on, the 120 s refresh is due at the same age.
+    assert!(should_refresh(
+        true,
+        loaded_two_minutes_ago,
+        None,
+        thumb_refresh_age(true),
+        now
     ));
 }
 

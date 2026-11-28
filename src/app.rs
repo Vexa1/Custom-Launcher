@@ -1880,7 +1880,9 @@ impl Creblox {
     pub fn request_thumbs(&mut self, ids: Vec<u64>) {
         let now = Instant::now();
         let retry_missing = Duration::from_secs(10);
-        let refresh_existing = Duration::from_secs(120);
+        // With automatic refresh off, a picture already on screen is never re-downloaded: only
+        // ids with no texture at all are requested, because drawing needs those.
+        let refresh_existing = crate::refresh_policy::thumb_refresh_age(self.settings.auto_refresh);
         let mut new = Vec::new();
         let mut queued = HashSet::new();
         for id in ids {

@@ -10,6 +10,20 @@ use std::time::{Duration, Instant};
 /// How long one fetch may run before another of the same kind may start.
 pub const SYNC_ACTIVE: Duration = Duration::from_secs(30);
 
+/// How old a thumbnail that is already on screen may be before it is fetched again.
+///
+/// The pages ask for the pictures of whatever is visible on every frame, so "fetch it again"
+/// has to be a decision, not a reflex: 120 s keeps counts-and-art fresh while automatic refresh
+/// is on, and `Duration::MAX` means a picture that exists is never re-downloaded while it is
+/// off. A missing picture is still fetched either way - drawing needs it.
+pub fn thumb_refresh_age(auto_refresh: bool) -> Duration {
+    if auto_refresh {
+        Duration::from_secs(120)
+    } else {
+        Duration::MAX
+    }
+}
+
 /// Whether a periodic list/statistics refresh may start now.
 ///
 /// `enabled` is the Settings switch: when it is off this always answers `false`, however long
