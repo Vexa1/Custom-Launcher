@@ -66,6 +66,8 @@ pub struct Creblox {
     pub settings_section: u8,
     /// Chart filters: minimum players online and minimum like percentage.
     pub chart_min_players: u32,
+    /// No upper limit until the user types a maximum into its pill.
+    pub chart_max_players: Option<u32>,
     pub chart_min_rating: u8,
     /// How many games each Home row shows; grows as you keep asking for more.
     /// Charts feed: natural order until the user asks for a shuffle.
@@ -103,6 +105,7 @@ pub struct Creblox {
     pub chart_feed: crate::chart_feed::ChartFeed,
     /// The filter boxes' text, owned here so typing survives every frame.
     pub chart_players_box: crate::chart_feed::FilterBox,
+    pub chart_max_players_box: crate::chart_feed::FilterBox,
     pub chart_like_box: crate::chart_feed::FilterBox,
     pub chart_visits_box: crate::chart_feed::FilterBox,
     /// Seed of the random game order; "Shuffle" changes it.
@@ -446,6 +449,7 @@ impl Creblox {
             chart: 0,
             settings_section: 0,
             chart_min_players: 0,
+            chart_max_players: None,
             chart_min_rating: 0,
             feed_shuffled: false,
             friends_sort: FriendsSort::RecentlyActive,
@@ -464,6 +468,7 @@ impl Creblox {
             scroll_to_top: false,
             chart_feed: crate::chart_feed::ChartFeed::default(),
             chart_players_box: crate::chart_feed::FilterBox::default(),
+            chart_max_players_box: crate::chart_feed::FilterBox::default(),
             chart_like_box: crate::chart_feed::FilterBox::default(),
             chart_visits_box: crate::chart_feed::FilterBox::default(),
             feed_salt: 0x5EED_1234_ABCD_0001,

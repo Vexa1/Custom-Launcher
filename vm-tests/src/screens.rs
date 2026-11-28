@@ -7,7 +7,7 @@
 //! OS APIs, so the GUI crate cannot be linked on this host. A change to a page's layout should be
 //! mirrored here so the screenshot test still shows what the page looks like.
 
-use egui::{Color32, CornerRadius, Sense, Stroke, Vec2};
+use egui::{Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 
 use crate::inventory::Category;
 use crate::shots::Probe;
@@ -444,6 +444,208 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
     });
 }
 
+/// `page_charts::filter_pill`: a rounded box with its value (or hint) centred in both
+/// directions. The pill and the text it paints are recorded, so the shot test can measure the
+/// centring instead of trusting it.
+fn pill(ui: &mut egui::Ui, probe: &mut Probe, id: &'static str, value: &str, hint: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 26.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(9),
+        SURFACE,
+        Stroke::new(1.0, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let color = if hint { MUTED } else { TEXT };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(value.to_string(), egui::FontId::proportional(13.0), color);
+    let pos = rect.center() - galley.size() * 0.5;
+    ui.painter().galley(pos, galley.clone(), color);
+    probe.text(format!("{id}.text"), Rect::from_min_size(pos, galley.size()), galley.size());
+    probe.contrast(format!("{id}.text"), color, SURFACE);
+    probe.widget(id, rect, false);
+}
+
+/// `page_charts::filter_sep`: the en dash between the two player pills.
+fn dash(ui: &mut egui::Ui, probe: &mut Probe) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 22.0), Sense::hover());
+    let galley =
+        ui.painter()
+            .layout_no_wrap("\u{2013}".to_string(), egui::FontId::proportional(12.0), MUTED);
+    let pos = rect.center() - galley.size() * 0.5;
+    ui.painter().galley(pos, galley.clone(), MUTED);
+    probe.text("charts.f.players.dash", Rect::from_min_size(pos, galley.size()), galley.size());
+    probe.contrast("charts.f.players.dash", MUTED, CARD);
+}
+
+/// The Games filter bar: Players (minimum rail, minimum pill, maximum pill), Like % and Visits,
+/// with Clear pinned right while a filter is set.
+fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
+    let mut players = 0u32;
+    let mut rating = 45u8;
+    let mut visits = 0u64;
+    card(ui, probe, "charts.filters", 966.0, |ui, probe| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            // Like % carries a typed value, so the Clear button is part of the picture.
+            let any = rating > 0;
+            let slot = ((ui.available_width() - 58.0 - 32.0) / 4.0).floor();
+            let players_w = slot * 2.0 + 8.0;
+
+            ui.allocate_ui_with_layout(
+                Vec2::new(players_w, 26.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(52.0, 26.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            probe.label(
+                                ui,
+                                "charts.f.players.label",
+                                "Players",
+                                egui::FontId::proportional(12.5),
+                                MUTED,
+                                CARD,
+                            );
+                        },
+                    );
+                    ui.add_space(6.0);
+                    let rail_w = (ui.available_width() - 64.0 * 2.0 - 14.0 - 18.0).max(72.0);
+                    ui.spacing_mut().slider_width = rail_w;
+                    let rail = ui
+                        .scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
+                            ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
+                            ui.visuals_mut().widgets.active.bg_fill = RAIL;
+                            ui.add_sized(
+                                Vec2::new(rail_w, 24.0),
+                                egui::Slider::new(&mut players, 0..=100_000u32)
+                                    .step_by(50.0)
+                                    .show_value(false),
+                            )
+                        })
+                        .inner;
+                    probe.widget("charts.f.players.rail", rail.rect, true);
+                    ui.add_space(6.0);
+                    pill(ui, probe, "charts.f.players.min", "Min", true);
+                    ui.add_space(6.0);
+                    dash(ui, probe);
+                    ui.add_space(6.0);
+                    pill(ui, probe, "charts.f.players.max", "Max", true);
+                },
+            );
+
+            {
+                let (id, label, value) = ("like", "Like %", "45");
+                ui.allocate_ui_with_layout(
+                    Vec2::new(slot, 26.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(52.0, 26.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                probe.label(
+                                    ui,
+                                    format!("charts.f.{id}.label"),
+                                    label,
+                                    egui::FontId::proportional(12.5),
+                                    MUTED,
+                                    CARD,
+                                );
+                            },
+                        );
+                        ui.add_space(6.0);
+                        let rail_w = (ui.available_width() - 64.0 - 6.0).max(72.0);
+                        ui.spacing_mut().slider_width = rail_w;
+                        let rail = ui
+                            .scope(|ui| {
+                                ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
+                                ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
+                                ui.visuals_mut().widgets.active.bg_fill = RAIL;
+                                ui.add_sized(
+                                    Vec2::new(rail_w, 24.0),
+                                    egui::Slider::new(&mut rating, 0..=100u8).show_value(false),
+                                )
+                            })
+                            .inner;
+                        probe.widget(format!("charts.f.{id}.rail"), rail.rect, true);
+                        ui.add_space(6.0);
+                        pill(ui, probe, "charts.f.like", value, false);
+                    },
+                );
+            }
+
+            ui.allocate_ui_with_layout(
+                Vec2::new(slot, 26.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(52.0, 26.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            probe.label(
+                                ui,
+                                "charts.f.visits.label",
+                                "Visits",
+                                egui::FontId::proportional(12.5),
+                                MUTED,
+                                CARD,
+                            );
+                        },
+                    );
+                    ui.add_space(6.0);
+                    let rail_w = (ui.available_width() - 64.0 - 6.0).max(72.0);
+                    ui.spacing_mut().slider_width = rail_w;
+                    let rail = ui
+                        .scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
+                            ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
+                            ui.visuals_mut().widgets.active.bg_fill = RAIL;
+                            ui.add_sized(
+                                Vec2::new(rail_w, 24.0),
+                                egui::Slider::new(&mut visits, 0..=100_000_000u64)
+                                    .step_by(100_000.0)
+                                    .show_value(false),
+                            )
+                        })
+                        .inner;
+                    probe.widget("charts.f.visits.rail", rail.rect, true);
+                    ui.add_space(6.0);
+                    pill(ui, probe, "charts.f.visits", "Min", true);
+                },
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if any {
+                    probe.button(
+                        ui,
+                        "charts.f.clear",
+                        "Clear",
+                        Vec2::new(58.0, 24.0),
+                        SURFACE,
+                        MUTED,
+                    );
+                }
+            });
+        });
+    });
+}
+
+/// Just the filter bar, at twice the size, for the close-up in `artifacts/charts_filters.png`.
+pub fn charts_filters(ui: &mut egui::Ui, probe: &mut Probe) {
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::same(16))
+        .show(ui, |ui| {
+            ui.vertical(|ui| charts_filter_bar(ui, probe));
+        });
+}
+
 pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
     shell(ui, probe, "charts", |ui, probe| {
         ui.horizontal(|ui| {
@@ -470,171 +672,7 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
         });
         ui.add_space(10.0);
 
-        // The filter bar: three equal groups (label / 6 px / rail / 6 px / value box) and a
-        // Clear button that only exists while a filter is set.
-        // Two empty boxes (their hints show) and one set filter (so Clear is present). The
-        // boxes are real text boxes with app-owned buffers, exactly as the page builds them.
-        let mut players = 0u32;
-        let mut rating = 45u8;
-        let mut visits = 0u64;
-        let mut players_box = crate::chart_feed::FilterBox::default();
-        let mut like_box = crate::chart_feed::FilterBox {
-            text: "45".to_string(),
-        };
-        let mut visits_box = crate::chart_feed::FilterBox::default();
-        card(ui, probe, "charts.filters", 966.0, |ui, probe| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                let any = !players_box.text.is_empty() || !like_box.text.is_empty();
-                let group_w = ((ui.available_width() - 58.0 - 24.0) / 3.0).floor();
-
-                ui.allocate_ui_with_layout(
-                    Vec2::new(group_w, 22.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(52.0, 22.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                probe.label(
-                                    ui,
-                                    "charts.f.players.label",
-                                    "Players",
-                                    egui::FontId::proportional(12.5),
-                                    MUTED,
-                                    CARD,
-                                );
-                            },
-                        );
-                        ui.add_space(6.0);
-                        let rail_w = (ui.available_width() - 64.0 - 6.0).max(72.0);
-                        ui.spacing_mut().slider_width = rail_w;
-                        let rail = ui
-                            .scope(|ui| {
-                                ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.active.bg_fill = RAIL;
-                                ui.add_sized(
-                                    Vec2::new(rail_w, 24.0),
-                                    egui::Slider::new(&mut players, 0..=100_000u32)
-                                        .step_by(50.0)
-                                        .show_value(false),
-                                )
-                            })
-                            .inner;
-                        probe.widget("charts.f.players.rail", rail.rect, true);
-                        ui.add_space(6.0);
-                        let value = ui.add_sized(
-                            [64.0, 22.0],
-                            egui::TextEdit::singleline(&mut players_box.text).hint_text("0"),
-                        );
-                        probe.widget("charts.f.players.box", value.rect, false);
-                    },
-                );
-
-                ui.allocate_ui_with_layout(
-                    Vec2::new(group_w, 22.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(52.0, 22.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                probe.label(
-                                    ui,
-                                    "charts.f.like.label",
-                                    "Like %",
-                                    egui::FontId::proportional(12.5),
-                                    MUTED,
-                                    CARD,
-                                );
-                            },
-                        );
-                        ui.add_space(6.0);
-                        let rail_w = (ui.available_width() - 64.0 - 6.0).max(72.0);
-                        ui.spacing_mut().slider_width = rail_w;
-                        let rail = ui
-                            .scope(|ui| {
-                                ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.active.bg_fill = RAIL;
-                                ui.add_sized(
-                                    Vec2::new(rail_w, 24.0),
-                                    egui::Slider::new(&mut rating, 0..=100u8).show_value(false),
-                                )
-                            })
-                            .inner;
-                        probe.widget("charts.f.like.rail", rail.rect, true);
-                        ui.add_space(6.0);
-                        let value = ui.add_sized(
-                            [64.0, 22.0],
-                            egui::TextEdit::singleline(&mut like_box.text).hint_text("Min"),
-                        );
-                        probe.widget("charts.f.like.box", value.rect, false);
-                    },
-                );
-
-                ui.allocate_ui_with_layout(
-                    Vec2::new(group_w, 22.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(52.0, 22.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                probe.label(
-                                    ui,
-                                    "charts.f.visits.label",
-                                    "Visits",
-                                    egui::FontId::proportional(12.5),
-                                    MUTED,
-                                    CARD,
-                                );
-                            },
-                        );
-                        ui.add_space(6.0);
-                        let rail_w = (ui.available_width() - 64.0 - 6.0).max(72.0);
-                        ui.spacing_mut().slider_width = rail_w;
-                        let rail = ui
-                            .scope(|ui| {
-                                ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.active.bg_fill = RAIL;
-                                ui.add_sized(
-                                    Vec2::new(rail_w, 24.0),
-                                    egui::Slider::new(&mut visits, 0..=100_000_000u64)
-                                        .step_by(100_000.0)
-                                        .show_value(false),
-                                )
-                            })
-                            .inner;
-                        probe.widget("charts.f.visits.rail", rail.rect, true);
-                        ui.add_space(6.0);
-                        let value = ui.add_sized(
-                            [64.0, 22.0],
-                            egui::TextEdit::singleline(&mut visits_box.text).hint_text("0"),
-                        );
-                        probe.widget("charts.f.visits.box", value.rect, false);
-                    },
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if any {
-                        probe.button(
-                            ui,
-                            "charts.f.clear",
-                            "Clear",
-                            Vec2::new(58.0, 24.0),
-                            SURFACE,
-                            MUTED,
-                        );
-                    }
-                });
-            });
-        });
+        charts_filter_bar(ui, probe);
         ui.add_space(10.0);
 
         // The culled card grid: thumbnails, name and pre-formatted stats.

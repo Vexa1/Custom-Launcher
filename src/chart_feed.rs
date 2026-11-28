@@ -125,6 +125,20 @@ impl FilterBox {
         parse_filter_amount(&self.text)
     }
 
+    /// What a *ceiling* box (\"Max Players\") means. An empty box, `Max` or `0` is no upper
+    /// limit at all: `Some(None)`. `None` means the text is not a number yet, so the filter is
+    /// left alone - the same rule that lets a half-typed minimum keep its characters.
+    pub fn edited_ceiling(&self) -> Option<Option<u64>> {
+        let text = self.text.trim();
+        if text.is_empty() || text.eq_ignore_ascii_case("max") {
+            return Some(None);
+        }
+        match parse_filter_amount(text)? {
+            0 => Some(None),
+            n => Some(Some(n)),
+        }
+    }
+
     /// Mirrors a slider value into the text. A focused box is left exactly as the user typed it.
     pub fn sync_from_slider(&mut self, value: u64, focused: bool) {
         if !focused {

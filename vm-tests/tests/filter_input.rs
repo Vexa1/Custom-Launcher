@@ -143,3 +143,23 @@ fn typed_amounts_accept_separators_percent_and_shorthand() {
     state.text = "1.5".to_string();
     assert_eq!(state.edited_value(), Some(2), "shorthand-less decimals round");
 }
+
+/// The "Max Players" pill: an empty box, `Max` or `0` is no upper limit at all, a number is the
+/// ceiling, and text that is not a number yet leaves the filter alone.
+#[test]
+fn a_ceiling_box_means_no_limit_when_it_is_empty_max_or_zero() {
+    let box_with = |text: &str| FilterBox {
+        text: text.to_string(),
+    };
+    assert_eq!(box_with("").edited_ceiling(), Some(None));
+    assert_eq!(box_with("   ").edited_ceiling(), Some(None));
+    assert_eq!(box_with("Max").edited_ceiling(), Some(None));
+    assert_eq!(box_with("max").edited_ceiling(), Some(None));
+    assert_eq!(box_with("0").edited_ceiling(), Some(None), "0 is not a ceiling");
+    assert_eq!(box_with("500").edited_ceiling(), Some(Some(500)));
+    assert_eq!(box_with("5,000").edited_ceiling(), Some(Some(5_000)));
+    assert_eq!(box_with("5k").edited_ceiling(), Some(Some(5_000)));
+    assert_eq!(box_with("2m").edited_ceiling(), Some(Some(2_000_000)));
+    assert_eq!(box_with("abc").edited_ceiling(), None, "half-typed text is left alone");
+    assert_eq!(box_with("-").edited_ceiling(), None);
+}

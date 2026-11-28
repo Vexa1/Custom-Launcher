@@ -21,9 +21,14 @@ fn mix(mut h: u64, v: u64) -> u64 {
     h.wrapping_mul(0x100_0000_01b3)
 }
 
-/// Width of a filter's value box; the rail takes whatever is left in its group.
+/// Width of a filter pill (the rounded box you type in) and its height.
 const VALUE_BOX_W: f32 = 64.0;
-/// Fixed caption column: keeps the three rails starting at the same offset in their group.
+const PILL_H: f32 = 26.0;
+/// The en dash between the two player pills, the gap between filter groups, and Clear's width.
+const DASH_W: f32 = 14.0;
+const GAP: f32 = 8.0;
+const CLEAR_W: f32 = 58.0;
+/// Fixed caption column: keeps the rails starting at the same offset in their group.
 const LABEL_W: f32 = 52.0;
 
 /// One filter of the bar: a fixed slice of the row, its children laid out left to right.
@@ -67,6 +72,59 @@ fn filter_label(ui: &mut egui::Ui, text: &str, width: f32) {
     );
     let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5);
     ui.painter().galley(pos, galley, color);
+}
+
+/// The en dash between the minimum and maximum pills, centred in its own slice so the two
+/// pills keep a fixed distance whatever the group width.
+fn filter_sep(ui: &mut egui::Ui) {
+    let color = pal(ui).muted;
+    let galley = ui
+        .painter()
+        .layout_no_wrap("\u{2013}".to_string(), egui::FontId::proportional(12.0), color);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(DASH_W, ui.spacing().interact_size.y.max(20.0)),
+        Sense::hover(),
+    );
+    let pos = egui::pos2(
+        rect.center().x - galley.size().x * 0.5,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    ui.painter().galley(pos, galley, color);
+}
+
+/// One filter pill: a rounded dark box with its value (or its hint) centred horizontally *and*
+/// vertically. The pill paints its own frame and hosts a frameless text box inside a centred,
+/// justified child, so a two-character value sits in the middle of the box instead of the
+/// top-left corner. The buffer is the caller's `String`, so typing is never fought by a redraw.
+fn filter_pill(ui: &mut egui::Ui, text: &mut String, hint: &str, hover: &str) -> egui::Response {
+    let p = pal(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(VALUE_BOX_W, PILL_H), Sense::hover());
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(9),
+        p.surface_bg,
+        egui::Stroke::new(1.0, p.border),
+        egui::StrokeKind::Inside,
+    );
+    // 6 px of padding left and right, 1 px top and bottom: the child gets the rest.
+    let inner = rect.shrink2(egui::vec2(6.0, 1.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::LeftToRight,
+            )),
+    );
+    let resp = child.add(
+        egui::TextEdit::singleline(text)
+            .hint_text(hint)
+            .frame(egui::Frame::NONE)
+            // One align for both axes: the value sits dead centre of the pill.
+            .align(egui::Align2::CENTER_CENTER)
+            .margin(egui::Margin::ZERO)
+            .desired_width(inner.width()),
+    );
+    resp.on_hover_text(hover)
 }
 
 impl Creblox {
@@ -125,33 +183,39 @@ impl Creblox {
         });
         ui.add_space(10.0);
 
-        // Filters: one horizontal line, each with a bar and exactly one box for an exact
-        // number.
+        // Filters: Players is one wide group - a minimum rail, then a minimum pill and a
+        // maximum pill - followed by Like % and Visits as single slots, with Clear pinned to
+        // the right while any filter is set. Each pill's buffer is app state: it is never
+        // rebuilt from the number while the caret is in it, which is what makes typing a
+        // value stick.
         let mut min_players = self.chart_min_players;
         let mut min_rating = self.chart_min_rating;
         let mut min_visits = self.chart_min_visits;
-        // Filters: one balanced line of three equal groups, with Clear pinned to the right.
-        // Each group is label / 6 px / rail / 6 px / a real text box. The box's `String` is
-        // app state: it is never rebuilt from the number while the caret is in it, which is
-        // what makes typing a value stick.
-        let any_filter = min_players > 0 || min_rating > 0 || min_visits > 0;
+        let mut max_players = self.chart_max_players;
+        let any_filter =
+            min_players > 0 || max_players.is_some() || min_rating > 0 || min_visits > 0;
         let mut players_box = std::mem::take(&mut self.chart_players_box);
+        let mut max_players_box = std::mem::take(&mut self.chart_max_players_box);
         let mut like_box = std::mem::take(&mut self.chart_like_box);
         let mut visits_box = std::mem::take(&mut self.chart_visits_box);
         card_frame(ui, 10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-                let clear_w = if any_filter { 58.0 } else { 0.0 };
-                let group_w = ((ui.available_width() - clear_w - 24.0) / 3.0)
+                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+                let clear_w = if any_filter { CLEAR_W } else { 0.0 };
+                // Four slots, and Players owns two of them so its two pills fit beside the
+                // rail instead of squeezing into one.
+                let slot = ((ui.available_width() - clear_w - GAP * 4.0) / 4.0)
                     .floor()
-                    .max(228.0);
+                    .max(138.0);
+                let players_w = slot * 2.0 + GAP;
                 let rail = rail_color(&p);
 
-                filter_group(ui, group_w, |ui| {
+                filter_group(ui, players_w, |ui| {
                     filter_label(ui, "Players", LABEL_W);
                     ui.add_space(6.0);
-                    let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
+                    let rail_w =
+                        (ui.available_width() - VALUE_BOX_W * 2.0 - DASH_W - 18.0).max(72.0);
                     ui.spacing_mut().slider_width = rail_w;
                     let slider_changed = ui
                         .scope(|ui| {
@@ -168,11 +232,11 @@ impl Creblox {
                         .inner
                         .changed();
                     ui.add_space(6.0);
-                    let edit = ui.add_sized(
-                        [VALUE_BOX_W, 22.0],
-                        egui::TextEdit::singleline(&mut players_box.text)
-                            .hint_text("0")
-                            .margin(egui::Margin::symmetric(5, 2)),
+                    let edit = filter_pill(
+                        ui,
+                        &mut players_box.text,
+                        "Min",
+                        "Type an exact minimum number of players (blank = any)",
                     );
                     // Type-to-filter: the parsed number applies immediately, the characters
                     // stay exactly as typed.
@@ -187,10 +251,30 @@ impl Creblox {
                     if edit.lost_focus() {
                         players_box.normalize(min_players as u64);
                     }
-                    edit.on_hover_text("Type an exact minimum number of players (blank = any)");
+                    ui.add_space(6.0);
+                    filter_sep(ui);
+                    ui.add_space(6.0);
+                    let max_edit = filter_pill(
+                        ui,
+                        &mut max_players_box.text,
+                        "Max",
+                        "Type an exact maximum number of players (blank or 0 = no limit)",
+                    );
+                    // An empty box, \"Max\" or 0 means no upper limit at all.
+                    if max_edit.changed() {
+                        if let Some(ceiling) = max_players_box.edited_ceiling() {
+                            max_players = ceiling.map(|v| v.min(u32::MAX as u64) as u32);
+                        }
+                    }
+                    if max_edit.lost_focus() {
+                        match max_players {
+                            Some(v) => max_players_box.normalize(v as u64),
+                            None => max_players_box.text.clear(),
+                        }
+                    }
                 });
 
-                filter_group(ui, group_w, |ui| {
+                filter_group(ui, slot, |ui| {
                     filter_label(ui, "Like %", LABEL_W);
                     ui.add_space(6.0);
                     let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
@@ -206,11 +290,11 @@ impl Creblox {
                         .inner
                         .changed();
                     ui.add_space(6.0);
-                    let edit = ui.add_sized(
-                        [VALUE_BOX_W, 22.0],
-                        egui::TextEdit::singleline(&mut like_box.text)
-                            .hint_text("Min")
-                            .margin(egui::Margin::symmetric(5, 2)),
+                    let edit = filter_pill(
+                        ui,
+                        &mut like_box.text,
+                        "Min",
+                        "Type an exact minimum like ratio (blank = any)",
                     );
                     if edit.changed() {
                         if let Some(v) = like_box.edited_value() {
@@ -223,10 +307,9 @@ impl Creblox {
                     if edit.lost_focus() {
                         like_box.normalize(min_rating as u64);
                     }
-                    edit.on_hover_text("Type an exact minimum like ratio (blank = any)");
                 });
 
-                filter_group(ui, group_w, |ui| {
+                filter_group(ui, slot, |ui| {
                     filter_label(ui, "Visits", LABEL_W);
                     ui.add_space(6.0);
                     let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
@@ -246,11 +329,11 @@ impl Creblox {
                         .inner
                         .changed();
                     ui.add_space(6.0);
-                    let edit = ui.add_sized(
-                        [VALUE_BOX_W, 22.0],
-                        egui::TextEdit::singleline(&mut visits_box.text)
-                            .hint_text("0")
-                            .margin(egui::Margin::symmetric(5, 2)),
+                    let edit = filter_pill(
+                        ui,
+                        &mut visits_box.text,
+                        "Min",
+                        "Type an exact minimum number of visits (blank = any)",
                     );
                     if edit.changed() {
                         if let Some(v) = visits_box.edited_value() {
@@ -263,7 +346,6 @@ impl Creblox {
                     if edit.lost_focus() {
                         visits_box.normalize(min_visits);
                     }
-                    edit.on_hover_text("Type an exact minimum number of visits (blank = any)");
                 });
 
                 ui.with_layout(
@@ -276,12 +358,14 @@ impl Creblox {
                             .fill(p.surface_bg)
                             .stroke(egui::Stroke::new(1.0, p.border))
                             .corner_radius(12)
-                            .min_size(egui::vec2(58.0, 24.0));
+                            .min_size(egui::vec2(CLEAR_W, 24.0));
                             if ui.add(clear).on_hover_text("Clear all filters").clicked() {
                                 min_players = 0;
+                                max_players = None;
                                 min_rating = 0;
                                 min_visits = 0;
                                 players_box.normalize(0);
+                                max_players_box.text.clear();
                                 like_box.normalize(0);
                                 visits_box.normalize(0);
                             }
@@ -291,10 +375,14 @@ impl Creblox {
             });
         });
         self.chart_players_box = players_box;
+        self.chart_max_players_box = max_players_box;
         self.chart_like_box = like_box;
         self.chart_visits_box = visits_box;
         if self.chart_min_players != min_players {
             self.chart_min_players = min_players;
+        }
+        if self.chart_max_players != max_players {
+            self.chart_max_players = max_players;
         }
         if self.chart_min_rating != min_rating {
             self.chart_min_rating = min_rating;
@@ -304,6 +392,7 @@ impl Creblox {
         }
 
         let min_players = self.chart_min_players;
+        let max_players = self.chart_max_players;
         let min_rating = self.chart_min_rating;
         let min_visits = self.chart_min_visits;
         ui.add_space(10.0);
@@ -332,12 +421,14 @@ impl Creblox {
         sig = mix(sig, self.feed_salt);
         sig = mix(sig, self.feed_shuffled as u64);
         sig = mix(sig, min_players as u64);
+        // 0 already means "no ceiling" in the hash, so a set ceiling is biased by one.
+        sig = mix(sig, max_players.map_or(0, |v| v as u64 + 1));
         sig = mix(sig, min_rating as u64);
         sig = mix(sig, min_visits);
         sig = mix(sig, self.game_visits.len() as u64);
         if sig != self.feed_sig {
             self.feed_sig = sig;
-            self.rebuild_feed_pool(min_players, min_rating, min_visits);
+            self.rebuild_feed_pool(min_players, max_players, min_rating, min_visits);
         }
 
         let matched = self.feed_pool.len();
@@ -431,7 +522,13 @@ impl Creblox {
 
     /// Deduplicates every chart into one pool, applies the filters, orders it and stores
     /// it. Results are cached in `feed_pool` so drawing is a plain slice read.
-    fn rebuild_feed_pool(&mut self, min_players: u32, min_rating: u8, min_visits: u64) {
+    fn rebuild_feed_pool(
+        &mut self,
+        min_players: u32,
+        max_players: Option<u32>,
+        min_rating: u8,
+        min_visits: u64,
+    ) {
         let mut pool: Vec<Game> = Vec::new();
         let mut missing_visits: Vec<u64> = Vec::new();
         if let Some(Ok(sorts)) = &self.sorts {
@@ -454,6 +551,9 @@ impl Creblox {
             }
             refs.retain(|g| {
                 if g.playing < min_players as u64 {
+                    return false;
+                }
+                if max_players.is_some_and(|max| g.playing > max as u64) {
                     return false;
                 }
                 let votes = g.up + g.down;

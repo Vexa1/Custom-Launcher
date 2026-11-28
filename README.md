@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.29
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.30
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -406,10 +406,18 @@ and shows *"End of chart"* only when the API sends no cursor.
   parsed (`fill_labels`), so a drawn card reads strings instead of formatting numbers.
 - Thumbnails are still requested through the launcher's capped loader and
   `enforce_ram_cache_budget`, so scrolling deep does not grow RAM without bound.
-- **Type-to-filter.** The Players / Like % / Visits boxes are real `TextEdit`s whose `String`
+- **Type-to-filter.** The Players / Like % / Visits pills are real `TextEdit`s whose `String`
   lives in the app (`chart_feed::FilterBox`), not in the frame. Typing applies live (`1.5k`,
   `2m`, `45%` and `1,250` all parse) and is never overwritten while the caret is in the box:
   only an actual slider drag (while unfocused) or the caret leaving normalizes the text.
+- **Min *and* Max players.** `Players: [Min] - [Max]`: the minimum has a rail beside it, the
+  maximum is the pill past the en dash. An empty, `Max` or `0` ceiling
+  (`FilterBox::edited_ceiling`) means no upper limit, so `<= 500` or `<= 5,000` is one number
+  away. Clear empties both pills along with Like % and Visits.
+- **Centred pills.** A filter pill paints its own rounded frame and hosts a frameless text box
+  in a centred, justified child with `TextEdit::align(CENTER_CENTER)`, so a two-character value
+  sits in the middle of the box instead of the top-left corner - hint text takes the same
+  alignment, which is how `Min` / `Max` read as centred placeholders.
 
 `vm-tests/tests/charts.rs` covers the page decoder, a 1,250-game cursor walk, cross-page and
 cross-sort dedupe, the in-flight/`429` guards and the viewport row window.
