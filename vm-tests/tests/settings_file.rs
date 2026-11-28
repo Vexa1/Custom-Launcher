@@ -407,10 +407,32 @@ fn a_newer_schema_still_opens() {
         (412, 236, 320, 128)
     );
 
-    save_settings_to(&dir, &loaded);
+    // ... and this build must not write it back: a version 9 file holds settings this build
+    // has never heard of, and rewriting it would delete them for the newer build too.
+    let before = fs::read_to_string(dir.join("settings.json")).expect("fixture file");
+    assert!(
+        !save_settings_to(&dir, &loaded),
+        "a newer file is not ours to overwrite"
+    );
+    let after = fs::read_to_string(dir.join("settings.json")).expect("fixture file");
+    assert_eq!(after, before, "the newer build's file is byte-for-byte untouched");
+    let untouched: Value = serde_json::from_str(&after).expect("settings.json parses");
+    assert_eq!(untouched["schema"], serde_json::json!(9));
+    assert_eq!(untouched["some_future_key"]["nested"], serde_json::json!(true));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_current_version_file_is_still_written() {
+    // The read-only rule is about newer files only: this build's own files save normally.
+    let dir = temp_dir("schema-current");
+    assert!(save_settings_to(&dir, &picture_at_412_236()));
+
     let text = fs::read_to_string(dir.join("settings.json")).expect("settings.json written");
-    let written: Value = serde_json::from_str(&text).expect("settings.json parses");
-    assert_eq!(written["schema"], serde_json::json!(SETTINGS_VERSION));
+    let file: Value = serde_json::from_str(&text).expect("settings.json parses");
+    assert_eq!(file["schema"], serde_json::json!(SETTINGS_VERSION));
+    assert!(save_settings_to(&dir, &Settings::default()), "a second save writes");
 
     let _ = fs::remove_dir_all(&dir);
 }

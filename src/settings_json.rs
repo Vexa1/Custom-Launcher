@@ -23,6 +23,13 @@ pub fn settings_version(v: &Value) -> u64 {
     v["schema"].as_u64().filter(|n| *n > 0).unwrap_or(1)
 }
 
+/// The version of the `settings.json` already in `dir`, if there is a readable one.
+pub fn existing_version(dir: &Path) -> Option<u64> {
+    let text = fs::read_to_string(dir.join("settings.json")).ok()?;
+    let v = serde_json::from_str::<Value>(&text).ok()?;
+    Some(settings_version(&v))
+}
+
 fn read_opt_rgb(v: &Value, key: &str) -> Option<[u8; 3]> {
     let arr = v[key].as_array()?;
     if arr.len() != 3 {
@@ -358,8 +365,15 @@ pub fn load_settings_from(dir: &Path) -> Settings {
     }
 }
 
-/// Writes `s` into `dir/settings.json`.
-pub fn save_settings_to(dir: &Path, s: &Settings) {
+/// Writes `s` into `dir/settings.json`, returning whether the file was written.
+///
+/// A file from a **newer build** is left exactly as it is: this build understands only its own
+/// keys, so rewriting it would drop every setting the newer build added - the newer build would
+/// then open its own file with those settings missing. `false` means "not ours to overwrite".
+pub fn save_settings_to(dir: &Path, s: &Settings) -> bool {
+    if existing_version(dir).is_some_and(|version| version > SETTINGS_VERSION) {
+        return false;
+    }
     let mode_str = match s.bg_mode {
         BgMode::ThemeDefault => "default",
         BgMode::SolidColor => "color",
@@ -473,6 +487,7 @@ pub fn save_settings_to(dir: &Path, s: &Settings) {
         .insert_into(obj);
     }
     if let Ok(text) = serde_json::to_string_pretty(&v) {
-        let _ = fs::write(dir.join("settings.json"), text);
+        return fs::write(dir.join("settings.json"), text).is_ok();
     }
+    false
 }

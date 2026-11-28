@@ -184,7 +184,12 @@ pub fn load_settings() -> Settings {
 }
 
 pub fn save_settings(s: &Settings) {
-    crate::settings_json::save_settings_to(&data_dir(), s)
+    // A settings.json written by a newer build is read-only here: it holds keys this build does
+    // not know, and rewriting it would throw them away. Say so once per save instead of
+    // silently doing it.
+    if !crate::settings_json::save_settings_to(&data_dir(), s) {
+        log("settings.json was written by a newer CREBLOX; leaving it untouched");
+    }
 }
 
 #[cfg(windows)]
