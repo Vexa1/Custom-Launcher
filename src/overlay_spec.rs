@@ -571,6 +571,56 @@ impl ImageBox {
     }
 }
 
+/// Which part of the custom image a press landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImagePart {
+    /// The picture itself: a drag moves the whole box.
+    Body,
+    /// A corner grip: `0` top-left, `1` top-right, `2` bottom-left, `3` bottom-right.
+    Corner(u8),
+}
+
+/// The grab target around each corner, in points. Twice the 8 px square the editor draws,
+/// which is the smallest hit target the app allows anywhere else.
+pub const IMAGE_GRIP: f32 = 24.0;
+
+/// Resolves a press at `pos` (window space) against the image box `(x, y, w, h)`.
+///
+/// Corners are checked first and always win over the body, so a handle consumes the drag it
+/// started even though it overlaps the picture. `None` means the press missed the image and
+/// the selection frame around it.
+pub fn image_part(rect: (f32, f32, f32, f32), pos: (f32, f32)) -> Option<ImagePart> {
+    let (x, y, w, h) = rect;
+    let half = IMAGE_GRIP * 0.5;
+    for (i, (cx, cy)) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+        .into_iter()
+        .enumerate()
+    {
+        if (pos.0 - cx).abs() <= half && (pos.1 - cy).abs() <= half {
+            return Some(ImagePart::Corner(i as u8));
+        }
+    }
+    (pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h).then_some(ImagePart::Body)
+}
+
+/// Applies one frame of a drag: the body moves, a corner resizes from the opposite edge.
+///
+/// Shared by the overlay window and the pointer simulation in `vm-tests`, so the drag the
+/// user performs and the drag the test asserts can never follow different arithmetic.
+pub fn drag_image(
+    box_: ImageBox,
+    part: ImagePart,
+    dx: f32,
+    dy: f32,
+    view: (f32, f32),
+    lock: bool,
+) -> ImageBox {
+    match part {
+        ImagePart::Body => box_.moved(dx, dy, view),
+        ImagePart::Corner(i) => box_.resized(i, dx, dy, view, lock),
+    }
+}
+
 /// The custom image's saved box as it appears in `settings.json`.
 ///
 /// Both sides of the file go through this type: the loader reads it (including the 0.5.51 file

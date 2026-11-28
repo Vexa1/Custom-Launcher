@@ -919,27 +919,30 @@ fn hex_points(center: egui::Pos2, radius: f32) -> Vec<egui::Pos2> {
 pub fn toggle_switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
     let p = pal(ui);
     let accent = accent_color(ui);
+    let enabled = ui.is_enabled();
     let row_w = ui.available_width();
+    let label_color = if enabled { p.text } else { p.muted };
     let galley = ui.painter().layout(
         label.to_owned(),
         egui::FontId::proportional(crate::theme::TEXT_BODY),
-        p.text,
+        label_color,
         (row_w - 52.0).max(120.0),
     );
     let height = galley.size().y.max(24.0);
     let (rect, mut response) =
         ui.allocate_exact_size(egui::vec2(row_w, height), Sense::click());
-    if response.clicked()
-        || (response.has_focus()
-            && ui.input(|i| {
-                i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)
-            }))
+    if enabled
+        && (response.clicked()
+            || (response.has_focus()
+                && ui.input(|i| {
+                    i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)
+                })))
     {
         *on = !*on;
         response.mark_changed();
     }
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, label)
+        egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, *on, label)
     });
     if ui.is_rect_visible(rect) {
         let t = if crate::theme::motion_enabled(ui.ctx()) {
@@ -954,20 +957,32 @@ pub fn toggle_switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Res
             egui::pos2(rect.right() - 40.0, rect.center().y - 11.0),
             egui::vec2(40.0, 22.0),
         );
-        let rest = if response.hovered() {
+        // A disabled switch must read as disabled, not as an active one: the track keeps only a
+        // muted hint of the accent and the knob is grey, so a sub-toggle under an off master
+        // can never look on.
+        let rest = if !enabled {
+            p.widget_inactive
+        } else if response.hovered() {
             lerp_color(p.widget_inactive, p.widget_hovered, 0.6)
         } else {
             p.widget_inactive
         };
-        ui.painter().rect_filled(
-            track,
-            CornerRadius::same(crate::theme::RADIUS_PILL),
-            lerp_color(rest, accent, t),
-        );
-        let knob_x = egui::lerp((track.left() + 11.0)..=(track.right() - 11.0), t);
+        let fill = if enabled {
+            lerp_color(rest, accent, t)
+        } else {
+            lerp_color(rest, accent, t * 0.35)
+        };
         ui.painter()
-            .circle_filled(egui::pos2(knob_x, track.center().y), 8.0, Color32::WHITE);
-        if response.has_focus() {
+            .rect_filled(track, CornerRadius::same(crate::theme::RADIUS_PILL), fill);
+        let knob_x = egui::lerp((track.left() + 11.0)..=(track.right() - 11.0), t);
+        let knob = if enabled {
+            Color32::WHITE
+        } else {
+            p.muted.gamma_multiply(0.75)
+        };
+        ui.painter()
+            .circle_filled(egui::pos2(knob_x, track.center().y), 8.0, knob);
+        if enabled && response.has_focus() {
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
                 CornerRadius::same(crate::theme::RADIUS_CONTROL),
@@ -978,7 +993,7 @@ pub fn toggle_switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Res
         ui.painter().galley(
             egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5),
             galley,
-            p.text,
+            label_color,
         );
     }
     response
@@ -997,8 +1012,10 @@ pub fn segmented(
     if options.is_empty() {
         return false;
     }
+    let enabled = ui.is_enabled();
     let p = pal(ui);
     let accent = accent_color(ui);
+    let accent = if enabled { accent } else { accent.gamma_multiply(0.45) };
     let mut width = ui.available_width();
     if !width.is_finite() || width < 160.0 {
         width = 320.0;
@@ -1025,13 +1042,15 @@ pub fn segmented(
         let active = *selected == i;
         let fill = if active {
             accent
-        } else if response.hovered() {
+        } else if enabled && response.hovered() {
             p.hover_bg
         } else {
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(seg, pill, fill);
-        let color = if active {
+        let color = if !enabled {
+            p.muted
+        } else if active {
             crate::theme::ON_ACCENT
         } else {
             p.text
@@ -1043,11 +1062,32 @@ pub fn segmented(
         );
         ui.painter()
             .galley(seg.center() - galley.size() * 0.5, galley, color);
-        if response.clicked() && !active {
+        if enabled && response.clicked() && !active {
             *selected = i;
             changed = true;
         }
-        if response.has_focus() {
+        // Left/Right move the selection while a segment has focus, the same way a native
+        // segmented control behaves. Clamped, so the ends do not wrap past the options.
+        if enabled && response.has_focus() {
+            let step = ui.input(|i| {
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    Some(-1i32)
+                } else if i.key_pressed(egui::Key::ArrowRight) {
+                    Some(1i32)
+                } else {
+                    None
+                }
+            });
+            if let Some(step) = step {
+                let last = options.len() as i32 - 1;
+                let next = (*selected as i32 + step).clamp(0, last) as usize;
+                if next != *selected {
+                    *selected = next;
+                    changed = true;
+                }
+            }
+        }
+        if enabled && response.has_focus() {
             ui.painter().rect_stroke(
                 seg,
                 pill,

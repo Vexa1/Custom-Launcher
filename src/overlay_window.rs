@@ -920,6 +920,9 @@ struct OverlayWindowApp {
     /// `0..=3` a corner, `4` the whole picture, `None` nothing.
     image_rect: Option<Rect>,
     image_grip: Option<u8>,
+    /// The part the current drag grabbed, decided once at press so a corner keeps the drag
+    /// even after the pointer leaves its grip.
+    image_drag: Option<overlay_spec::ImagePart>,
     /// The image's box and the game area it was fitted into, in points from that area's
     /// top-left - the coordinates the editor and settings.json use.
     image_box: Option<crate::overlay_spec::ImageBox>,
@@ -928,6 +931,8 @@ struct OverlayWindowApp {
     hovering: Option<String>,
     /// The window accepts mouse input (edit mode only).
     interactive: bool,
+    /// Last cursor-hit-test state sent to the window; the command is only sent on change.
+    passthrough: Option<bool>,
     /// Laid-out panels, in game-window space.
     layout: Vec<PanelLayout>,
     /// `(spec generation, ppp, opacity, width, height, title bar)` the layout was built for.
@@ -975,10 +980,12 @@ impl OverlayWindowApp {
             live_rects: Vec::new(),
             image_rect: None,
             image_grip: None,
+            image_drag: None,
             image_box: None,
             image_view: (0.0, 0.0),
             hovering: None,
             interactive: false,
+            passthrough: None,
             layout: Vec::new(),
             layout_stamp: None,
             spec_gen: 0,
@@ -1035,6 +1042,14 @@ impl OverlayWindowApp {
                 .collect()
         } else {
             Vec::new()
+        };
+        // The picture needs the same protection: the launcher rewrites this file while the
+        // editor is open, and reading the saved box back would snap it out from under the
+        // pointer on every reload.
+        let live_image = if self.edit {
+            self.image.as_ref().map(|i| (i.x, i.y, i.w, i.h))
+        } else {
+            None
         };
         let edit = spec["edit"].as_bool().unwrap_or(false);
         if !edit {
@@ -1137,6 +1152,12 @@ impl OverlayWindowApp {
                     saved: (saved.x as f32, saved.y as f32, saved.w, saved.h),
                 }
             });
+        if let (Some((x, y, w, h)), Some(img)) = (live_image, self.image.as_mut()) {
+            img.x = x;
+            img.y = y;
+            img.w = w;
+            img.h = h;
+        }
         self.crosshair = spec
             .get("crosshair")
             .filter(|c| c.is_object())
@@ -1955,72 +1976,70 @@ impl OverlayWindowApp {
             ui.ctx().request_repaint();
         }
 
-        // The custom image: drag anywhere inside it to move it, or grab one of the four
-        // corner handles to resize. Shift keeps the aspect ratio while resizing.
+        // The custom image: one hitbox for the picture and all four handles. The press
+        // position decides what was grabbed (corners first), so a handle always consumes its
+        // drag before the body can - per-widget overlapping hitboxes depended on egui's
+        // hit-test order and made the picture feel dead wherever another target sat on it.
         let mut image_active = false;
         if let (Some(rect), Some(box_), true) =
             (self.image_rect, self.image_box, self.image.is_some())
         {
             let view = self.image_view;
             let hit = rect.translate(-self.shift);
-            let corners = [
-                hit.left_top(),
-                hit.right_top(),
-                hit.left_bottom(),
-                hit.right_bottom(),
-            ];
-            let hold_shift = ui.input(|i| i.modifiers.shift);
-            let mut corner_hit = None;
-            for (i, corner) in corners.iter().enumerate() {
-                // A 24 px target around the 8 px square drawn below: still easy to grab on a
-                // Retina display, and the smallest hit target this app allows anywhere else.
-                let target = Rect::from_center_size(*corner, vec2(24.0, 24.0));
-                let response = ui.interact(
-                    target,
-                    ui.scope_id().with(("creblox-hud-image-corner", i)),
-                    egui::Sense::drag(),
-                );
-                if response.hovered() || response.dragged() {
-                    corner_hit = Some(i as u8);
-                    image_active = true;
-                    self.image_grip = Some(i as u8);
-                    ui.ctx().set_cursor_icon(if i == 0 || i == 3 {
-                        egui::CursorIcon::ResizeNwSe
-                    } else {
-                        egui::CursorIcon::ResizeNeSw
+            let zone = hit.expand(overlay_spec::IMAGE_GRIP / 2.0);
+            let response = ui.interact(
+                zone,
+                ui.scope_id().with("creblox-hud-image"),
+                egui::Sense::click_and_drag(),
+            );
+            let part_at = |p: egui::Pos2| {
+                overlay_spec::image_part(
+                    (hit.left(), hit.top(), hit.width(), hit.height()),
+                    (p.x, p.y),
+                )
+            };
+            let hovered_part = ui.input(|i| i.pointer.interact_pos()).and_then(part_at);
+            if response.drag_started() {
+                // Resolve against the press origin, not the pointer after the first move.
+                self.image_drag = ui
+                    .input(|i| i.pointer.press_origin())
+                    .and_then(part_at)
+                    .or(hovered_part);
+            }
+            if response.hovered() || response.dragged() {
+                image_active = true;
+                if let Some(part) = hovered_part {
+                    self.image_grip = Some(match part {
+                        overlay_spec::ImagePart::Body => 4,
+                        overlay_spec::ImagePart::Corner(i) => i,
+                    });
+                    ui.ctx().set_cursor_icon(match part {
+                        overlay_spec::ImagePart::Body => egui::CursorIcon::Grab,
+                        overlay_spec::ImagePart::Corner(0 | 3) => {
+                            egui::CursorIcon::ResizeNwSe
+                        }
+                        overlay_spec::ImagePart::Corner(_) => {
+                            egui::CursorIcon::ResizeNeSw
+                        }
                     });
                 }
-                if response.dragged() {
-                    let delta = response.drag_delta();
-                    let next = box_.resized(i as u8, delta.x, delta.y, view, hold_shift);
-                    if let Some(img) = self.image.as_mut() {
-                        apply_image_box(img, next);
-                    }
-                    self.dragging = Some("image".to_string());
-                    self.spec_gen = self.spec_gen.wrapping_add(1);
-                    ui.ctx().request_repaint();
-                }
             }
-            if corner_hit.is_none() {
-                let body = ui.interact(
-                    hit,
-                    ui.scope_id().with("creblox-hud-image-body"),
-                    egui::Sense::drag(),
-                );
-                if body.hovered() || body.dragged() {
-                    image_active = true;
-                    self.image_grip = Some(4);
+            if response.dragged()
+                && let Some(part) = self.image_drag
+            {
+                let hold_shift = ui.input(|i| i.modifiers.shift);
+                let delta = response.drag_delta();
+                let next =
+                    overlay_spec::drag_image(box_, part, delta.x, delta.y, view, hold_shift);
+                if let Some(img) = self.image.as_mut() {
+                    apply_image_box(img, next);
                 }
-                if body.dragged() {
-                    let delta = body.drag_delta();
-                    let next = box_.moved(delta.x, delta.y, view);
-                    if let Some(img) = self.image.as_mut() {
-                        apply_image_box(img, next);
-                    }
-                    self.dragging = Some("image".to_string());
-                    self.spec_gen = self.spec_gen.wrapping_add(1);
-                    ui.ctx().request_repaint();
-                }
+                self.dragging = Some("image".to_string());
+                self.spec_gen = self.spec_gen.wrapping_add(1);
+                ui.ctx().request_repaint();
+            }
+            if !response.dragged() {
+                self.image_drag = None;
             }
         }
         if image_active {
@@ -2362,6 +2381,7 @@ impl OverlayWindowApp {
             }
         }
         self.image_grip = None;
+        self.image_drag = None;
         self.spec_gen = self.spec_gen.wrapping_add(1);
         self.write_result(confirmed);
         self.edit = false;
@@ -2582,6 +2602,14 @@ impl eframe::App for OverlayWindowApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        // The editor is the only state in which the window may take clicks. Sending this as a
+        // viewport command (not only the native tweak) keeps winit's own cursor-hit-test state
+        // in step, which is what makes a drag reach egui at all.
+        let want_passthrough = !self.interactive;
+        if self.passthrough != Some(want_passthrough) {
+            self.passthrough = Some(want_passthrough);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(want_passthrough));
+        }
         // Advance the clock before drawing, so the frame that wakes on the boundary already
         // shows the new second instead of painting the old one and sleeping another tick.
         let tick = if self.visible || self.edit {
@@ -2621,7 +2649,10 @@ pub fn run(spec_path: PathBuf) -> eframe::Result<()> {
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()
-        .with_mouse_passthrough(true)
+        // Deliberately **not** `with_mouse_passthrough(true)`: winit keeps that state on the
+        // window, so it silently overrode the AppKit `setIgnoresMouseEvents:NO` that edit mode
+        // performs and every click fell through the picture. Passthrough is now driven by
+        // `ViewportCommand::MousePassthrough` from `ui()`, which the window backend applies.
         // Tool-window style: the HUD must never add a second taskbar button.
         .with_taskbar(false)
         .with_resizable(false);
