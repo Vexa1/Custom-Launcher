@@ -1853,8 +1853,25 @@ fn decode_images(
             .call()
             .ok()?
             .into_reader()
+            // A body larger than any thumbnail we would draw is not worth reading into RAM.
+            .take(crate::thumb_pipeline::MAX_IMAGE_BYTES)
             .read_to_end(&mut bytes)
             .ok()?;
+        // The decoder allocates w*h*4 before the resize below, so a picture that would blow
+        // the whole RAM budget in one worker is refused here. Dimensions come from the header;
+        // when a header cannot be parsed, the byte cap above is the only bound, as before.
+        let dimensions = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|reader| reader.into_dimensions().ok());
+        if let Some((width, height)) = dimensions {
+            if !crate::thumb_pipeline::decode_fits(width, height) {
+                crate::auth::log(&format!(
+                    "thumb: refused a {width}x{height} decode for {url}"
+                ));
+                return None;
+            }
+        }
         let image = image::load_from_memory(&bytes).ok()?;
         // Downscale once, on the worker: the texture the UI uploads is never bigger than the
         // size it is drawn at. A card thumbnail fills its tile; a gallery picture is fitted.

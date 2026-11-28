@@ -1075,7 +1075,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     ui,
                     probe,
                     "settings.cache.parts",
-                    "0 B textures · 0 B waiting · 0 B video · 0 B avatar · 0 B profiles",
+                    "0 B textures · 0 B waiting · 0 B video · 0 B avatar · 0 B profiles · process 0 MB",
                 );
             });
         });

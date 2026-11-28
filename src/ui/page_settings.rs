@@ -417,6 +417,15 @@ impl Creblox {
                         )
                     };
                     ui.label(RichText::new(note).size(12.0).color(p.muted));
+                    // The process total includes eframe's own image loader, the driver and
+                    // the overlay, so the two numbers together say where the RAM went.
+                    if let Some(rss) = crate::telemetry::current_process_ram_mb() {
+                        ui.label(
+                            RichText::new(format!("· process {rss:.0} MB"))
+                                .size(12.0)
+                                .color(p.muted),
+                        );
+                    }
                 });
 
                 ui.add_space(8.0);

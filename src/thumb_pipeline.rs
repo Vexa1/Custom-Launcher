@@ -65,6 +65,22 @@ pub const MAX_PENDING_IMAGES: usize = 48;
 /// message; the rest are asked for again on a later frame.
 pub const MAX_DOWNLOADS_PER_BATCH: usize = 32;
 
+/// Largest picture one decode may allocate: 2560x2560, about 26 MB of RGBA.
+///
+/// Every guard in `ram_budget` counts bytes *after* a decode, but the decoder allocates the
+/// full-size pixels first - a 20000x20000 PNG is a 1.6 GB `ColorImage` in one worker before
+/// any budget sees it. Thumbnails are drawn at 256x144 to 960x540, so refusing anything past
+/// this costs nothing visible.
+pub const MAX_DECODE_PIXELS: u64 = 2560 * 2560;
+
+/// Largest download a thumbnail worker will read before giving up on it.
+pub const MAX_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
+
+/// Whether a picture of `width`x`height` is small enough to decode inside the budget.
+pub fn decode_fits(width: u32, height: u32) -> bool {
+    (width as u64).saturating_mul(height as u64) <= MAX_DECODE_PIXELS
+}
+
 /// The two texture budgets share one map but never each other's evictions.
 ///
 /// Card thumbnails and Game Details gallery pictures are both `TextureHandle`s in
