@@ -236,6 +236,84 @@ fn a_pre_split_file_opens_its_picture_where_it_was_left() {
 }
 
 #[test]
+fn out_of_range_values_are_normalised_and_then_stay_put() {
+    use creblox_vm_tests::overlay_spec::PanelOffset;
+
+    let dir = temp_dir("out-of-range");
+    // A hand-edited file: every value here is outside the range its slider can produce.
+    let raw = serde_json::json!({
+        "ram_limit_mb": 6144,
+        "cpu_limit_pct": 5,
+        "crosshair_offset_x": -1000,
+        "glass_opacity": 3.0,
+        "overlay_image_corner": 9,
+        "overlay_image_size": 250,
+        "overlay_flags_max_lines": 99,
+        "overlay_image_x": -50,
+        "overlay_image_y": 9000,
+        "overlay_image_w": 320,
+        "overlay_image_h": 128,
+        "overlay_panels": [
+            {"id": "server", "x": -9000, "y": 9000},
+            {"id": "stats", "x": 5, "y": -5},
+        ],
+    });
+    fs::write(
+        dir.join("settings.json"),
+        serde_json::to_string_pretty(&raw).expect("fixture"),
+    )
+    .expect("settings.json written");
+
+    // The load normalises each value into the range its editor can produce.
+    let first = load_settings_from(&dir);
+    assert_eq!(first.ram_limit_mb, Some(4096), "RAM capped at 4096 MB");
+    assert_eq!(first.cpu_limit_pct, Some(10), "CPU floor is 10%");
+    assert_eq!(first.crosshair_offset_x, -100, "crosshair offset is +-100");
+    assert_eq!(first.glass_opacity, 0.92, "glass opacity is 0.20-0.92");
+    assert_eq!(first.overlay_image_corner, 3, "corner is 0-3");
+    assert_eq!(first.overlay_image_size, 100, "height is 5-100%");
+    assert_eq!(first.overlay_flags_max_lines, 40, "flags lines are 1-40");
+    assert_eq!(
+        (first.overlay_image_x, first.overlay_image_y),
+        (0, 8000),
+        "the picture's box is clamped into the game area"
+    );
+    assert_eq!(
+        first.overlay_panels,
+        vec![
+            PanelOffset {
+                id: "server".to_string(),
+                x: -8000,
+                y: 8000,
+            },
+            PanelOffset {
+                id: "stats".to_string(),
+                x: 5,
+                y: -5,
+            },
+        ],
+        "panel offsets are clamped and keep their entries"
+    );
+
+    // The second pass writes the normalised value and reads it back. If a clamp only ran on
+    // load while the writer kept the out-of-range number, this is where it would oscillate.
+    save_settings_to(&dir, &first);
+    let second = load_settings_from(&dir);
+    assert_eq!(second, first, "a normalised value is a fixed point");
+
+    // And the file itself now holds the clamped numbers, not the hand-edited ones.
+    let text = fs::read_to_string(dir.join("settings.json")).expect("settings.json written");
+    let file: Value = serde_json::from_str(&text).expect("settings.json parses");
+    assert_eq!(file["ram_limit_mb"], serde_json::json!(4096));
+    assert_eq!(file["cpu_limit_pct"], serde_json::json!(10));
+    assert_eq!(file["overlay_panels"][0]["x"], serde_json::json!(-8000));
+    assert_eq!(file["overlay_panels"][0]["y"], serde_json::json!(8000));
+    assert_eq!(file["overlay_image_y"], serde_json::json!(8000));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_missing_file_is_the_default_value() {
     let dir = temp_dir("missing");
     assert_eq!(load_settings_from(&dir), Settings::default());
