@@ -264,6 +264,9 @@ dependencies = [
 [[package]]
 name = "eframe"
 version = "0.37.0"
+dependencies = [
+ "egui",
+]
 
 [[package]]
 name = "egui"

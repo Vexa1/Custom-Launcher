@@ -163,7 +163,7 @@ impl Creblox {
                         RichText::new(format!("Settings file from a newer CREBLOX (v{version})"))
                             .size(13.0)
                             .strong()
-                            .color(ORANGE),
+                            .color(crate::theme::warning_ink(ui.visuals().dark_mode)),
                     );
                     ui.add_space(2.0);
                     small_text(

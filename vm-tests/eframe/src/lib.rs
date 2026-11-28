@@ -1,11 +1,9 @@
-//! The only piece of egui the party client touches.
+//! Stand-in for the GUI crate.
+//!
+//! `party.rs` asks egui for a `Context` and calls `request_repaint()` on it. Rather than
+//! re-declaring the little it needs, the stand-in re-exports the real crate: the harness can
+//! then also compile modules that use egui types (`theme`, the settings palette) for real.
 
 pub mod egui {
-    #[derive(Clone, Debug, Default)]
-    pub struct Context;
-
-    impl Context {
-        /// The real context schedules a repaint; here nothing draws.
-        pub fn request_repaint(&self) {}
-    }
+    pub use ::egui::*;
 }

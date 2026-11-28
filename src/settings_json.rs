@@ -17,10 +17,19 @@ use std::path::Path;
 /// missing key.
 pub const SETTINGS_VERSION: u64 = 2;
 
+/// The version in a settings object, read without copying it.
+fn version_of(object: &serde_json::Map<String, Value>) -> u64 {
+    object
+        .get("schema")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
+
 /// The version of a settings object. A file without the field - or with a nonsense one - is
 /// version 1, which is what every file written before the field existed really is.
 pub fn settings_version(v: &Value) -> u64 {
-    v["schema"].as_u64().filter(|n| *n > 0).unwrap_or(1)
+    v.as_object().map(version_of).unwrap_or(1)
 }
 
 /// The `settings.json` already in `dir`, if there is a readable one.
@@ -31,7 +40,7 @@ fn existing_object(dir: &Path) -> Option<serde_json::Map<String, Value>> {
 
 /// The version of the `settings.json` already in `dir`, if there is a readable one.
 pub fn existing_version(dir: &Path) -> Option<u64> {
-    existing_object(dir).map(|o| settings_version(&Value::Object(o)))
+    existing_object(dir).map(|o| version_of(&o))
 }
 
 fn read_opt_rgb(v: &Value, key: &str) -> Option<[u8; 3]> {
@@ -500,18 +509,22 @@ pub fn save_settings_to(dir: &Path, s: &Settings) -> SaveOutcome {
         }
         .insert_into(obj);
     }
-    let (out, outcome) = match existing_object(dir) {
-        Some(mut existing) if settings_version(&Value::Object(existing.clone())) > SETTINGS_VERSION => {
-            // Keep the newer layout's version and everything this build does not recognise;
-            // overwrite only the keys it owns.
-            let version = settings_version(&Value::Object(existing.clone()));
+    let existing = existing_object(dir);
+    let newer_version = existing
+        .as_ref()
+        .map(version_of)
+        .filter(|version| *version > SETTINGS_VERSION);
+    let (out, outcome) = match (existing, newer_version) {
+        // Keep the newer layout's version and everything this build does not recognise;
+        // overwrite only the keys it owns. The map is moved, never copied.
+        (Some(mut map), Some(version)) => {
             if let Some(ours) = v.as_object() {
                 for (key, value) in ours {
-                    existing.insert(key.clone(), value.clone());
+                    map.insert(key.clone(), value.clone());
                 }
             }
-            existing.insert("schema".to_string(), json!(version));
-            (Value::Object(existing), SaveOutcome::MergedIntoNewer)
+            map.insert("schema".to_string(), json!(version));
+            (Value::Object(map), SaveOutcome::MergedIntoNewer)
         }
         _ => (v, SaveOutcome::Written),
     };

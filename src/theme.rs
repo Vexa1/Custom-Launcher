@@ -1,4 +1,4 @@
-use crate::types::{BgMode, Settings, TextColorMode};
+use crate::settings::{BgMode, Settings, TextColorMode};
 use eframe::egui::{self, Color32, CornerRadius};
 use std::fs;
 use std::sync::Arc;
@@ -431,6 +431,16 @@ pub const GREEN: Color32 = Color32::from_rgb(0, 176, 111);
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x1A, 0x12);
 pub const BLUE: Color32 = Color32::from_rgb(0, 162, 255);
 pub const ORANGE: Color32 = Color32::from_rgb(246, 136, 2);
+/// `ORANGE` as *text* on a light card: the orange is 2.5:1 on white, this amber is 5.0:1.
+pub const ORANGE_INK: Color32 = Color32::from_rgb(0xA8, 0x5C, 0x00);
+
+/// Ink for a warning line or title drawn on the current theme's card background.
+///
+/// The accent orange is a fill colour - it is loud on the dark card and unreadable on the light
+/// one - so text uses this.
+pub fn warning_ink(dark: bool) -> Color32 {
+    if dark { ORANGE } else { ORANGE_INK }
+}
 pub const RED: Color32 = Color32::from_rgb(210, 50, 50);
 
 pub fn compact(n: u64) -> String {
@@ -510,6 +520,18 @@ const BLACK_FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Arial Black.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
 ];
+
+/// No system font paths on a platform with neither font layout above: `install_fonts` then
+/// keeps egui's built-in faces. The headless harness compiles this file on Linux to check the
+/// palette, so the names still have to exist.
+#[cfg(not(any(windows, target_os = "macos")))]
+const UI_FONT_CANDIDATES: &[&str] = &[];
+#[cfg(not(any(windows, target_os = "macos")))]
+const SYMBOL_FONT_CANDIDATES: &[&str] = &[];
+#[cfg(not(any(windows, target_os = "macos")))]
+const BOLD_FONT_CANDIDATES: &[&str] = &[];
+#[cfg(not(any(windows, target_os = "macos")))]
+const BLACK_FONT_CANDIDATES: &[&str] = &[];
 
 fn read_first_font(candidates: &[&str]) -> Option<Vec<u8>> {
     candidates.iter().find_map(|path| fs::read(path).ok())
@@ -1101,7 +1123,7 @@ pub fn card_frame(ui: &egui::Ui, margin: i8) -> egui::Frame {
 #[cfg(test)]
 mod tests {
     use super::{BLUE, GREEN, Palette, is_dark_color, theme_accent};
-    use crate::types::{BgMode, Settings};
+    use crate::settings::{BgMode, Settings};
     use eframe::egui::Color32;
 
     #[test]

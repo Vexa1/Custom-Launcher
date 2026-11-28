@@ -65,6 +65,9 @@ pub mod overlay_spec;
 #[path = "../../src/settings.rs"]
 pub mod settings;
 
+#[path = "../../src/theme.rs"]
+pub mod theme;
+
 #[path = "../../src/settings_json.rs"]
 pub mod settings_json;
 
