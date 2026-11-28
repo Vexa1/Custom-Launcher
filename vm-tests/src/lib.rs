@@ -62,6 +62,9 @@ pub mod overlay_spec;
 #[path = "../../src/profile_cache.rs"]
 pub mod profile_cache;
 
+#[path = "../../src/ram_budget.rs"]
+pub mod ram_budget;
+
 #[path = "../../src/party.rs"]
 pub mod party;
 

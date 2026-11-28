@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.38
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.39
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -619,6 +619,12 @@ src/
                      gallery pictures go through the same texture pool (`record_media`, with
                      aspect-preserving `download_gallery_images`), so a revalidated hero keeps
                      the picture it is showing instead of flashing a placeholder.
+  ram_budget.rs      The RAM ceiling for everything the launcher can rebuild: byte accounting
+                     for uploaded thumbnails (`w*h*4`), decoded images waiting for an upload
+                     slot, VP8 preview frames and the 3D avatar scene. `plan` drops the
+                     cheapest caches first (video, avatar, profiles, then the page's own
+                     pictures) so an endless scroll can never sit above 192 MB, and the tray
+                     flush leaves every tracked cache at zero.
   friend_names.rs    What a friend's bubble says. `friends.roblox.com` now often answers
                      `/friends` with ids only, so the loader batch-resolves every id through
                      `POST users.roblox.com/v1/users` (100 per request), remembers

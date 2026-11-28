@@ -99,6 +99,8 @@ pub struct Creblox {
     pub thumb_gallery: HashSet<String>,
     /// Image URLs that are Game Store pass pictures, which have their own cache lane.
     pub thumb_passes: HashSet<String>,
+    /// Bytes each uploaded thumbnail texture holds, so the RAM budget is byte-accurate.
+    pub thumb_bytes: HashMap<String, usize>,
     /// Set when a texture is uploaded or dropped, so the cards' map is republished.
     pub thumb_tex_dirty: bool,
     /// One thumbnail batch in flight; the next is taken when this one answers.
@@ -477,6 +479,7 @@ impl Creblox {
             thumb_budget: crate::thumb_pipeline::TextureBudget::default(),
             thumb_gallery: HashSet::new(),
             thumb_passes: HashSet::new(),
+            thumb_bytes: HashMap::new(),
             thumb_tex_dirty: false,
             thumb_in_flight: false,
             thumb_downloading: HashSet::new(),
@@ -674,6 +677,11 @@ impl Creblox {
         };
         // Let a later launch (Finder, Dock, `open`, Spotlight) ask this instance to show
         // itself instead of the second process exiting with nothing on screen.
+        #[cfg(target_os = "macos")]
+        // A quit from the menu bar happens while this thread may not tick, so the tray gets
+        // the overlay cleanup directly instead of waiting for a frame.
+        #[cfg(target_os = "macos")]
+        crate::tray::set_quit_cleanup(|| crate::game_overlay::quit_overlays());
         #[cfg(target_os = "macos")]
         crate::tray::start_instance_listener(app.tx.clone(), app.ctx.clone());
         // A Dock click while no window is on screen is an app activation, and eframe stops
@@ -1919,6 +1927,7 @@ impl Creblox {
             if self.thumb_tex.contains_key(&url) {
                 continue;
             }
+            let bytes = crate::ram_budget::texture_bytes(image.width(), image.height());
             let tex = self.ctx.load_texture(
                 format!("creblox-thumb:{url}"),
                 image,
@@ -1934,10 +1943,12 @@ impl Creblox {
                 self.thumb_budget.insert_card(&url);
             }
             self.thumb_tex.insert(url.clone(), tex);
+            self.thumb_bytes.insert(url.clone(), bytes);
             self.thumb_tex_dirty = true;
             uploaded += 1;
         }
         let mut evicted_shown = false;
+        let mut evicted_pass = false;
         for old in self.thumb_budget.evictions() {
             if self.thumb_gallery.remove(&old)
                 && self.shown_gallery_url().as_deref() == Some(old.as_str())
@@ -1946,16 +1957,29 @@ impl Creblox {
                 // instead of leaving the page on a placeholder.
                 evicted_shown = true;
             }
+            if self.thumb_passes.remove(&old) {
+                evicted_pass = true;
+            }
             // The texture is gone, so the card (or the hero) needs to be allowed to download
             // it again if it comes back on screen.
             self.thumb_tex.remove(&old);
+            self.thumb_bytes.remove(&old);
             self.thumb_owned.remove(&old);
-            self.thumb_passes.remove(&old);
             self.thumb_tex_dirty = true;
             self.thumb_owned_dirty = true;
         }
         if evicted_shown {
             self.request_shown_gallery_thumb();
+        }
+        if evicted_pass {
+            // The store may be open on those tiles, so fetch them back rather than leave grey
+            // boxes where pass art was.
+            let urls: Vec<String> = self
+                .game_extra
+                .as_ref()
+                .map(|ex| ex.passes.iter().map(|p| p.thumb.clone()).collect())
+                .unwrap_or_default();
+            self.request_pass_thumbs(urls);
         }
         if !self.thumb_pixels.is_empty() {
             // Keep uploading while there is work: the grid fills in over the next frames
@@ -2004,6 +2028,8 @@ impl Creblox {
         if std::mem::take(&mut self.thumb_owned_dirty) {
             widgets::publish_thumb_owned(&self.ctx, std::sync::Arc::new(self.thumb_owned.clone()));
         }
+        // After the uploads, so a frame that decoded a burst can never end above the cap.
+        self.enforce_image_ram_budget();
     }
 
     /// Hands every resolved thumbnail URL that we do not already have to the download pool.
@@ -2020,6 +2046,23 @@ impl Creblox {
                 jobs.push((url.clone(), ICON_TARGET));
             }
         }
+        self.spawn_thumb_downloads(jobs);
+    }
+
+    /// Sends a download batch, capped at [`crate::thumb_pipeline::MAX_DOWNLOADS_PER_BATCH`].
+    ///
+    /// The cap is what keeps a 100-id scroll from decoding 200 pictures into one message.
+    /// Anything past it is dropped from the "owned" set, so a later frame asks for it again
+    /// instead of the batch - and the decoded pixels it would bring - growing without bound.
+    fn spawn_thumb_downloads(&mut self, mut jobs: Vec<(String, [u32; 2])>) {
+        const CAP: usize = crate::thumb_pipeline::MAX_DOWNLOADS_PER_BATCH;
+        if jobs.len() > CAP {
+            for (url, _) in jobs.split_off(CAP) {
+                self.thumb_owned.remove(&url);
+                self.thumb_downloading.remove(&url);
+                self.thumb_owned_dirty = true;
+            }
+        }
         if jobs.is_empty() {
             return;
         }
@@ -2034,6 +2077,90 @@ impl Creblox {
             std::sync::Arc::new(self.thumb_owned.clone()),
         );
         self.spawn(move || Msg::ThumbPixels(crate::api::download_thumbnails(jobs)));
+    }
+
+    /// Every rebuildable image cache, in bytes.
+    fn ram_usage(&self) -> crate::ram_budget::Usage {
+        let thumbnail_textures = self.thumb_bytes.values().copied().sum();
+        let pending_images = self
+            .thumb_pixels
+            .iter()
+            .map(|(_, image)| image.width() * image.height() * 4)
+            .sum();
+        let video_frames = self
+            .decoded_videos
+            .values()
+            .map(|video| {
+                crate::ram_budget::texture_bytes(video.width, video.height)
+                    .saturating_mul(video.frames.len())
+            })
+            .sum();
+        // The 3D avatar's meshes are a native-side structure; a live scene is budgeted as one
+        // fixed block, which is what it costs to keep it around at all.
+        let avatar_scene = if self.avatar_3d.model.is_some() {
+            32 * 1024 * 1024
+        } else {
+            0
+        };
+        crate::ram_budget::Usage {
+            thumbnail_textures,
+            pending_images,
+            video_frames,
+            avatar_scene,
+            profile: 0,
+        }
+    }
+
+    /// Drops rebuildable caches until the tracked total is back under the hard cap.
+    ///
+    /// This runs from the frame that just decoded something - not only from an idle path -
+    /// because a burst of thumbnail batches is exactly when the total crosses the cap. Every
+    /// cache dropped here is fetched or decoded again on demand.
+    pub fn enforce_image_ram_budget(&mut self) {
+        let Some(plan) =
+            crate::ram_budget::plan(self.ram_usage(), crate::ram_budget::TOTAL_CAP_BYTES)
+        else {
+            return;
+        };
+        if plan.clear_videos {
+            self.decoded_videos.clear();
+            self.video_lru.clear();
+            self.active_video_texture = None;
+        }
+        if plan.clear_avatar {
+            self.avatar_3d = crate::avatar_3d::Avatar3DState::default();
+        }
+        if plan.clear_profile {
+            self.profile_cache.clear();
+        }
+        if plan.clear_thumbnails {
+            self.reset_thumb_pipeline();
+            self.thumb_pixels.clear();
+            self.ctx.forget_all_images();
+        }
+        crate::auth::log("ram: enforced the image cache budget");
+    }
+
+    /// Drops every decoded image and uploaded texture the app can fetch again.
+    ///
+    /// Called the moment the window is tucked into the menu bar: while it is hidden eframe
+    /// may not tick, so nothing would evict these afterwards.
+    pub fn flush_image_caches(&mut self) {
+        self.reset_thumb_pipeline();
+        self.thumb_pixels.clear();
+        self.decoded_videos.clear();
+        self.video_lru.clear();
+        self.video_id_requested.clear();
+        self.video_decode_requested.clear();
+        self.active_video_texture = None;
+        self.avatar_3d = crate::avatar_3d::Avatar3DState::default();
+        self.profile_cache.clear();
+        self.ctx.forget_all_images();
+        debug_assert!(
+            self.ram_usage().total() <= crate::ram_budget::TRAY_CAP_BYTES,
+            "a tucked-away launcher still holds image caches"
+        );
+        crate::auth::log("ram: dropped image caches for the menu bar");
     }
 
     /// Hands the open game's gallery pictures to the same texture pool the cards use.
@@ -2133,6 +2260,7 @@ impl Creblox {
     pub fn reset_thumb_pipeline(&mut self) {
         self.thumb_budget.clear();
         self.thumb_tex.clear();
+        self.thumb_bytes.clear();
         self.thumb_gallery.clear();
         self.thumb_passes.clear();
         self.thumb_aliases.clear();
@@ -2728,7 +2856,18 @@ impl Creblox {
                         continue;
                     }
                     // Pixels wait for a frame slot; `pump_thumbs` uploads a few per frame.
-                    self.thumb_pixels.extend(batch);
+                    // The queue is capped: anything past it is forgotten (and no longer
+                    // "owned"), so a later frame re-requests it instead of the decoder
+                    // piling images into RAM with no upload slot in sight.
+                    for (url, image) in batch {
+                        if self.thumb_pixels.len() >= crate::thumb_pipeline::MAX_PENDING_IMAGES
+                        {
+                            self.thumb_owned.remove(&url);
+                            self.thumb_owned_dirty = true;
+                            continue;
+                        }
+                        self.thumb_pixels.push_back((url, image));
+                    }
                     self.ctx.request_repaint();
                 }
                 Msg::MyProfile(uid, r) => {
@@ -4171,6 +4310,7 @@ impl Creblox {
                 self.sync_discord_presence();
             }
         }
+        self.enforce_image_ram_budget();
         had_messages
     }
 
@@ -5136,6 +5276,9 @@ impl Creblox {
     }
 
     pub fn enforce_ram_cache_budget(&mut self, manual_trim: bool) {
+        // Byte-accurate tracking of the caches this app owns runs first: the process-wide
+        // RSS check below only fires every 12 s and cannot see a burst of decoded pixels.
+        self.enforce_image_ram_budget();
         let max_videos =
             crate::telemetry::max_video_cache_for_ram_limit(self.settings.ram_limit_mb);
         if manual_trim {
@@ -5435,6 +5578,9 @@ impl Creblox {
         self.sync_tray_state();
         let ctx = self.ctx.clone();
         self.hide_to_tray(&ctx, false);
+        // While the window is hidden eframe may stop ticking, so the decoded images are
+        // dropped here rather than waiting for a frame that may never come.
+        self.flush_image_caches();
         // Accessory: no Dock icon, no app switcher entry - a menu-bar app for the session.
         #[cfg(target_os = "macos")]
         crate::tray::set_accessory_policy();
@@ -5473,6 +5619,8 @@ impl Creblox {
         crate::tray::hide_launcher_window();
         #[cfg(not(target_os = "macos"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        // A hidden launcher must not hold thumbnails, video frames or the avatar scene.
+        self.flush_image_caches();
         self.sync_tray_state();
         if show_balloon && self.settings.tray_enabled {
             self.tray.show_balloon(

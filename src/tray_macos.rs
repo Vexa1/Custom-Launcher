@@ -424,6 +424,15 @@ impl TrayController {
                             // A duplicate copy of a HUD click is dropped here, so the window
                             // never sees the same toggle twice.
                             if apply_hud_action(&action) {
+                                // Quit and Open must not wait for a frame. While the launcher
+                                // lives in the menu bar eframe may not tick at all, so a queued
+                                // message would sit unread and the click would look dead.
+                                if matches!(action, TrayEvent::QuitApp) {
+                                    quit_now();
+                                }
+                                if matches!(action, TrayEvent::ShowAndFocus) {
+                                    dispatch_main(wake_launcher);
+                                }
                                 let _ = tx.send(Msg::TrayAction(action));
                                 fired = true;
                             }
@@ -436,6 +445,7 @@ impl TrayController {
                             ..
                         } = ev
                         {
+                            dispatch_main(wake_launcher);
                             let _ = tx.send(Msg::TrayAction(TrayEvent::ShowAndFocus));
                             fired = true;
                         }
@@ -500,6 +510,14 @@ impl TrayController {
                 // never depends on which reader of the menu channel got there first. A
                 // duplicate copy is not forwarded: the running HUD already has that state.
                 if apply_hud_action(&action) {
+                    // The main thread reads the same channel: act here too, so a click never
+                    // depends on which reader won the race.
+                    if matches!(action, TrayEvent::QuitApp) {
+                        quit_now();
+                    }
+                    if matches!(action, TrayEvent::ShowAndFocus) {
+                        wake_launcher();
+                    }
                     out.push(action);
                 }
             }
@@ -969,6 +987,40 @@ pub fn set_accessory_policy() {
 }
 
 static REPAINT_CTX: OnceLock<egui::Context> = OnceLock::new();
+
+/// Work that has to happen before the process goes away (stopping the overlay helper).
+static QUIT_CLEANUP: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Registers the cleanup the tray's quit path runs before exiting.
+pub fn set_quit_cleanup(cleanup: impl Fn() + Send + Sync + 'static) {
+    let _ = QUIT_CLEANUP.set(Box::new(cleanup));
+}
+
+/// Quits from the tray callback itself.
+///
+/// A menu click is delivered on the main thread, which is exactly where AppKit expects a
+/// termination to come from. Waiting for `App::update()` to read a queued `QuitApp` message
+/// is what made the item look dead while the launcher was tucked away: with no visible
+/// window eframe stops ticking, so the message was never read.
+pub fn quit_now() -> ! {
+    crate::auth::log("tray: quitting from the menu callback");
+    if let Some(cleanup) = QUIT_CLEANUP.get() {
+        cleanup();
+    }
+    std::process::exit(0)
+}
+
+/// Brings the launcher back from the tray callback, without waiting for a frame.
+///
+/// Drops the tucked-in flag first (the Dock watcher and the reopen handler read it), then
+/// performs the AppKit restore and wakes egui so `App::update()` syncs the viewport.
+pub fn wake_launcher() {
+    crate::window_lifecycle::set_hidden_to_tray(false);
+    show_launcher_window();
+    if let Some(ctx) = REPAINT_CTX.get() {
+        ctx.request_repaint();
+    }
+}
 
 /// Whether CREBLOX is living in the menu bar on purpose (`window_lifecycle`).
 ///

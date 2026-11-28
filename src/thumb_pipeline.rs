@@ -46,7 +46,8 @@ pub const ICON_TARGET: [u32; 2] = [64, 64];
 
 /// Decoded gallery pictures kept alive. A gallery picture is a full hero image (960x540 RGBA
 /// is ~2 MB), so it gets its own small budget instead of sharing the cards' one.
-pub const GALLERY_TEXTURE_CAP: usize = 8;
+/// Kept deliberately small: the gallery lane must not approach the cards' own budget.
+pub const GALLERY_TEXTURE_CAP: usize = 4;
 
 /// The size a Game Store pass picture is decoded to: the pass card is at most ~190 px wide,
 /// so this covers a 2x display without holding the download size in memory.
@@ -54,7 +55,15 @@ pub const PASS_TARGET: [u32; 2] = [256, 256];
 
 /// Decoded pass pictures kept alive. A pass tile is small (~256 KB), so a store's worth of
 /// passes across a few games fits in its own lane.
-pub const PASS_TEXTURE_CAP: usize = 32;
+pub const PASS_TEXTURE_CAP: usize = 12;
+
+/// Decoded `ColorImage`s that may wait for an upload slot. Past this the newest batch is
+/// dropped (and its URLs forgotten) so it is re-requested instead of decoded into RAM.
+pub const MAX_PENDING_IMAGES: usize = 48;
+
+/// Images per download batch. A 100-id scroll would otherwise decode 200 pictures into one
+/// message; the rest are asked for again on a later frame.
+pub const MAX_DOWNLOADS_PER_BATCH: usize = 32;
 
 /// The two texture budgets share one map but never each other's evictions.
 ///

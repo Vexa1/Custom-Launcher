@@ -429,6 +429,20 @@ impl OverlayManager {
     }
 }
 
+#[cfg(target_os = "macos")]
+/// Stops the overlay helper immediately, without needing the running manager.
+///
+/// Called from the tray's quit path, which runs while eframe may be asleep and cannot wait
+/// for `App::update()` to drop the manager for it.
+pub fn quit_overlays() {
+    if let Ok(mut slot) = LIVE.lock() {
+        *slot = None;
+    }
+    if let Ok(mut last) = LAST_SERVER.lock() {
+        *last = None;
+    }
+}
+
 impl Drop for OverlayManager {
     fn drop(&mut self) {
         self.stop_and_wait();
