@@ -12,31 +12,88 @@ use egui::{Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 use crate::inventory::Category;
 use crate::shots::Probe;
 
-// Palette: `Palette::of(true)` in `src/theme.rs` (Precision Obsidian).
-pub const BG: Color32 = Color32::from_rgb(0x0B, 0x0D, 0x11);
-pub const CARD: Color32 = Color32::from_rgb(0x13, 0x16, 0x1E);
-pub const SURFACE: Color32 = Color32::from_rgb(0x19, 0x1D, 0x27);
-pub const HOVER: Color32 = Color32::from_rgb(0x23, 0x28, 0x38);
-pub const SELECTED: Color32 = Color32::from_rgb(0x1E, 0x22, 0x30);
-pub const TEXT: Color32 = Color32::from_rgb(0xF1, 0xF3, 0xF6);
-pub const MUTED: Color32 = Color32::from_rgb(0x8E, 0x93, 0x9E);
+// Palette: the same values as `Palette::of(..)` in `src/theme.rs`, read through the functions
+// below so the gallery can be rendered in both themes. The names stay upper case because every
+// page below reads them the same way the app reads its palette.
+thread_local! {
+    static LIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the fixtures are drawing the light palette right now.
+pub fn light() -> bool {
+    LIGHT.with(|on| on.get())
+}
+
+/// Switches the palette the fixtures draw with; the caller sets it before each render.
+pub fn set_light(on: bool) {
+    LIGHT.with(|c| c.set(on));
+}
+
+fn palette() -> crate::theme::Palette {
+    crate::theme::Palette::of(!light())
+}
+
+#[allow(non_snake_case)]
+pub fn BG() -> Color32 {
+    palette().bg
+}
+#[allow(non_snake_case)]
+pub fn CARD() -> Color32 {
+    palette().card_bg
+}
+#[allow(non_snake_case)]
+pub fn SURFACE() -> Color32 {
+    palette().surface_bg
+}
+#[allow(non_snake_case)]
+pub fn HOVER() -> Color32 {
+    palette().hover_bg
+}
+#[allow(non_snake_case)]
+pub fn SELECTED() -> Color32 {
+    palette().selected_bg
+}
+#[allow(non_snake_case)]
+pub fn TEXT() -> Color32 {
+    palette().text
+}
+#[allow(non_snake_case)]
+pub fn MUTED() -> Color32 {
+    palette().muted
+}
 /// `theme.rs` hairlines are white at 6%; opaque here so the rasterizer has no extra blending to
-/// hide behind.
-pub const BORDER: Color32 = Color32::from_rgb(0x2A, 0x2F, 0x3C);
-// Accents: `GREEN`/`BLUE`/`ORANGE`/`RED` in `src/theme.rs`.
-pub const GREEN: Color32 = Color32::from_rgb(0x00, 0xB0, 0x6F);
-pub const BLUE: Color32 = Color32::from_rgb(0x00, 0xA2, 0xFF);
-pub const ORANGE: Color32 = Color32::from_rgb(0xF6, 0x88, 0x02);
-pub const RED: Color32 = Color32::from_rgb(0xD2, 0x32, 0x32);
-/// `page_charts::rail_color`: one step lighter than the slider default, so the filter rails
-/// read against the dark bar.
-pub const RAIL: Color32 = Color32::from_rgb(0x33, 0x38, 0x4A);
+/// hide behind.The light theme gets the same 7% black hairline made opaque.
+#[allow(non_snake_case)]
+pub fn BORDER() -> Color32 {
+    if light() {
+        Color32::from_rgb(0xD7, 0xDB, 0xE2)
+    } else {
+        Color32::from_rgb(0x2A, 0x2F, 0x3C)
+    }
+}
+// Accents: `GREEN`/`BLUE`/`ORANGE`/`RED` in `src/theme.rs` - the same in both themes.
+pub use crate::theme::{BLUE, GREEN, ON_ACCENT, ORANGE, RED};
+/// `page_charts::rail_color`: one step off the slider default, so the filter rails read against
+/// the bar behind them.
+#[allow(non_snake_case)]
+pub fn RAIL() -> Color32 {
+    if light() {
+        Color32::from_rgb(0xC4, 0xCA, 0xD5)
+    } else {
+        Color32::from_rgb(0x33, 0x38, 0x4A)
+    }
+}
 
 const RADIUS: u8 = 8;
 /// `palette.profile_border` at the loading pulse: a section that has not arrived.
-pub const SKELETON: Color32 = Color32::from_rgb(0x26, 0x2B, 0x38);
-/// `theme::ON_ACCENT`: text on a filled green button (white is only 2.5:1 on it).
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x1A, 0x12);
+#[allow(non_snake_case)]
+pub fn SKELETON() -> Color32 {
+    if light() {
+        Color32::from_rgb(0xE6, 0xE9, 0xEE)
+    } else {
+        Color32::from_rgb(0x26, 0x2B, 0x38)
+    }
+}
 
 /// Every rendered screen, in the order the gallery is written.
 pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
@@ -75,8 +132,8 @@ fn card_min(
     content: impl FnOnce(&mut egui::Ui, &mut Probe),
 ) {
     let frame = egui::Frame::NONE
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(CARD())
+        .stroke(Stroke::new(1.0, BORDER()))
         .corner_radius(CornerRadius::same(RADIUS))
         .inner_margin(14);
     let inner = frame.show(ui, |ui| {
@@ -97,8 +154,8 @@ fn heading(ui: &mut egui::Ui, probe: &mut Probe, id: &'static str, text: &str, s
         id,
         text,
         egui::FontId::proportional(size),
-        TEXT,
-        BG,
+        TEXT(),
+        BG(),
     );
 }
 
@@ -109,7 +166,7 @@ fn body(ui: &mut egui::Ui, probe: &mut Probe, id: impl Into<String>, text: &str,
         text,
         egui::FontId::proportional(13.0),
         color,
-        CARD,
+        CARD(),
     );
 }
 
@@ -119,8 +176,8 @@ fn meta(ui: &mut egui::Ui, probe: &mut Probe, id: impl Into<String>, text: &str)
         id,
         text,
         egui::FontId::proportional(11.0),
-        MUTED,
-        CARD,
+        MUTED(),
+        CARD(),
     );
 }
 
@@ -145,7 +202,7 @@ fn shell(
 
 fn rail(ui: &mut egui::Ui, probe: &mut Probe) {
     egui::Frame::NONE
-        .fill(CARD)
+        .fill(CARD())
         .inner_margin(egui::Margin::symmetric(14, 18))
         .show(ui, |ui| {
             ui.set_width(148.0);
@@ -156,7 +213,7 @@ fn rail(ui: &mut egui::Ui, probe: &mut Probe) {
                     "CREBLOX",
                     egui::FontId::proportional(15.0),
                     GREEN,
-                    CARD,
+                    CARD(),
                 );
                 ui.add_space(18.0);
                 for (id, label, selected) in [
@@ -170,8 +227,8 @@ fn rail(ui: &mut egui::Ui, probe: &mut Probe) {
                         id,
                         label,
                         Vec2::new(148.0, 34.0),
-                        if selected { SELECTED } else { CARD },
-                        if selected { TEXT } else { MUTED },
+                        if selected { SELECTED() } else { CARD() },
+                        if selected { TEXT() } else { MUTED() },
                     );
                     ui.add_space(4.0);
                 }
@@ -187,7 +244,7 @@ fn avatar(ui: &mut egui::Ui, probe: &mut Probe, id: &'static str, size: f32, col
 
 fn stat_chip(ui: &mut egui::Ui, probe: &mut Probe, id: &str, value: &str, label: &str) {
     egui::Frame::NONE
-        .fill(SURFACE)
+        .fill(SURFACE())
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
@@ -197,16 +254,16 @@ fn stat_chip(ui: &mut egui::Ui, probe: &mut Probe, id: &str, value: &str, label:
                     format!("{id}.value"),
                     value,
                     egui::FontId::proportional(15.0),
-                    TEXT,
-                    SURFACE,
+                    TEXT(),
+                    SURFACE(),
                 );
                 probe.label(
                     ui,
                     format!("{id}.label"),
                     label,
                     egui::FontId::proportional(11.0),
-                    MUTED,
-                    SURFACE,
+                    MUTED(),
+                    SURFACE(),
                 );
             });
         });
@@ -217,7 +274,7 @@ fn stat_chip(ui: &mut egui::Ui, probe: &mut Probe, id: &str, value: &str, label:
 fn skeleton(ui: &mut egui::Ui, probe: &mut Probe, id: impl Into<String>, size: Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(8), SKELETON);
+        .rect_filled(rect, CornerRadius::same(8), SKELETON());
     probe.widget(id, rect, false);
 }
 
@@ -231,7 +288,7 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
         card_min(ui, probe, "profile.header", 980.0, 0.0, |ui, probe| {
             ui.horizontal_top(|ui| {
                 ui.add_space(4.0);
-                avatar(ui, probe, "profile.header.avatar", 148.0, SURFACE);
+                avatar(ui, probe, "profile.header.avatar", 148.0, SURFACE());
                 ui.add_space(18.0);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
@@ -242,7 +299,7 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
                             "profile.header.verified",
                             "verified",
                             Vec2::new(64.0, 20.0),
-                            SURFACE,
+                            SURFACE(),
                             BLUE,
                         );
                         ui.add_space(8.0);
@@ -251,7 +308,7 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
                             "profile.header.presence",
                             "In Game - Adopt Me!",
                             Vec2::new(148.0, 22.0),
-                            SURFACE,
+                            SURFACE(),
                             GREEN,
                         );
                         // The actions are part of the frame-1 shell: the user record the
@@ -273,8 +330,8 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
                                     "profile.action.add",
                                     "Add Friend",
                                     Vec2::new(96.0, 30.0),
-                                    SURFACE,
-                                    TEXT,
+                                    SURFACE(),
+                                    TEXT(),
                                 );
                                 ui.add_space(6.0);
                                 probe.button(
@@ -282,8 +339,8 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
                                     "profile.action.more",
                                     "...",
                                     Vec2::new(32.0, 30.0),
-                                    SURFACE,
-                                    TEXT,
+                                    SURFACE(),
+                                    TEXT(),
                                 );
                             },
                         );
@@ -346,7 +403,7 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
 
         card(ui, probe, "home.profile", 980.0, |ui, probe| {
             ui.horizontal(|ui| {
-                avatar(ui, probe, "home.profile.avatar", 56.0, HOVER);
+                avatar(ui, probe, "home.profile.avatar", 56.0, HOVER());
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     probe.label(
@@ -354,8 +411,8 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
                         "home.profile.name",
                         "Vexa",
                         egui::FontId::proportional(17.0),
-                        TEXT,
-                        CARD,
+                        TEXT(),
+                        CARD(),
                     );
                     body(ui, probe, "home.profile.status", "Playing Adopt Me!", GREEN);
                 });
@@ -386,10 +443,10 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
                 let id = ["home.friend.1", "home.friend.2", "home.friend.3", "home.friend.4"][i];
                 card(ui, probe, id, 206.0, |ui, probe| {
                     ui.horizontal(|ui| {
-                        avatar(ui, probe, id, 32.0, HOVER);
+                        avatar(ui, probe, id, 32.0, HOVER());
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
-                            body(ui, probe, id, name, TEXT);
+                            body(ui, probe, id, name, TEXT());
                             meta(ui, probe, id, game);
                         });
                     });
@@ -417,17 +474,17 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
                             Vec2::new(ui.available_width(), 84.0),
                             egui::Sense::hover(),
                         );
-                        ui.painter().rect_filled(rect, CornerRadius::same(6), SURFACE);
+                        ui.painter().rect_filled(rect, CornerRadius::same(6), SURFACE());
                         ui.painter().text(
                             rect.center(),
                             egui::Align2::CENTER_CENTER,
                             title.chars().next().unwrap_or('?').to_string(),
                             egui::FontId::proportional(28.0),
-                            MUTED,
+                            MUTED(),
                         );
                         probe.widget(format!("{id}.thumb"), rect, false);
                         ui.add_space(8.0);
-                        body(ui, probe, format!("{id}.title"), title, TEXT);
+                        body(ui, probe, format!("{id}.title"), title, TEXT());
                         meta(ui, probe, format!("{id}.meta"), creator);
                         body(
                             ui,
@@ -452,18 +509,18 @@ fn pill(ui: &mut egui::Ui, probe: &mut Probe, id: &'static str, value: &str, hin
     ui.painter().rect(
         rect,
         CornerRadius::same(9),
-        SURFACE,
-        Stroke::new(1.0, BORDER),
+        SURFACE(),
+        Stroke::new(1.0, BORDER()),
         egui::StrokeKind::Inside,
     );
-    let color = if hint { MUTED } else { TEXT };
+    let color = if hint { MUTED() } else { TEXT() };
     let galley = ui
         .painter()
         .layout_no_wrap(value.to_string(), egui::FontId::proportional(13.0), color);
     let pos = rect.center() - galley.size() * 0.5;
     ui.painter().galley(pos, galley.clone(), color);
     probe.text(format!("{id}.text"), Rect::from_min_size(pos, galley.size()), galley.size());
-    probe.contrast(format!("{id}.text"), color, SURFACE);
+    probe.contrast(format!("{id}.text"), crate::theme::ink(color, !light()), SURFACE());
     probe.widget(id, rect, false);
 }
 
@@ -472,11 +529,11 @@ fn dash(ui: &mut egui::Ui, probe: &mut Probe) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 22.0), Sense::hover());
     let galley =
         ui.painter()
-            .layout_no_wrap("\u{2013}".to_string(), egui::FontId::proportional(12.0), MUTED);
+            .layout_no_wrap("\u{2013}".to_string(), egui::FontId::proportional(12.0), MUTED());
     let pos = rect.center() - galley.size() * 0.5;
-    ui.painter().galley(pos, galley.clone(), MUTED);
+    ui.painter().galley(pos, galley.clone(), MUTED());
     probe.text("charts.f.players.dash", Rect::from_min_size(pos, galley.size()), galley.size());
-    probe.contrast("charts.f.players.dash", MUTED, CARD);
+    probe.contrast("charts.f.players.dash", MUTED(), CARD());
 }
 
 /// The Games filter bar: Players (minimum rail, minimum pill, maximum pill), Like % and Visits,
@@ -507,8 +564,8 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                                 "charts.f.players.label",
                                 "Players",
                                 egui::FontId::proportional(12.5),
-                                MUTED,
-                                CARD,
+                                MUTED(),
+                                CARD(),
                             );
                         },
                     );
@@ -517,9 +574,9 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                     ui.spacing_mut().slider_width = rail_w;
                     let rail = ui
                         .scope(|ui| {
-                            ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
-                            ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
-                            ui.visuals_mut().widgets.active.bg_fill = RAIL;
+                            ui.visuals_mut().widgets.inactive.bg_fill = RAIL();
+                            ui.visuals_mut().widgets.hovered.bg_fill = RAIL();
+                            ui.visuals_mut().widgets.active.bg_fill = RAIL();
                             ui.add_sized(
                                 Vec2::new(rail_w, 24.0),
                                 egui::Slider::new(&mut players, 0..=100_000u32)
@@ -554,8 +611,8 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                                     format!("charts.f.{id}.label"),
                                     label,
                                     egui::FontId::proportional(12.5),
-                                    MUTED,
-                                    CARD,
+                                    MUTED(),
+                                    CARD(),
                                 );
                             },
                         );
@@ -564,9 +621,9 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                         ui.spacing_mut().slider_width = rail_w;
                         let rail = ui
                             .scope(|ui| {
-                                ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
-                                ui.visuals_mut().widgets.active.bg_fill = RAIL;
+                                ui.visuals_mut().widgets.inactive.bg_fill = RAIL();
+                                ui.visuals_mut().widgets.hovered.bg_fill = RAIL();
+                                ui.visuals_mut().widgets.active.bg_fill = RAIL();
                                 ui.add_sized(
                                     Vec2::new(rail_w, 24.0),
                                     egui::Slider::new(&mut rating, 0..=100u8).show_value(false),
@@ -594,8 +651,8 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                                 "charts.f.visits.label",
                                 "Visits",
                                 egui::FontId::proportional(12.5),
-                                MUTED,
-                                CARD,
+                                MUTED(),
+                                CARD(),
                             );
                         },
                     );
@@ -604,9 +661,9 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                     ui.spacing_mut().slider_width = rail_w;
                     let rail = ui
                         .scope(|ui| {
-                            ui.visuals_mut().widgets.inactive.bg_fill = RAIL;
-                            ui.visuals_mut().widgets.hovered.bg_fill = RAIL;
-                            ui.visuals_mut().widgets.active.bg_fill = RAIL;
+                            ui.visuals_mut().widgets.inactive.bg_fill = RAIL();
+                            ui.visuals_mut().widgets.hovered.bg_fill = RAIL();
+                            ui.visuals_mut().widgets.active.bg_fill = RAIL();
                             ui.add_sized(
                                 Vec2::new(rail_w, 24.0),
                                 egui::Slider::new(&mut visits, 0..=100_000_000u64)
@@ -628,8 +685,8 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                         "charts.f.clear",
                         "Clear",
                         Vec2::new(58.0, 24.0),
-                        SURFACE,
-                        MUTED,
+                        SURFACE(),
+                        MUTED(),
                     );
                 }
             });
@@ -657,16 +714,16 @@ pub fn charts(ui: &mut egui::Ui, probe: &mut Probe) {
                     "charts.shuffle",
                     "Reshuffle",
                     Vec2::new(98.0, 28.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
                 probe.button(
                     ui,
                     "charts.refresh",
                     "Refresh",
                     Vec2::new(84.0, 28.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
             });
         });
@@ -720,8 +777,8 @@ fn chart_card(
     stats: &str,
 ) {
     let frame = egui::Frame::NONE
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(CARD())
+        .stroke(Stroke::new(1.0, BORDER()))
         .corner_radius(CornerRadius::same(RADIUS))
         .inner_margin(6);
     let inner = frame.show(ui, |ui| {
@@ -729,7 +786,7 @@ fn chart_card(
         ui.vertical(|ui| {
             let (thumb, _) =
                 ui.allocate_exact_size(Vec2::new(w, (w * 9.0 / 16.0).floor()), Sense::hover());
-            ui.painter().rect_filled(thumb, CornerRadius::same(6), SURFACE);
+            ui.painter().rect_filled(thumb, CornerRadius::same(6), SURFACE());
             ui.painter().circle_filled(
                 thumb.center(),
                 14.0,
@@ -742,24 +799,24 @@ fn chart_card(
                 format!("charts.card.{idx}.name"),
                 name,
                 egui::FontId::proportional(13.0),
-                TEXT,
-                CARD,
+                TEXT(),
+                CARD(),
             );
             probe.label(
                 ui,
                 format!("charts.card.{idx}.creator"),
                 creator,
                 egui::FontId::proportional(11.0),
-                MUTED,
-                CARD,
+                MUTED(),
+                CARD(),
             );
             probe.label(
                 ui,
                 format!("charts.card.{idx}.stats"),
                 stats,
                 egui::FontId::proportional(11.0),
-                MUTED,
-                CARD,
+                MUTED(),
+                CARD(),
             );
         });
     });
@@ -768,24 +825,24 @@ fn chart_card(
 
 pub fn game_details(ui: &mut egui::Ui, probe: &mut Probe) {
     shell(ui, probe, "game", |ui, probe| {
-        probe.button(ui, "game.back", "Back to charts", Vec2::new(140.0, 32.0), CARD, MUTED);
+        probe.button(ui, "game.back", "Back to charts", Vec2::new(140.0, 32.0), CARD(), MUTED());
         ui.add_space(12.0);
         card(ui, probe, "game.hero", 980.0, |ui, probe| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(320.0, 180.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, CornerRadius::same(10), SURFACE);
+                ui.painter().rect_filled(rect, CornerRadius::same(10), SURFACE());
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "A",
                     egui::FontId::proportional(64.0),
-                    MUTED,
+                    MUTED(),
                 );
                 probe.widget("game.thumb", rect, false);
                 ui.add_space(18.0);
                 ui.vertical(|ui| {
                     heading(ui, probe, "game.title", "Adopt Me!", 22.0);
-                    body(ui, probe, "game.creator", "by Uplift Games", MUTED);
+                    body(ui, probe, "game.creator", "by Uplift Games", MUTED());
                     ui.add_space(10.0);
                     probe.button(
                         ui,
@@ -793,7 +850,7 @@ pub fn game_details(ui: &mut egui::Ui, probe: &mut Probe) {
                         "Play",
                         Vec2::new(220.0, 40.0),
                         GREEN,
-                        BG,
+                        ON_ACCENT,
                     );
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
@@ -817,15 +874,15 @@ pub fn game_details(ui: &mut egui::Ui, probe: &mut Probe) {
             .enumerate()
             {
                 ui.horizontal(|ui| {
-                    body(ui, probe, "game.server.region", region, TEXT);
+                    body(ui, probe, "game.server.region", region, TEXT());
                     ui.add_space(24.0);
                     probe.label(
                         ui,
                         "game.server.ping",
                         *ping,
                         egui::FontId::proportional(13.0),
-                        if i == 0 { GREEN } else { MUTED },
-                        CARD,
+                        if i == 0 { GREEN } else { MUTED() },
+                        CARD(),
                     );
                     ui.add_space(24.0);
                     meta(ui, probe, "game.server.players", players);
@@ -835,8 +892,8 @@ pub fn game_details(ui: &mut egui::Ui, probe: &mut Probe) {
                         "game.server.join",
                         "Join",
                         Vec2::new(84.0, 30.0),
-                        SURFACE,
-                        TEXT,
+                        SURFACE(),
+                        TEXT(),
                     );
                 });
                 ui.add_space(8.0);
@@ -856,13 +913,13 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                         .iter()
                         .enumerate()
                     {
-                        avatar(ui, probe, id, 28.0, HOVER);
+                        avatar(ui, probe, id, 28.0, HOVER());
                         let _ = i;
                     }
                     ui.add_space(8.0);
-                    body(ui, probe, "party.pill.count", "3 in party", TEXT);
+                    body(ui, probe, "party.pill.count", "3 in party", TEXT());
                     ui.add_space(10.0);
-                    probe.button(ui, "party.pill.invite", "Invite", Vec2::new(78.0, 30.0), GREEN, BG);
+                    probe.button(ui, "party.pill.invite", "Invite", Vec2::new(78.0, 30.0), GREEN, ON_ACCENT);
                 });
             });
             card(ui, probe, "party.code.card", 420.0, |ui, probe| {
@@ -873,8 +930,8 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                     "party.code.value",
                     "VEXA-7F2Q",
                     egui::FontId::monospace(20.0),
-                    TEXT,
-                    CARD,
+                    TEXT(),
+                    CARD(),
                 );
                 ui.add_space(8.0);
                 probe.button(
@@ -882,8 +939,8 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                     "party.code.copy",
                     "Copy code",
                     Vec2::new(120.0, 32.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
             });
         });
@@ -894,12 +951,12 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
             for (name, state, color) in [
                 ("Vexa", "Host · Frankfurt", GREEN),
                 ("Mika", "Ready", BLUE),
-                ("Rin", "In Adopt Me!", MUTED),
+                ("Rin", "In Adopt Me!", MUTED()),
             ] {
                 ui.horizontal(|ui| {
-                    avatar(ui, probe, "party.member.row", 32.0, HOVER);
+                    avatar(ui, probe, "party.member.row", 32.0, HOVER());
                     ui.add_space(10.0);
-                    body(ui, probe, "party.member.name", name, TEXT);
+                    body(ui, probe, "party.member.name", name, TEXT());
                     ui.add_space(16.0);
                     probe.label(
                         ui,
@@ -907,7 +964,7 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                         state,
                         egui::FontId::proportional(13.0),
                         color,
-                        CARD,
+                        CARD(),
                     );
                     ui.add_space(16.0);
                     probe.button(
@@ -915,8 +972,8 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                         "party.member.kick",
                         "Remove",
                         Vec2::new(90.0, 30.0),
-                        SURFACE,
-                        MUTED,
+                        SURFACE(),
+                        MUTED(),
                     );
                 });
                 ui.add_space(10.0);
@@ -931,8 +988,8 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                 "party.slot.text",
                 "Adopt Me!'s server is full - no room for you.",
                 egui::FontId::proportional(11.5),
-                MUTED,
-                BG,
+                MUTED(),
+                BG(),
             );
             ui.add_space(8.0);
             probe.button(
@@ -940,8 +997,8 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                 "party.slot.ask",
                 "Ask host to hop",
                 Vec2::new(122.0, 24.0),
-                SURFACE,
-                MUTED,
+                SURFACE(),
+                MUTED(),
             );
         });
         ui.add_space(12.0);
@@ -960,25 +1017,25 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                     "party.board.ready",
                     "Ready Check",
                     Vec2::new(112.0, 28.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
-                body(ui, probe, "party.board.count", "2/3 ready · 8s", TEXT);
+                body(ui, probe, "party.board.count", "2/3 ready · 8s", TEXT());
                 probe.button(
                     ui,
                     "party.board.yes",
                     "Ready",
                     Vec2::new(64.0, 28.0),
                     GREEN,
-                    BG,
+                    ON_ACCENT,
                 );
                 probe.button(
                     ui,
                     "party.board.no",
                     "Not Ready",
                     Vec2::new(86.0, 28.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
                 ui.add_space(6.0);
                 probe.button(
@@ -986,16 +1043,16 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                     "party.board.doors",
                     "Doors (2)",
                     Vec2::new(92.0, 28.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
                 probe.button(
                     ui,
                     "party.board.bedwars",
                     "Bed Wars (1)",
                     Vec2::new(112.0, 28.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
                 probe.button(
                     ui,
@@ -1003,7 +1060,7 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                     "Launch Doors",
                     Vec2::new(118.0, 28.0),
                     GREEN,
-                    BG,
+                    ON_ACCENT,
                 );
             });
         });
@@ -1030,7 +1087,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                 probe,
                 "settings.newer.body",
                 "Changes you make here are saved into it; its other settings are left untouched.",
-                MUTED,
+                MUTED(),
             );
         });
         ui.add_space(10.0);
@@ -1045,7 +1102,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     ui.horizontal(|ui| {
                         probe.widget(id, toggle(ui, on), true);
                         ui.add_space(10.0);
-                        body(ui, probe, id, label, TEXT);
+                        body(ui, probe, id, label, TEXT());
                     });
                     ui.add_space(8.0);
                 }
@@ -1077,7 +1134,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     ui.horizontal(|ui| {
                         probe.widget(id, toggle(ui, on), true);
                         ui.add_space(10.0);
-                        body(ui, probe, id, label, TEXT);
+                        body(ui, probe, id, label, TEXT());
                     });
                     ui.add_space(8.0);
                 }
@@ -1088,7 +1145,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     probe,
                     "settings.cache.total",
                     "Image caches: 0 B / 192 MB",
-                    TEXT,
+                    TEXT(),
                 );
                 ui.add_space(2.0);
                 meta(
@@ -1106,7 +1163,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                         probe,
                         "settings.auto_refresh.label",
                         "Automatic background refresh",
-                        TEXT,
+                        TEXT(),
                     );
                 });
                 meta(
@@ -1125,16 +1182,16 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                 meta(ui, probe, "settings.overlay.scale", "Scale");
                 ui.add_space(4.0);
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(440.0, 24.0), egui::Sense::click());
-                ui.painter().rect_filled(rect, CornerRadius::same(12), SURFACE);
+                ui.painter().rect_filled(rect, CornerRadius::same(12), SURFACE());
                 ui.painter().circle_filled(rect.center(), 9.0, GREEN);
                 probe.widget("settings.overlay.scale.slider", rect, true);
                 ui.add_space(10.0);
-                body(ui, probe, "settings.overlay.hint", "Drag to resize the in-game HUD.", MUTED);
+                body(ui, probe, "settings.overlay.hint", "Drag to resize the in-game HUD.", MUTED());
             });
             card_min(ui, probe, "settings.updates", 470.0, 160.0, |ui, probe| {
                 heading(ui, probe, "settings.updates.title", "Updates", 15.0);
                 ui.add_space(6.0);
-                body(ui, probe, "settings.updates.version", "Version 0.5.5", TEXT);
+                body(ui, probe, "settings.updates.version", "Version 0.5.5", TEXT());
                 meta(ui, probe, "settings.updates.state", "Up to date as of today");
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -1143,16 +1200,16 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                         "settings.updates.check",
                         "Check now",
                         Vec2::new(120.0, 32.0),
-                        SURFACE,
-                        TEXT,
+                        SURFACE(),
+                        TEXT(),
                     );
                     probe.button(
                         ui,
                         "settings.updates.release",
                         "Open release",
                         Vec2::new(130.0, 32.0),
-                        CARD,
-                        MUTED,
+                        CARD(),
+                        MUTED(),
                     );
                 });
             });
@@ -1162,7 +1219,7 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
 
 fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(40.0, 24.0), egui::Sense::click());
-    let bg = if on { GREEN } else { HOVER };
+    let bg = if on { GREEN } else { HOVER() };
     ui.painter().rect_filled(rect, CornerRadius::same(12), bg);
     let knob_x = if on {
         rect.right() - 12.0
@@ -1170,7 +1227,7 @@ fn toggle(ui: &mut egui::Ui, on: bool) -> egui::Rect {
         rect.left() + 12.0
     };
     ui.painter()
-        .circle_filled(egui::Pos2::new(knob_x, rect.center().y), 8.0, BG);
+        .circle_filled(egui::Pos2::new(knob_x, rect.center().y), 8.0, BG());
     rect
 }
 
@@ -1181,10 +1238,10 @@ pub fn updater(ui: &mut egui::Ui, probe: &mut Probe) {
         card(ui, probe, "updater.card", 520.0, |ui, probe| {
             heading(ui, probe, "updater.title", "Updating CREBLOX", 20.0);
             ui.add_space(4.0);
-            body(ui, probe, "updater.stage", "Installing...", TEXT);
+            body(ui, probe, "updater.stage", "Installing...", TEXT());
             ui.add_space(12.0);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(492.0, 10.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(5), SURFACE);
+            ui.painter().rect_filled(rect, CornerRadius::same(5), SURFACE());
             let fill = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * 0.72, 10.0));
             ui.painter().rect_filled(fill, CornerRadius::same(5), GREEN);
             probe.widget("updater.progress", rect, false);
@@ -1196,8 +1253,8 @@ pub fn updater(ui: &mut egui::Ui, probe: &mut Probe) {
                 "updater.log",
                 "Replacing C:\\Users\\you\\AppData\\Local\\creblox\\creblox.exe",
                 egui::FontId::monospace(11.0),
-                MUTED,
-                CARD,
+                MUTED(),
+                CARD(),
             );
             ui.add_space(14.0);
             ui.horizontal(|ui| {
@@ -1206,10 +1263,10 @@ pub fn updater(ui: &mut egui::Ui, probe: &mut Probe) {
                     "updater.details",
                     "Details",
                     Vec2::new(100.0, 30.0),
-                    SURFACE,
-                    TEXT,
+                    SURFACE(),
+                    TEXT(),
                 );
-                probe.button(ui, "updater.cancel", "Cancel", Vec2::new(100.0, 30.0), CARD, MUTED);
+                probe.button(ui, "updater.cancel", "Cancel", Vec2::new(100.0, 30.0), CARD(), MUTED());
             });
         });
     });
@@ -1245,7 +1302,7 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
         Color32::from_rgba_unmultiplied(11, 13, 17, 220),
     );
     ui.painter()
-        .rect_stroke(hud, CornerRadius::same(12), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        .rect_stroke(hud, CornerRadius::same(12), Stroke::new(1.0, BORDER()), egui::StrokeKind::Inside);
     probe.widget("overlay.hud", hud, false);
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(hud.shrink2(Vec2::new(14.0, 8.0))), |ui| {
@@ -1256,7 +1313,7 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
                 "CREBLOX",
                 egui::FontId::proportional(12.0),
                 GREEN,
-                CARD,
+                CARD(),
             );
             ui.add_space(10.0);
             probe.label(
@@ -1264,8 +1321,8 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
                 "overlay.fps",
                 "240 FPS",
                 egui::FontId::monospace(13.0),
-                TEXT,
-                CARD,
+                TEXT(),
+                CARD(),
             );
             ui.add_space(10.0);
             probe.label(
@@ -1274,7 +1331,7 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
                 "32 ms",
                 egui::FontId::monospace(13.0),
                 GREEN,
-                CARD,
+                CARD(),
             );
             ui.add_space(10.0);
             probe.label(
@@ -1282,8 +1339,8 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
                 "overlay.server",
                 "Frankfurt",
                 egui::FontId::proportional(12.0),
-                MUTED,
-                CARD,
+                MUTED(),
+                CARD(),
             );
         });
     });
@@ -1303,8 +1360,8 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
             "overlay.watermark",
             "CREBLOX 0.5.5",
             egui::FontId::proportional(11.0),
-            MUTED,
-            CARD,
+            MUTED(),
+            CARD(),
         );
     });
 }
@@ -1325,7 +1382,7 @@ fn nav_font(ui: &egui::Ui, label: &str, width: f32) -> egui::FontId {
         let font = egui::FontId::proportional(size);
         let measured = ui
             .ctx()
-            .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), TEXT))
+            .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), TEXT()))
             .size()
             .x;
         if measured <= width || size <= 8.5 {
@@ -1340,11 +1397,11 @@ fn nav_font(ui: &egui::Ui, label: &str, width: f32) -> egui::FontId {
 pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
     let screen = ui.ctx().viewport_rect();
     ui.painter()
-        .rect_filled(screen, CornerRadius::ZERO, BG);
+        .rect_filled(screen, CornerRadius::ZERO, BG());
 
     let rail = egui::Rect::from_min_size(screen.min, Vec2::new(RAIL_WIDTH, screen.height()));
     ui.painter()
-        .rect_filled(rail, CornerRadius::ZERO, CARD);
+        .rect_filled(rail, CornerRadius::ZERO, CARD());
     probe.widget("nav.rail", rail, false);
 
     let items = [
@@ -1363,7 +1420,7 @@ pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
         );
         if *selected {
             ui.painter()
-                .rect_filled(rect.shrink(3.0), CornerRadius::same(10), SELECTED);
+                .rect_filled(rect.shrink(3.0), CornerRadius::same(10), SELECTED());
             ui.painter().rect_filled(
                 egui::Rect::from_min_max(
                     egui::pos2(rect.left() + 2.0, rect.center().y - 11.0),
@@ -1381,10 +1438,10 @@ pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
         ui.painter().rect_filled(
             icon,
             CornerRadius::same(5),
-            if *selected { HOVER } else { SURFACE },
+            if *selected { HOVER() } else { SURFACE() },
         );
         let font = nav_font(ui, label, rect.width() - 6.0);
-        let color = if *selected { TEXT } else { MUTED };
+        let color = if *selected { TEXT() } else { MUTED() };
         let measured = ui
             .ctx()
             .fonts_mut(|f| f.layout_no_wrap((*label).to_owned(), font.clone(), color))
@@ -1404,7 +1461,7 @@ pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
             ),
             measured,
         );
-        probe.contrast(format!("nav.label.{i}"), color, CARD);
+        probe.contrast(format!("nav.label.{i}"), crate::theme::ink(color, !light()), CARD());
         probe.widget(format!("nav.item.{i}"), rect, true);
         y += NAV_ITEM_HEIGHT;
     }
@@ -1415,7 +1472,7 @@ pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
         egui::pos2(screen.right() - 24.0, screen.bottom() - 24.0),
     );
     ui.painter()
-        .rect_filled(page, CornerRadius::same(RADIUS), CARD);
+        .rect_filled(page, CornerRadius::same(RADIUS), CARD());
     probe.widget("page.content", page, false);
     probe.text(
         "page.title",
@@ -1427,7 +1484,7 @@ pub fn sidebar(ui: &mut egui::Ui, probe: &mut Probe) {
         egui::Align2::LEFT_CENTER,
         "Home",
         egui::FontId::proportional(18.0),
-        TEXT,
+        TEXT(),
     );
 }
 
@@ -1443,16 +1500,16 @@ fn inventory_shell(
     body: impl FnOnce(&mut egui::Ui, &mut Probe),
 ) {
     let screen = ui.ctx().viewport_rect();
-    ui.painter().rect_filled(screen, CornerRadius::ZERO, BG);
+    ui.painter().rect_filled(screen, CornerRadius::ZERO, BG());
     probe.widget("inventory.backdrop", screen, false);
 
     let modal = egui::Rect::from_center_size(screen.center(), Vec2::new(1120.0, 720.0));
     ui.painter()
-        .rect_filled(modal, CornerRadius::same(12), CARD);
+        .rect_filled(modal, CornerRadius::same(12), CARD());
     ui.painter().rect_stroke(
         modal,
         CornerRadius::same(12),
-        Stroke::new(1.0, BORDER),
+        Stroke::new(1.0, BORDER()),
         egui::StrokeKind::Inside,
     );
     probe.widget("inventory.modal", modal, false);
@@ -1467,8 +1524,8 @@ fn inventory_shell(
                     "inventory.title",
                     title,
                     egui::FontId::proportional(17.0),
-                    TEXT,
-                    CARD,
+                    TEXT(),
+                    CARD(),
                 );
                 ui.add_space(6.0);
                 probe.label(
@@ -1476,8 +1533,8 @@ fn inventory_shell(
                     "inventory.subtitle",
                     "Roblox · 50 per page",
                     egui::FontId::proportional(10.0),
-                    MUTED,
-                    CARD,
+                    MUTED(),
+                    CARD(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     probe.button(
@@ -1485,8 +1542,8 @@ fn inventory_shell(
                         "inventory.close",
                         "Close",
                         Vec2::new(58.0, 26.0),
-                        SURFACE,
-                        TEXT,
+                        SURFACE(),
+                        TEXT(),
                     );
                 });
             });
@@ -1499,8 +1556,8 @@ fn inventory_shell(
                         format!("inventory.tab.{i}"),
                         category.label(),
                         Vec2::new(150.0, 28.0),
-                        if selected { SELECTED } else { SURFACE },
-                        if selected { TEXT } else { MUTED },
+                        if selected { SELECTED() } else { SURFACE() },
+                        if selected { TEXT() } else { MUTED() },
                     );
                 }
             });
@@ -1544,8 +1601,8 @@ pub fn inventory(ui: &mut egui::Ui, probe: &mut Probe) {
             "inventory.load_more",
             "Load more",
             Vec2::new(96.0, 28.0),
-            SURFACE,
-            TEXT,
+            SURFACE(),
+            TEXT(),
         );
     });
 }
@@ -1555,8 +1612,8 @@ pub fn inventory(ui: &mut egui::Ui, probe: &mut Probe) {
 /// texture with a two-tone tile, because it cannot reach Roblox.
 fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, kind: &str) {
     let frame = egui::Frame::new()
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(SURFACE())
+        .stroke(Stroke::new(1.0, BORDER()))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::same(8));
     let inner = frame.show(ui, |ui| {
@@ -1564,7 +1621,7 @@ fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, 
         ui.vertical(|ui| {
             let (thumb, _) = ui.allocate_exact_size(Vec2::splat(108.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(thumb, CornerRadius::same(6), HOVER);
+                .rect_filled(thumb, CornerRadius::same(6), HOVER());
             if idx % 7 == 6 {
                 // Not downloaded yet: the real card shows the type label here, never an icon.
                 ui.painter().text(
@@ -1572,7 +1629,7 @@ fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, 
                     egui::Align2::CENTER_CENTER,
                     kind,
                     egui::FontId::proportional(11.0),
-                    MUTED,
+                    MUTED(),
                 );
             } else {
                 // Stand-in for the decoded thumbnail: a soft two-tone tile.
@@ -1581,7 +1638,7 @@ fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, 
                     1 => GREEN,
                     2 => ORANGE,
                     3 => RED,
-                    _ => RAIL,
+                    _ => RAIL(),
                 };
                 ui.painter().rect_filled(
                     thumb.shrink(6.0),
@@ -1609,8 +1666,8 @@ fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, 
                 format!("inventory.card.{idx}.name"),
                 name,
                 egui::FontId::proportional(11.5),
-                TEXT,
-                SURFACE,
+                TEXT(),
+                SURFACE(),
             );
             ui.add_space(2.0);
             probe.label(
@@ -1618,8 +1675,8 @@ fn inventory_card(ui: &mut egui::Ui, probe: &mut Probe, idx: usize, name: &str, 
                 format!("inventory.card.{idx}.type"),
                 kind,
                 egui::FontId::proportional(10.0),
-                MUTED,
-                SURFACE,
+                MUTED(),
+                SURFACE(),
             );
         });
     });
@@ -1635,8 +1692,8 @@ pub fn inventory_private(ui: &mut egui::Ui, probe: &mut Probe) {
                 "inventory.empty.title",
                 "This player's inventory is private",
                 egui::FontId::proportional(16.0),
-                TEXT,
-                CARD,
+                TEXT(),
+                CARD(),
             );
             ui.add_space(4.0);
             probe.label(
@@ -1644,8 +1701,8 @@ pub fn inventory_private(ui: &mut egui::Ui, probe: &mut Probe) {
                 "inventory.empty.detail",
                 "Roblox only shows an inventory its owner made public.",
                 egui::FontId::proportional(12.0),
-                MUTED,
-                CARD,
+                MUTED(),
+                CARD(),
             );
         });
     });

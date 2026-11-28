@@ -121,7 +121,8 @@ impl Palette {
                 games_border: border,
                 text_border: Color32::from_rgba_unmultiplied(0, 0, 0, 38),
                 text: Color32::from_rgb(0x17, 0x19, 0x1D),
-                muted: Color32::from_rgb(0x6B, 0x72, 0x80),
+                // 5.3:1 on the light surface, so secondary text reads there too.
+                muted: Color32::from_rgb(0x5A, 0x61, 0x6D),
                 placeholder: Color32::from_rgb(0xEE, 0xF0, 0xF3),
                 selected_bg: Color32::from_rgb(0xE3, 0xE6, 0xEA),
                 hover_bg: Color32::from_rgb(0xEA, 0xEC, 0xEF),
@@ -431,15 +432,35 @@ pub const GREEN: Color32 = Color32::from_rgb(0, 176, 111);
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x1A, 0x12);
 pub const BLUE: Color32 = Color32::from_rgb(0, 162, 255);
 pub const ORANGE: Color32 = Color32::from_rgb(246, 136, 2);
-/// `ORANGE` as *text* on a light card: the orange is 2.5:1 on white, this amber is 5.0:1.
-pub const ORANGE_INK: Color32 = Color32::from_rgb(0xA8, 0x5C, 0x00);
+/// The accent colours as *text* on the light palette. The accents themselves are fills: they
+/// are 2.5-3:1 on white, these are 5.5-6.6:1 on the light card and 4.9-5.6:1 on its surface.
+pub const GREEN_INK: Color32 = Color32::from_rgb(0x00, 0x6B, 0x45);
+pub const BLUE_INK: Color32 = Color32::from_rgb(0x00, 0x5F, 0x9E);
+pub const ORANGE_INK: Color32 = Color32::from_rgb(0x9A, 0x54, 0x00);
+pub const RED_INK: Color32 = Color32::from_rgb(0xB3, 0x26, 0x1E);
+
+/// An accent's readable text form on the current theme: the accent itself on the dark palette,
+/// the matching ink on the light one. Unknown colours are returned unchanged.
+pub fn ink(color: Color32, dark: bool) -> Color32 {
+    if dark {
+        return color;
+    }
+    if color == GREEN {
+        GREEN_INK
+    } else if color == BLUE {
+        BLUE_INK
+    } else if color == ORANGE {
+        ORANGE_INK
+    } else if color == RED {
+        RED_INK
+    } else {
+        color
+    }
+}
 
 /// Ink for a warning line or title drawn on the current theme's card background.
-///
-/// The accent orange is a fill colour - it is loud on the dark card and unreadable on the light
-/// one - so text uses this.
 pub fn warning_ink(dark: bool) -> Color32 {
-    if dark { ORANGE } else { ORANGE_INK }
+    ink(ORANGE, dark)
 }
 pub const RED: Color32 = Color32::from_rgb(210, 50, 50);
 

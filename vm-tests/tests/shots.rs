@@ -15,9 +15,14 @@ fn every_screen_renders_and_lays_out_cleanly() {
     let mut failures: Vec<String> = Vec::new();
     let mut written: Vec<std::path::PathBuf> = Vec::new();
 
+    // Both themes are rendered and checked: the light palette is a different set of colours on
+    // the same layout, and a label that reads on the dark card can vanish on the white one.
     for (name, page) in screens::all() {
-        for (w, h) in SIZES {
-            let tag = format!("{name}-{}x{}", w as u32, h as u32);
+        for light in [false, true] {
+            screens::set_light(light);
+            for (w, h) in SIZES {
+            let theme = if light { "light-" } else { "" };
+            let tag = format!("{name}-{theme}{}x{}", w as u32, h as u32);
             let (shot, probe) = harness.render(&tag, egui::vec2(w, h), 1.5, page);
 
             let path = shot.save(&dir);
@@ -56,8 +61,10 @@ fn every_screen_renders_and_lays_out_cleanly() {
                 failures.push(format!("{tag}: {problem}"));
             }
             written.push(path);
+            }
         }
     }
+    screens::set_light(false);
 
     println!("screenshots written:");
     for path in &written {
