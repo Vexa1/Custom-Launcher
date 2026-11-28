@@ -389,6 +389,7 @@ fn every_tray_toggle_rewrites_the_panels_spec() {
         server: true,
         stats: true,
         crosshair: true,
+        party: true,
     };
     let before = spec_for(all_on, all_on.crosshair);
     assert!(before.contains("\"id\":\"server\""), "{before}");

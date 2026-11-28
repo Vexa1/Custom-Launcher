@@ -168,6 +168,8 @@ pub struct Creblox {
     pub sorts_rerank_on_merge: bool,
     /// When and at which level macOS pressure last caused a flush, for the debounce.
     pub last_pressure_action: Option<(Instant, crate::memory_pressure::Level)>,
+    /// The party HUD tiles: who is in the party, and who just dropped out of it.
+    pub party_hud: crate::party_hud::Tracker,
     pub just_launched: Vec<(u64, Instant)>,
     pub pending_favs: HashMap<u64, (bool, Instant)>,
     pub was_focused: bool,
@@ -403,6 +405,7 @@ impl Creblox {
                 overlay_server: settings.overlay_enabled,
                 overlay_stats: settings.overlay_stats_enabled,
                 overlay_crosshair: settings.crosshair_enabled,
+                overlay_party: settings.party_overlay,
                 overlay_editing: false,
             },
             tx.clone(),
@@ -528,6 +531,7 @@ impl Creblox {
             game_freshness: crate::live_refresh::Freshness::default(),
             sorts_rerank_on_merge: false,
             last_pressure_action: None,
+            party_hud: crate::party_hud::Tracker::new(),
             just_launched: Vec::new(),
             pending_favs: HashMap::new(),
             was_focused: true,
@@ -3928,8 +3932,10 @@ impl Creblox {
                         }
                         self.party_error = None;
                         self.party_state = Some(snapshot);
-                        // A fresh snapshot is the natural moment to say where we are.
+                        // A fresh snapshot is the natural moment to say where we are, and
+                        // the only thing that can change a member tile.
                         self.party_sync_presence();
+                        self.sync_party_hud();
                         self.sync_discord_presence();
                     }
                     crate::party::PartyEvent::Launch(launch) => self.party_follow_launch(launch),
@@ -3939,6 +3945,8 @@ impl Creblox {
                     }
                     crate::party::PartyEvent::Left(reason) => {
                         self.party_state = None;
+                        // Leaving drops every tile (and the cached headshots with them).
+                        self.sync_party_hud();
                         self.party_presence = None;
                         self.party_full = None;
                         self.party_hop_from = None;
@@ -4005,7 +4013,8 @@ impl Creblox {
                     let replay = match &ev {
                         TrayEvent::ToggleServerOverlay
                         | TrayEvent::ToggleStatsOverlay
-                        | TrayEvent::ToggleCrosshair => !self.adopt_saved_hud(),
+                        | TrayEvent::ToggleCrosshair
+                        | TrayEvent::TogglePartyOverlay => !self.adopt_saved_hud(),
                         _ => false,
                     };
                     if !replay {
@@ -4038,7 +4047,8 @@ impl Creblox {
                         }
                         TrayEvent::ToggleServerOverlay
                         | TrayEvent::ToggleStatsOverlay
-                        | TrayEvent::ToggleCrosshair => {
+                        | TrayEvent::ToggleCrosshair
+                        | TrayEvent::TogglePartyOverlay => {
                             // `adopt_saved_hud` above already read the value the dispatcher
                             // saved; only the window's own copies need refreshing, and only
                             // for the click itself - never for its replayed copy.
@@ -5624,6 +5634,7 @@ impl Creblox {
             overlay_server: self.settings.overlay_enabled,
             overlay_stats: self.settings.overlay_stats_enabled,
             overlay_crosshair: self.settings.crosshair_enabled,
+            overlay_party: self.settings.party_overlay,
             overlay_editing: self.overlay_editing,
         }
     }
@@ -5708,11 +5719,36 @@ impl Creblox {
         }
     }
 
+    /// Rebuilds the party HUD tiles and hands them to the overlay loop.
+    ///
+    /// Event driven: only a party snapshot or a change of this player's own server calls this,
+    /// and `set_party_tiles` drops an identical set before it reaches the panels file. A member
+    /// who disappeared from the party while a match was on stays as a red tile for
+    /// `party_hud::GRACE`, which is the "crashed / lost connection" case.
+    pub fn sync_party_hud(&mut self) {
+        let (place, job) = match self.server_info.as_ref() {
+            Some(info) => (info.place_id, info.job_id.clone()),
+            None => (0, String::new()),
+        };
+        let me = self.me.as_ref().map(|profile| profile.user.id);
+        let tiles = self.party_hud.update(
+            self.party_state.as_ref(),
+            place,
+            &job,
+            me,
+            Instant::now(),
+        );
+        crate::game_overlay::set_party_tiles(tiles);
+    }
+
     /// After leaving a game, put CREBLOX in front (instead of Roblox's own home screen).
     /// Starts (or refreshes) the in-game overlays for the server we are connected to.
     pub fn maybe_show_game_overlay(&mut self) {
         // CREBLOX keeps running (only its window is hidden) while a game is on, so the
         // overlays are always driven from here - also with "close the window while I play".
+        // This runs on every watcher tick, so it is also where a changed local server
+        // refreshes the party strip (cheap: nothing is published unless a tile changed).
+        self.sync_party_hud();
         let flags = crate::fastflags::load_fastflags();
         let mut cfg = crate::game_overlay::OverlayConfig::from_settings(&self.settings, &flags);
         // The position editor needs the overlay on screen whether or not a game is running,
@@ -5887,7 +5923,8 @@ impl Creblox {
         let saved = load_settings();
         let changed = saved.overlay_enabled != self.settings.overlay_enabled
             || saved.overlay_stats_enabled != self.settings.overlay_stats_enabled
-            || saved.crosshair_enabled != self.settings.crosshair_enabled;
+            || saved.crosshair_enabled != self.settings.crosshair_enabled
+            || saved.party_overlay != self.settings.party_overlay;
         self.settings = saved;
         changed
     }

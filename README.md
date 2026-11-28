@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.45
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.46
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -113,6 +113,7 @@ Everything listed here exists in the code today. File references point at the im
 | **Server panel** (`game_overlay.rs`) | Corner-selectable panel showing server region, IP and job id, with auto-hide duration. |
 | **Stats panel** | Live CPU, RAM, ping (ICMP to the game server), session timer, clock and the active FPS cap. The session timer is ticked by the overlay window from the server's join timestamp, not by the launcher rewriting the file. |
 | **FastFlags panel** | Read-only view of the flags currently applied to the client. |
+| **Party overlay** | A strip of party member tiles - 60x60 headshot in a rounded square (initials while it loads) with a 2 px outline: green when the member is in this exact server (place *and* job id), grey while they load or wait in the lobby, red for the 30 s after their connection drops. Toggled from the tray or Settings, rewritten into the panels file within one overlay step. |
 | **Crosshair** | Style, size, gap, thickness, colour and opacity. Endpoints are snapped to device-pixel centres and the dark backing is exactly one physical pixel, so it stays sharp on both Retina and 1x Catalina displays. See *HUD design system*. |
 | **Driver** | `game_overlay.rs` writes a JSON spec from a background thread whenever something observable changes — server, region, ping, flags, config — and keeps the overlay process alive, restarting it if it dies mid-session. The clock is not written: each timer row carries a `joined_at_unix_ms` anchor plus an `{elapsed}` token, and the overlay window turns that into `m:ss` itself, so a quiet second costs no file write. A config change sets a wake flag that cuts the tick short, so a tray toggle lands within 100 ms. Works identically from the launcher or from `--companion`. |
 

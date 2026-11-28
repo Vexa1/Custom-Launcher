@@ -82,6 +82,9 @@ pub struct Settings {
     /// Quit the launcher window while a game runs (a tiny headless helper reopens it).
     pub close_launcher_during_game: bool,
     pub overlay_stats_enabled: bool,
+    /// The party member strip: who is in the party and which server they are in.
+    pub party_overlay: bool,
+    pub party_overlay_corner: u8,
     pub overlay_stats_corner: u8,
     pub overlay_stats_cpu: bool,
     pub overlay_stats_ram: bool,
@@ -185,6 +188,8 @@ impl Default for Settings {
             // On by default: the server panel already defaults on, and a default install
             // that shows a region but no CPU/RAM/ping reads as "the stats are broken".
             overlay_stats_enabled: true,
+            party_overlay: true,
+            party_overlay_corner: 2,
             overlay_stats_corner: 1,
             overlay_stats_cpu: true,
             overlay_stats_ram: true,

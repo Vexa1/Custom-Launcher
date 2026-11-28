@@ -256,6 +256,8 @@ pub enum TrayToggle {
     Server,
     Stats,
     Crosshair,
+    /// The party member strip.
+    Party,
 }
 
 /// The on/off state of the switches the tray owns.
@@ -264,6 +266,7 @@ pub struct HudToggles {
     pub server: bool,
     pub stats: bool,
     pub crosshair: bool,
+    pub party: bool,
 }
 
 impl HudToggles {
@@ -282,8 +285,38 @@ impl HudToggles {
                 crosshair: !self.crosshair,
                 ..self
             },
+            TrayToggle::Party => Self {
+                party: !self.party,
+                ..self
+            },
         }
     }
+}
+
+/// The party card: a strip of member tiles, each a rounded square with a 2 px outline in the
+/// colour of that member's state.
+///
+/// Lives here, not in the overlay window, so `vm-tests` can assert the exact bytes the HUD
+/// receives for a member who is in the server, one who is loading and one who dropped.
+pub fn party_panel(corner: u8, tiles: &[crate::party_hud::Tile]) -> Value {
+    let tiles: Vec<Value> = tiles
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "name": t.name,
+                "initials": t.initials,
+                "status": t.status.key(),
+                "headshot": t.headshot,
+            })
+        })
+        .collect();
+    json!({
+        "id": "party",
+        "corner": corner.min(3),
+        "title": format!("Party {}", tiles.len()),
+        "tiles": tiles
+    })
 }
 
 /// How close two copies of one click can be and still be the same physical click. Two real

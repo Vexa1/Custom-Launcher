@@ -345,6 +345,12 @@ pub fn load_settings() -> Settings {
         overlay_stats_enabled: v["overlay_stats_enabled"]
             .as_bool()
             .unwrap_or(def.overlay_stats_enabled),
+        party_overlay: v["party_overlay"].as_bool().unwrap_or(def.party_overlay),
+        party_overlay_corner: v["party_overlay_corner"]
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .map(|n| n.min(3))
+            .unwrap_or(def.party_overlay_corner),
         overlay_stats_corner: v["overlay_stats_corner"]
             .as_u64()
             .and_then(|n| u8::try_from(n).ok())
@@ -556,6 +562,8 @@ pub fn save_settings(s: &Settings) {
         "minimize_on_game_launch": s.minimize_on_game_launch,
         "close_launcher_during_game": s.close_launcher_during_game,
         "overlay_stats_enabled": s.overlay_stats_enabled,
+        "party_overlay": s.party_overlay,
+        "party_overlay_corner": s.party_overlay_corner,
         "overlay_stats_corner": s.overlay_stats_corner,
         "overlay_stats_cpu": s.overlay_stats_cpu,
         "overlay_stats_ram": s.overlay_stats_ram,

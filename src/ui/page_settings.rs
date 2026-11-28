@@ -1063,6 +1063,36 @@ impl Creblox {
 
             changed |= ui
                 .checkbox(
+                    &mut self.settings.party_overlay,
+                    "Party overlay (member tiles with in-server / loading / disconnected outlines)",
+                )
+                .changed();
+            ui.add_enabled_ui(self.settings.party_overlay, |ui| {
+                ui.indent("party_overlay_options", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Position:");
+                        let cur = self.settings.party_overlay_corner.min(3) as usize;
+                        egui::ComboBox::from_id_salt("party_overlay_corner")
+                            .selected_text(corner_labels[cur])
+                            .show_ui(ui, |ui| {
+                                for (i, label) in corner_labels.iter().enumerate() {
+                                    if ui.selectable_label(cur == i, *label).clicked() {
+                                        self.settings.party_overlay_corner = i as u8;
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    });
+                });
+            });
+            small_text(
+                ui,
+                "Green means the member is in this exact server, grey that they are still loading in, red that their connection dropped."
+                    .to_string(),
+            );
+
+            changed |= ui
+                .checkbox(
                     &mut self.settings.overlay_stats_enabled,
                     "Live stats overlay (CPU, RAM, ping, session timer, clock)",
                 )

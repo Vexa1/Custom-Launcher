@@ -206,6 +206,153 @@ fn draw_impl(
         let title_galley: Option<Arc<Galley>> = (!title.is_empty())
             .then(|| painter.layout_no_wrap(title, label_font.clone(), LABEL));
 
+        // The party card, mirrored from `overlay_window::relayout`/`paint_layout`: a strip of
+        // 44 px rounded squares, each with its 2 px status outline and the name under it.
+        if let Some(tiles) = panel["tiles"].as_array().filter(|t| !t.is_empty()) {
+            const SQUARE: f32 = 44.0;
+            const CELL_GAP: f32 = 8.0;
+            const NAME_GAP: f32 = 3.0;
+            const NAME_H: f32 = 13.0;
+            let cols = tiles.len().min(4) as f32;
+            let rows_n = tiles.len().div_ceil(4);
+            let title_h = title_galley.as_ref().map_or(0.0, |g| g.size().y + GAP);
+            let rule_h = if title_galley.is_some() { px + GAP } else { 0.0 };
+            let width = cols * SQUARE + (cols - 1.0) * CELL_GAP + PAD * 2.0;
+            let height = PAD * 2.0
+                + title_h
+                + rule_h
+                + rows_n as f32 * (SQUARE + NAME_GAP + NAME_H)
+                + (rows_n as f32 - 1.0).max(0.0) * CELL_GAP;
+            let size = Vec2::new(width, height);
+            let corner = panel["corner"].as_u64().unwrap_or(3).min(3) as usize;
+            let x = if corner % 2 == 1 {
+                area.right() - size.x - MARGIN
+            } else {
+                area.left() + MARGIN
+            };
+            let y = if corner < 2 {
+                area.top() + MARGIN + used[corner]
+            } else {
+                area.bottom() - size.y - MARGIN - used[corner]
+            };
+            used[corner] += size.y + GAP;
+            let offset = Vec2::new(
+                panel["offset_x"].as_f64().unwrap_or(0.0) as f32,
+                panel["offset_y"].as_f64().unwrap_or(0.0) as f32,
+            );
+            let rect = Rect::from_min_size(Pos2::new(x + offset.x, y + offset.y), size);
+            let panel_id = format!("hud.panel.{pi}");
+            let panel_key = panel["id"].as_str().unwrap_or_default().to_string();
+            placed.push((panel_key.clone(), rect));
+            probe.widget(panel_id.clone(), rect, false);
+            if let Some(active) = edit {
+                let is_active = active == panel_key;
+                dashed_rect(
+                    &painter,
+                    rect.expand(4.0),
+                    if is_active { ACCENT } else { outline() },
+                    px,
+                );
+                if is_active {
+                    painter.rect_stroke(
+                        rect,
+                        CornerRadius::same(8),
+                        Stroke::new(1.5, ACCENT),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
+            let alpha = (opacity * 255.0).round() as u8;
+            let surface =
+                Color32::from_rgba_unmultiplied(SURFACE.r(), SURFACE.g(), SURFACE.b(), alpha);
+            painter.rect_filled(rect, CornerRadius::same(8), surface);
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(8),
+                Stroke::new(px, HAIRLINE),
+                egui::StrokeKind::Inside,
+            );
+            let mut cursor_y = rect.top() + PAD;
+            if let Some(g) = &title_galley {
+                let pos = Pos2::new(rect.left() + PAD, cursor_y);
+                painter.galley(pos, g.clone(), LABEL);
+                probe.text(
+                    format!("{panel_id}.title"),
+                    Rect::from_min_size(pos, g.size()),
+                    g.size(),
+                );
+                probe.contrast(format!("{panel_id}.title"), LABEL, surface);
+                cursor_y += g.size().y + GAP;
+                painter.line_segment(
+                    [
+                        Pos2::new(rect.left() + PAD, cursor_y),
+                        Pos2::new(rect.right() - PAD, cursor_y),
+                    ],
+                    Stroke::new(px, DIVIDER),
+                );
+                cursor_y += px + GAP;
+            }
+            for (i, tile) in tiles.iter().enumerate() {
+                let status = crate::party_hud::TileStatus::from_key(
+                    tile["status"].as_str().unwrap_or("loading"),
+                );
+                let (r, g, b) = status.rgb();
+                let outline = Color32::from_rgb(r, g, b);
+                let col = (i % 4) as f32;
+                let row = (i / 4) as f32;
+                let cell = Rect::from_min_size(
+                    Pos2::new(
+                        rect.left() + PAD + col * (SQUARE + CELL_GAP),
+                        cursor_y + row * (SQUARE + NAME_GAP + NAME_H + CELL_GAP),
+                    ),
+                    Vec2::splat(SQUARE),
+                );
+                painter.rect_filled(
+                    cell,
+                    CornerRadius::same(8),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+                );
+                let initials = painter.layout_no_wrap(
+                    tile["initials"].as_str().unwrap_or("?").to_string(),
+                    FontId::monospace(15.0),
+                    VALUE,
+                );
+                let ipos = Pos2::new(
+                    cell.center().x - initials.size().x / 2.0,
+                    cell.center().y - initials.size().y / 2.0,
+                );
+                painter.galley(ipos, initials.clone(), VALUE);
+                probe.text(
+                    format!("{panel_id}.initials.{i}"),
+                    Rect::from_min_size(ipos, initials.size()),
+                    initials.size(),
+                );
+                painter.rect_stroke(
+                    cell,
+                    CornerRadius::same(8),
+                    Stroke::new(2.0, outline),
+                    egui::StrokeKind::Inside,
+                );
+                let name = painter.layout_no_wrap(
+                    crate::overlay_spec::shorten(tile["name"].as_str().unwrap_or(""), 7),
+                    FontId::proportional(9.0),
+                    LABEL,
+                );
+                let npos = Pos2::new(
+                    cell.center().x - name.size().x / 2.0,
+                    cell.bottom() + NAME_GAP,
+                );
+                painter.galley(npos, name.clone(), LABEL);
+                probe.text(
+                    format!("{panel_id}.name.{i}"),
+                    Rect::from_min_size(npos, name.size()),
+                    name.size(),
+                );
+                probe.contrast(format!("{panel_id}.name.{i}"), LABEL, surface);
+            }
+            continue;
+        }
+
         struct Measured {
             label: Option<Arc<Galley>>,
             value: Arc<Galley>,

@@ -83,6 +83,12 @@ pub struct GamePanelCfg {
     pub corner: u8,
 }
 
+/// The party member strip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartyPanelCfg {
+    pub corner: u8,
+}
+
 /// A picture drawn inside the game (logo, watermark, map or reference image).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageOverlayCfg {
@@ -125,6 +131,7 @@ pub struct OverlayConfig {
     pub stats: Option<StatsPanelCfg>,
     pub flags: Option<FlagsPanelCfg>,
     pub game: Option<GamePanelCfg>,
+    pub party: Option<PartyPanelCfg>,
     pub image: Option<ImageOverlayCfg>,
     pub crosshair: Option<CrosshairCfg>,
 }
@@ -137,6 +144,7 @@ impl OverlayConfig {
             server: s.overlay_enabled,
             stats: s.overlay_stats_enabled,
             crosshair: s.crosshair_enabled,
+            party: s.party_overlay,
         };
         let server = toggles.server.then(|| ServerPanelCfg {
             corner: s.overlay_corner.min(3),
@@ -179,6 +187,9 @@ impl OverlayConfig {
         let game = s.overlay_game_enabled.then(|| GamePanelCfg {
             corner: s.overlay_game_corner.min(3),
         });
+        let party = toggles.party.then(|| PartyPanelCfg {
+            corner: s.party_overlay_corner.min(3),
+        });
         let image = if s.overlay_image_enabled && !s.overlay_image_path.trim().is_empty() {
             Some(ImageOverlayCfg {
                 path: s.overlay_image_path.clone(),
@@ -213,6 +224,7 @@ impl OverlayConfig {
             stats,
             flags,
             game,
+            party,
             image,
             crosshair,
         }
@@ -223,6 +235,7 @@ impl OverlayConfig {
             || self.stats.is_some()
             || self.flags.is_some()
             || self.game.is_some()
+            || self.party.is_some()
             || self.image.is_some()
             || self.crosshair.is_some()
     }
@@ -247,6 +260,8 @@ struct Shared {
     /// Unix-ms anchor for the `Session` row before a server is known (the helper's start).
     session_started_ms: u64,
     locations: HashMap<String, String>,
+    /// The party strip's tiles, published by the launcher on a party snapshot.
+    party: Vec<crate::party_hud::Tile>,
     /// `(game name, players online)` for the current place.
     game_info: Option<(String, u64)>,
     stop: bool,
@@ -342,6 +357,7 @@ impl OverlayManager {
             joined_at_ms,
             session_started_ms,
             locations: HashMap::new(),
+            party: LAST_PARTY.lock().map(|p| p.clone()).unwrap_or_default(),
             game_info: None,
             stop: false,
             dirty: false,
@@ -467,6 +483,43 @@ static LIVE: Mutex<Option<std::sync::Weak<Mutex<Shared>>>> = Mutex::new(None);
 /// never has to wait for another change to learn which server the player is already in.
 static LAST_SERVER: Mutex<Option<ServerData>> = Mutex::new(None);
 
+/// The party tiles last published, for the same seeding reason: starting the overlay mid-match
+/// shows the party on the first frame instead of waiting for the next snapshot.
+static LAST_PARTY: Mutex<Vec<crate::party_hud::Tile>> = Mutex::new(Vec::new());
+
+/// Publishes the party strip. Called only when a snapshot arrived or the local server changed,
+/// so an idle party never writes the panels file.
+pub fn set_party_tiles(tiles: Vec<crate::party_hud::Tile>) {
+    let changed = LAST_PARTY
+        .lock()
+        .map(|mut last| {
+            if *last == tiles {
+                false
+            } else {
+                *last = tiles.clone();
+                true
+            }
+        })
+        .unwrap_or(false);
+    if !changed {
+        return;
+    }
+    let Some(shared) = LIVE
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
+    else {
+        return;
+    };
+    if let Ok(mut g) = shared.lock() {
+        if g.party != tiles {
+            g.party = tiles;
+            g.dirty = true;
+            g.rev = g.rev.wrapping_add(1);
+        }
+    }
+}
+
 fn publish_server(server: Option<ServerData>) {
     if let Ok(mut last) = LAST_SERVER.lock() {
         *last = server.clone();
@@ -515,6 +568,7 @@ pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> (overlay_spec::Hud
         server: settings.overlay_enabled,
         stats: settings.overlay_stats_enabled,
         crosshair: settings.crosshair_enabled,
+        party: settings.party_overlay,
     };
     // One physical click flips one switch once. macOS delivers a menu action to every reader
     // of the global menu channel, so the tray thread and the window's drain can both see the
@@ -530,6 +584,7 @@ pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> (overlay_spec::Hud
     settings.overlay_enabled = now.server;
     settings.overlay_stats_enabled = now.stats;
     settings.crosshair_enabled = now.crosshair;
+    settings.party_overlay = now.party;
     crate::auth::save_settings(&settings);
     let flags = crate::fastflags::load_fastflags();
     push_config(OverlayConfig::from_settings(&settings, &flags));
@@ -537,16 +592,18 @@ pub fn apply_tray_toggle(toggle: overlay_spec::TrayToggle) -> (overlay_spec::Hud
     // log.txt, that a menu click reached the HUD while the launcher window was hidden.
     match rewrite_spec_now() {
         Some((name, true)) => crate::auth::log(&format!(
-            "tray: rewrote overlay panels spec ({name}: server {}, stats {}, crosshair {})",
+            "tray: rewrote overlay panels spec ({name}: server {}, stats {}, crosshair {}, party {})",
             on_off(now.server),
             on_off(now.stats),
-            on_off(now.crosshair)
+            on_off(now.crosshair),
+            on_off(now.party)
         )),
         Some((name, false)) => crate::auth::log(&format!(
-            "tray: overlay panels spec already current ({name}: server {}, stats {}, crosshair {})",
+            "tray: overlay panels spec already current ({name}: server {}, stats {}, crosshair {}, party {})",
             on_off(now.server),
             on_off(now.stats),
-            on_off(now.crosshair)
+            on_off(now.crosshair),
+            on_off(now.party)
         )),
         None => {
             crate::auth::log("tray: no overlay running - settings saved, no panels spec to rewrite")
@@ -1573,6 +1630,13 @@ fn build_spec(g: &Shared) -> Value {
             edit_preview: cfg.edit,
         },
     );
+    // The party strip comes from its own state, which only changes when a snapshot arrives
+    // or this player's server does - never once per tick.
+    if let Some(pc) = &cfg.party {
+        if !g.party.is_empty() {
+            panels.push(overlay_spec::party_panel(pc.corner, &g.party));
+        }
+    }
     overlay_spec::apply_panel_offsets(&mut panels, &cfg.panel_offsets);
     let mut spec = overlay_spec::spec_json(cfg.opacity, cfg.game_active, cfg.edit, panels);
     if let Some(img) = &cfg.image {

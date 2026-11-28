@@ -26,6 +26,7 @@ mod game_overlay;
 mod net_probe;
 mod overlay_spec;
 mod overlay_window;
+mod party_hud;
 mod party;
 mod party_server;
 mod platform;

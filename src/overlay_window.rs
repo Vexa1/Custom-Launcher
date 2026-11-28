@@ -619,10 +619,21 @@ struct Panel {
     offset: egui::Vec2,
     /// The launcher's saved position for this panel: what Reset and Esc go back to.
     saved: egui::Vec2,
+    /// The party card's member tiles. Empty for every text panel.
+    tiles: Vec<crate::party_hud::Tile>,
 }
 
 /// One laid-out row, in game-window coordinates. Built once per spec / scale change; the
 /// render loop only translates and draws these, so a frame allocates nothing.
+struct TileLayout {
+    id: u64,
+    rect: Rect,
+    outline: Color32,
+    initials: Arc<egui::Galley>,
+    name: Arc<egui::Galley>,
+    name_pos: Pos2,
+}
+
 struct RowLayout {
     label: Option<Arc<egui::Galley>>,
     label_pos: Pos2,
@@ -636,6 +647,8 @@ struct PanelLayout {
     rect: Rect,
     title: Option<(Pos2, Arc<egui::Galley>)>,
     rows: Vec<RowLayout>,
+    /// Party tiles: one rounded square, its outline colour, and the name under it.
+    tiles: Vec<TileLayout>,
     /// Absolute y of every hairline inside the panel (title rule + row separators).
     rules: Vec<f32>,
 }
@@ -833,6 +846,13 @@ fn set_overlay_visible(visible: bool) {
 struct OverlayWindowApp {
     spec_path: PathBuf,
     panels: Vec<Panel>,
+    /// Decoded 60x60 headshots, one per member in the party right now. Dropped as soon as a
+    /// member leaves the strip, which is what keeps this to a few kilobytes.
+    party_tex: std::collections::HashMap<u64, egui::TextureHandle>,
+    /// Tiles whose headshot has a fetch in flight, so a member never queues two.
+    party_asked: std::collections::HashSet<u64>,
+    /// Fetched pictures waiting to be uploaded as textures.
+    party_ready: std::sync::Arc<std::sync::Mutex<Vec<(u64, egui::ColorImage)>>>,
     crosshair: Option<Crosshair>,
     opacity: f32,
     bounds: Option<CGRect>,
@@ -909,6 +929,9 @@ impl OverlayWindowApp {
             missing_specs: 0,
             visible: false,
             crosshair_tex: None,
+            party_tex: std::collections::HashMap::new(),
+            party_asked: std::collections::HashSet::new(),
+            party_ready: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             image: None,
             image_tex: None,
             started: Instant::now(),
@@ -1016,8 +1039,25 @@ impl OverlayWindowApp {
                             p["offset_x"].as_f64().unwrap_or(0.0) as f32,
                             p["offset_y"].as_f64().unwrap_or(0.0) as f32,
                         );
+                        let tiles = p["tiles"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .map(|t| crate::party_hud::Tile {
+                                        id: t["id"].as_u64().unwrap_or(0),
+                                        name: t["name"].as_str().unwrap_or("").to_string(),
+                                        initials: t["initials"].as_str().unwrap_or("?").to_string(),
+                                        status: crate::party_hud::TileStatus::from_key(
+                                            t["status"].as_str().unwrap_or("loading"),
+                                        ),
+                                        headshot: t["headshot"].as_str().unwrap_or("").to_string(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         Panel {
                             id: p["id"].as_str().unwrap_or("").to_string(),
+                            tiles,
                             corner: p["corner"].as_u64().unwrap_or(3).min(3) as u8,
                             title_display: tracked(&title),
                             title,
@@ -1293,6 +1333,7 @@ impl OverlayWindowApp {
             }
         }
 
+        self.pump_party_textures(ui.ctx());
         self.paint_layout(painter);
         if self.edit {
             self.paint_edit(ui);
@@ -1308,6 +1349,66 @@ impl OverlayWindowApp {
             Some(b) if monitor_h > 0.0 && b.h as f32 >= monitor_h - 2.0 => 0.0,
             Some(_) => 28.0,
             None => 0.0,
+        }
+    }
+
+    /// Uploads headshots that finished downloading and asks for the ones still missing.
+    ///
+    /// Textures are dropped the moment a member leaves the strip, so the cache only ever holds
+    /// the people in the party - a few 60x60 pictures, not a history of everyone seen.
+    fn pump_party_textures(&mut self, ctx: &egui::Context) {
+        if let Ok(mut ready) = self.party_ready.lock() {
+            for (id, image) in ready.drain(..) {
+                let alive = self
+                    .panels
+                    .iter()
+                    .any(|p| p.tiles.iter().any(|t| t.id == id));
+                self.party_asked.remove(&id);
+                if alive {
+                    let tex = ctx.load_texture(
+                        format!("party-{id}"),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.party_tex.insert(id, tex);
+                }
+            }
+        }
+        let live: Vec<u64> = self
+            .panels
+            .iter()
+            .flat_map(|p| p.tiles.iter().map(|t| t.id))
+            .collect();
+        self.party_tex.retain(|id, _| live.contains(id));
+        self.party_asked.retain(|id| live.contains(id));
+        let mut queued = 0;
+        for panel in &self.panels {
+            for tile in &panel.tiles {
+                if queued >= 3 {
+                    break;
+                }
+                if tile.headshot.is_empty()
+                    || self.party_tex.contains_key(&tile.id)
+                    || self.party_asked.contains(&tile.id)
+                {
+                    continue;
+                }
+                self.party_asked.insert(tile.id);
+                queued += 1;
+                let url = tile.headshot.clone();
+                let id = tile.id;
+                let ready = std::sync::Arc::clone(&self.party_ready);
+                let _ = std::thread::Builder::new()
+                    .name("creblox-party-headshot".to_string())
+                    .spawn(move || {
+                        let fetched = crate::api::download_thumbnails(vec![(url, [60, 60])]);
+                        if let Some((_, image)) = fetched.into_iter().next() {
+                            if let Ok(mut out) = ready.lock() {
+                                out.push((id, image));
+                            }
+                        }
+                    });
+            }
         }
     }
 
@@ -1397,12 +1498,100 @@ impl OverlayWindowApp {
         let mut used = [0.0_f32; 4];
 
         for panel in &self.panels {
-            if panel.title_display.is_empty() && panel.rows.is_empty() {
+            if panel.title_display.is_empty() && panel.rows.is_empty() && panel.tiles.is_empty() {
                 continue;
             }
             let title = (!panel.title_display.is_empty()).then(|| {
                 painter.layout_no_wrap(panel.title_display.clone(), label_font.clone(), label_color)
             });
+
+            // The party card: a row-wrapped strip of member squares. Same card surface,
+            // same corner slot and offset as every text panel.
+            if !panel.tiles.is_empty() {
+                let square: f32 = 44.0;
+                let cell_gap: f32 = 8.0;
+                let name_gap: f32 = 3.0;
+                let name_h: f32 = 13.0;
+                let cols = panel.tiles.len().min(4) as f32;
+                let rows_n = panel.tiles.len().div_ceil(4);
+                let title_h = title.as_ref().map_or(0.0, |g| g.size().y + gap);
+                let rule_h = if title.is_some() { px + gap } else { 0.0 };
+                let width = cols * square + (cols - 1.0) * cell_gap + pad * 2.0;
+                let height = pad * 2.0
+                    + title_h
+                    + rule_h
+                    + rows_n as f32 * (square + name_gap + name_h)
+                    + (rows_n as f32 - 1.0).max(0.0) * cell_gap;
+                let panel_size = vec2(width, height);
+                let corner = panel.corner.min(3) as usize;
+                let base_x = if corner % 2 == 1 {
+                    area.right() - panel_size.x - margin
+                } else {
+                    area.left() + margin
+                };
+                let base_y = if corner < 2 {
+                    area.top() + title_bar + margin + used[corner]
+                } else {
+                    area.bottom() - panel_size.y - margin - used[corner]
+                };
+                used[corner] += panel_size.y + gap;
+                let rect = Rect::from_min_size(
+                    pos2(
+                        snap_px(base_x + panel.offset.x, ppp),
+                        snap_px(base_y + panel.offset.y, ppp),
+                    ),
+                    panel_size,
+                );
+                let mut cursor_y = rect.top() + pad;
+                let mut rules = Vec::with_capacity(1);
+                let title = title.map(|g| {
+                    let pos = pos2(rect.left() + pad, cursor_y);
+                    cursor_y += g.size().y + gap;
+                    rules.push(snap_half_px(cursor_y, ppp));
+                    cursor_y += px + gap;
+                    (pos, g)
+                });
+                let name_font = FontId::proportional(9.0);
+                let mut out_tiles = Vec::with_capacity(panel.tiles.len());
+                for (i, tile) in panel.tiles.iter().enumerate() {
+                    let col = (i % 4) as f32;
+                    let row = (i / 4) as f32;
+                    let x = rect.left() + pad + col * (square + cell_gap);
+                    let y = cursor_y + row * (square + name_gap + name_h + cell_gap);
+                    let cell = Rect::from_min_size(pos2(x, y), vec2(square, square));
+                    let initials = painter.layout_no_wrap(
+                        tile.initials.clone(),
+                        FontId::monospace(15.0),
+                        value_color,
+                    );
+                    let name = painter.layout_no_wrap(
+                        overlay_spec::shorten(&tile.name, 7),
+                        name_font.clone(),
+                        label_color,
+                    );
+                    let name_pos = pos2(
+                        cell.center().x - name.size().x / 2.0,
+                        cell.bottom() + name_gap,
+                    );
+                    let rgb = tile.status.rgb();
+                    out_tiles.push(TileLayout {
+                        id: tile.id,
+                        rect: cell,
+                        outline: Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, alpha),
+                        initials,
+                        name,
+                        name_pos,
+                    });
+                }
+                self.layout.push(PanelLayout {
+                    rect,
+                    title,
+                    rows: Vec::new(),
+                    rules,
+                    tiles: out_tiles,
+                });
+                continue;
+            }
 
             let mut label_w = 0.0_f32;
             let mut value_w = 0.0_f32;
@@ -1511,6 +1700,7 @@ impl OverlayWindowApp {
                 title,
                 rows: out_rows,
                 rules,
+                tiles: Vec::new(),
             });
         }
     }
@@ -1560,6 +1750,40 @@ impl OverlayWindowApp {
                     ],
                     Stroke::new(px, divider),
                 );
+            }
+            for tile in &panel.tiles {
+                let cell = tile.rect.translate(shift);
+                painter.rect_filled(
+                    cell,
+                    radius,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, scaled(16.0)),
+                );
+                match self.party_tex.get(&tile.id) {
+                    Some(tex) => {
+                        painter.image(
+                            tex.id(),
+                            cell,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+                        );
+                    }
+                    None => {
+                        // Initials while the 60x60 headshot loads, and if it never arrives.
+                        let pos = pos2(
+                            cell.center().x - tile.initials.size().x / 2.0,
+                            cell.center().y - tile.initials.size().y / 2.0,
+                        );
+                        painter.galley(pos, tile.initials.clone(), value_color);
+                    }
+                }
+                // The 2 px status outline: green in this server, grey loading, red gone.
+                painter.rect_stroke(
+                    cell,
+                    radius,
+                    Stroke::new(2.0, tile.outline),
+                    egui::StrokeKind::Inside,
+                );
+                painter.galley(tile.name_pos + shift, tile.name.clone(), label_color);
             }
             for row in &panel.rows {
                 if let Some(label) = &row.label {

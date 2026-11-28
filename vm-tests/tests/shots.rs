@@ -72,6 +72,64 @@ fn every_screen_renders_and_lays_out_cleanly() {
     );
 }
 
+/// The party strip: one member in this exact server (green), one still loading (grey) and one
+/// whose connection dropped (red), rendered from the same panels JSON the launcher writes.
+#[test]
+fn party_hud_shows_three_states() {
+    use creblox_vm_tests::party_hud::{Tile, TileStatus};
+
+    let dir = shots::artifact_dir();
+    let mut harness = shots::Harness::new();
+    let tiles = vec![
+        Tile {
+            id: 1,
+            name: "Maya".to_string(),
+            initials: "M".to_string(),
+            status: TileStatus::InServer,
+            headshot: String::new(),
+        },
+        Tile {
+            id: 2,
+            name: "Theo".to_string(),
+            initials: "T".to_string(),
+            status: TileStatus::Loading,
+            headshot: String::new(),
+        },
+        Tile {
+            id: 3,
+            name: "Ada".to_string(),
+            initials: "A".to_string(),
+            status: TileStatus::Disconnected,
+            headshot: String::new(),
+        },
+    ];
+    let spec = creblox_vm_tests::overlay_spec::spec_json(
+        1.0,
+        true,
+        false,
+        vec![creblox_vm_tests::overlay_spec::party_panel(3, &tiles)],
+    );
+    let (shot, probe) = harness.render(
+        "overlay_party_hud",
+        egui::vec2(520.0, 300.0),
+        2.0,
+        move |ui, probe| creblox_vm_tests::hud::draw(ui, probe, &spec, 0),
+    );
+    let path = shot.save(&dir);
+    println!("party hud: {}", path.display());
+    assert_eq!((shot.width, shot.height), (1040, 600));
+    assert!(
+        shot.distinct_colors() >= 60,
+        "only {} distinct colours - the card looks blank",
+        shot.distinct_colors()
+    );
+    let problems = probe.problems(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(520.0, 300.0),
+    ));
+    assert!(problems.is_empty(), "{} party HUD problem(s):\n{}", problems.len(), problems.join("\n"));
+}
+
 /// The Charts filter bar on its own, twice the size, at the exact path the release notes point
 /// at: `artifacts/charts_filters.png`. Every pill's text has to sit in the middle of its box on
 /// both axes - the bug this guards is "55", "Min" and "0" hugging the top-left corner.

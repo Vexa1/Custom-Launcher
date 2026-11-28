@@ -65,6 +65,9 @@ pub mod profile_cache;
 #[path = "../../src/memory_pressure.rs"]
 pub mod memory_pressure;
 
+#[path = "../../src/party_hud.rs"]
+pub mod party_hud;
+
 #[path = "../../src/ram_budget.rs"]
 pub mod ram_budget;
 

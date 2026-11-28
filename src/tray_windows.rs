@@ -54,6 +54,7 @@ const CMD_QUIT_APP: usize = 1006;
 const CMD_HOP_RANDOM: usize = 1008;
 const CMD_HOP_LEAST: usize = 1009;
 const CMD_HOP_PING: usize = 1010;
+const CMD_TOGGLE_PARTY_OVERLAY: usize = 1011;
 
 /// Both backends expose the same event set so `app.rs` matches it once; a few variants are
 /// only ever produced by the macOS menu, which Windows has no equivalent for.
@@ -71,6 +72,7 @@ pub enum TrayEvent {
     ToggleServerOverlay,
     ToggleStatsOverlay,
     ToggleCrosshair,
+    TogglePartyOverlay,
     /// Drag the HUD on screen and confirm where it lands.
     EditOverlayPosition,
     CopyJobId,
@@ -106,6 +108,7 @@ pub struct TrayState {
     pub overlay_server: bool,
     pub overlay_stats: bool,
     pub overlay_crosshair: bool,
+    pub overlay_party: bool,
     /// The position editor is open on screen.
     pub overlay_editing: bool,
 }
@@ -127,6 +130,7 @@ impl Default for TrayState {
             overlay_server: true,
             overlay_stats: false,
             overlay_crosshair: false,
+            overlay_party: true,
             overlay_editing: false,
         }
     }
@@ -598,6 +602,7 @@ fn emit_tray_event(ev: TrayEvent) {
         TrayEvent::ToggleServerOverlay => Some(crate::overlay_spec::TrayToggle::Server),
         TrayEvent::ToggleStatsOverlay => Some(crate::overlay_spec::TrayToggle::Stats),
         TrayEvent::ToggleCrosshair => Some(crate::overlay_spec::TrayToggle::Crosshair),
+        TrayEvent::TogglePartyOverlay => Some(crate::overlay_spec::TrayToggle::Party),
         _ => None,
     };
     if let Some(toggle) = toggle {
@@ -780,7 +785,21 @@ unsafe fn show_context_menu(hwnd: HWND) {
             CMD_OPEN_SETTINGS,
             wide_nul("Settings").as_ptr(),
         );
-        let any_overlay = state.overlay_server || state.overlay_stats || state.overlay_crosshair;
+        let party_flag = if state.overlay_party {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING | MF_UNCHECKED
+        };
+        AppendMenuW(
+            menu,
+            party_flag,
+            CMD_TOGGLE_PARTY_OVERLAY,
+            wide_nul("Party Overlay").as_ptr(),
+        );
+        let any_overlay = state.overlay_server
+            || state.overlay_stats
+            || state.overlay_crosshair
+            || state.overlay_party;
         let edit_flag = if any_overlay && !state.overlay_editing {
             MF_STRING
         } else {
@@ -832,6 +851,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
                 CMD_HIDE_WINDOW => emit_tray_event(TrayEvent::HideToTray),
                 CMD_OPEN_SETTINGS => emit_tray_event(TrayEvent::OpenSettings),
                 CMD_EDIT_OVERLAY => emit_tray_event(TrayEvent::EditOverlayPosition),
+                CMD_TOGGLE_PARTY_OVERLAY => emit_tray_event(TrayEvent::TogglePartyOverlay),
                 CMD_TOGGLE_DISCORD_RPC => emit_tray_event(TrayEvent::ToggleDiscordRpc),
                 CMD_CHECK_UPDATES => emit_tray_event(TrayEvent::CheckUpdates),
                 CMD_HOP_RANDOM => emit_tray_event(TrayEvent::ServerHop(
