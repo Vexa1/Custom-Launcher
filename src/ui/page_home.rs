@@ -74,13 +74,9 @@ impl Creblox {
                         } else {
                             base_sub
                         };
-                        let label = if !f.display.is_empty() {
-                            f.display.as_str()
-                        } else if !f.name.is_empty() {
-                            f.name.as_str()
-                        } else {
-                            "Player"
-                        };
+                        // displayName, else the username, else "Player" - and only while the
+                        // batch name lookup is still in flight, never as a resting state.
+                        let label = crate::friend_names::label(&f.display, &f.name);
                         let mut r = bubble(
                             ui,
                             Some(&f.headshot),
@@ -94,12 +90,15 @@ impl Creblox {
                         // with a long friends list this used to allocate one formatted
                         // string per friend on every frame.
                         if r.hovered() {
-                            let tip = if f.name.is_empty() {
+                            // The username is what the profile opens on, so show it when it is
+                            // known; a display-only friend still gets a real tooltip.
+                            let handle = if f.name.is_empty() { label } else { f.name.as_str() };
+                            let tip = if f.name.is_empty() && f.display.is_empty() {
                                 format!("User #{}", f.id)
                             } else if f.place_id.is_some() {
-                                format!("@{} \u{2014} Playing {}", f.name, f.location)
+                                format!("@{} \u{2014} Playing {}", handle, f.location)
                             } else {
-                                format!("@{}", f.name)
+                                format!("@{}", handle)
                             };
                             r = r.on_hover_text(tip);
                         }

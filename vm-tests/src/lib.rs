@@ -35,6 +35,9 @@ pub mod avatar_sync;
 #[path = "../../src/chart_feed.rs"]
 pub mod chart_feed;
 
+#[path = "../../src/friend_names.rs"]
+pub mod friend_names;
+
 #[path = "../../src/thumb_pipeline.rs"]
 pub mod thumb_pipeline;
 

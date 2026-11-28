@@ -17,6 +17,7 @@ mod avatar_3d;
 mod companion;
 mod discord_rpc;
 mod fastflags;
+mod friend_names;
 mod game_log;
 mod inventory;
 mod sha256;

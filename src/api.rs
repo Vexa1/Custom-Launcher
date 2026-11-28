@@ -1879,39 +1879,143 @@ pub fn download_thumbnails(items: Vec<(String, [u32; 2])>) -> Vec<(String, egui:
     out
 }
 
+/// The resolved friend names of this session, kept for the life of the process.
+///
+/// `/friends` now often answers ids only, and presence refreshes rebuild those users from ids.
+/// Remembering `id -> (displayName, username)` once means a bubble never has to fall back to
+/// "Player" twice.
+fn name_book() -> &'static std::sync::Mutex<crate::friend_names::NameBook> {
+    static BOOK: std::sync::OnceLock<std::sync::Mutex<crate::friend_names::NameBook>> =
+        std::sync::OnceLock::new();
+    BOOK.get_or_init(|| std::sync::Mutex::new(crate::friend_names::NameBook::default()))
+}
+
+fn friend_row(u: &User) -> crate::friend_names::FriendName {
+    crate::friend_names::FriendName {
+        id: u.id,
+        display: u.display.clone(),
+        name: u.name.clone(),
+        verified: u.verified,
+    }
+}
+
+/// Copies whatever a name row knows into a user, never overwriting a name with a blank.
+fn apply_name(u: &mut User, row: &crate::friend_names::FriendName) {
+    if u.name.is_empty() && !row.name.is_empty() {
+        u.name = row.name.clone();
+    }
+    if u.display.is_empty() && !row.display.is_empty() {
+        u.display = row.display.clone();
+    }
+    if row.verified {
+        u.verified = true;
+    }
+}
+
+/// `POST users.roblox.com/v1/users` for every id, 100 per request, merged into one payload.
+fn fetch_users_payload(ids: &[u64], cookie: Option<&str>) -> Option<Value> {
+    let chunks = crate::friend_names::batches(ids);
+    if chunks.is_empty() {
+        return None;
+    }
+    let mut data: Vec<Value> = Vec::new();
+    for chunk in chunks {
+        let Ok(resp) = post_csrf(
+            "https://users.roblox.com/v1/users",
+            serde_json::json!({ "userIds": chunk, "excludeBannedUsers": false }),
+            cookie,
+            None,
+        ) else {
+            continue;
+        };
+        let Ok(v) = resp.into_json::<Value>() else {
+            continue;
+        };
+        data.extend(v["data"].as_array().cloned().into_iter().flatten());
+    }
+    if data.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "data": data }))
+    }
+}
+
+/// One user row, before headshots and presence.
+fn user_from_row(row: crate::friend_names::FriendName) -> User {
+    User {
+        id: row.id,
+        name: row.name,
+        display: row.display,
+        headshot: String::new(),
+        presence: 0,
+        location: String::new(),
+        place_id: None,
+        verified: row.verified,
+    }
+}
+
+/// The friends loader's name half: parse the rows (often ids only), ask `POST /v1/users` about
+/// every id in one batch of up to 100, and let `friend_names::resolve` fill and remember them.
+fn resolve_friend_rows(v: &Value, cookie: Option<&str>) -> Vec<crate::friend_names::FriendName> {
+    let ids: Vec<u64> = crate::friend_names::parse_rows(v)
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    let payload = fetch_users_payload(&ids, cookie);
+    let mut book = name_book().lock().unwrap();
+    crate::friend_names::resolve(v, payload.as_ref(), &mut book)
+}
+
+/// Fills display names and usernames for a batch of users.
+///
+/// The in-session book answers first, so a presence refresh gets its names back with no
+/// request at all; only the users still nameless afterwards cost one batched call (100 ids per
+/// request, authenticated so restricted accounts resolve too). Results are remembered.
+pub fn fill_names(users: &mut [User], cookie: Option<&str>) {
+    if users.is_empty() {
+        return;
+    }
+    let mut rows: Vec<(usize, crate::friend_names::FriendName)> = users
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (i, friend_row(u)))
+        .collect();
+    {
+        let book = name_book().lock().unwrap();
+        for (_, row) in rows.iter_mut() {
+            book.fill(row);
+        }
+    }
+    let missing: Vec<u64> = rows
+        .iter()
+        .filter(|(_, row)| !row.is_named())
+        .map(|(_, row)| row.id)
+        .collect();
+    if !missing.is_empty() {
+        if let Some(payload) = fetch_users_payload(&missing, cookie) {
+            let fresh = crate::friend_names::parse_rows(&payload);
+            let mut book = name_book().lock().unwrap();
+            for row in &fresh {
+                book.remember(row);
+            }
+            for (_, row) in rows.iter_mut() {
+                book.fill(row);
+            }
+        }
+    }
+    for (i, row) in rows {
+        apply_name(&mut users[i], &row);
+    }
+}
+
 pub fn enrich_users(users: &mut [User], cookie: Option<&str>) {
     if users.is_empty() {
         return;
     }
+    // Names first: `/friends` can answer ids only, and a bubble must never settle on "Player".
+    fill_names(users, cookie);
     for chunk in users.chunks_mut(50) {
         let ids: Vec<u64> = chunk.iter().map(|u| u.id).collect();
-        if !ids.is_empty() {
-            if let Ok(v) = post_json(
-                "https://users.roblox.com/v1/users",
-                serde_json::json!({ "userIds": ids, "excludeBannedUsers": false }),
-            ) {
-                for item in v["data"].as_array().into_iter().flatten() {
-                    let Some(uid) = item["id"].as_u64() else {
-                        continue;
-                    };
-                    if let Some(u) = chunk.iter_mut().find(|u| u.id == uid) {
-                        let name = str_of(&item["name"]);
-                        let disp = str_of(&item["displayName"]);
-                        if u.name.is_empty() && !name.is_empty() {
-                            u.name = name;
-                        }
-                        if u.display.is_empty() {
-                            u.display = if disp.is_empty() {
-                                u.name.clone()
-                            } else {
-                                disp
-                            };
-                        }
-                        u.verified = item["hasVerifiedBadge"].as_bool().unwrap_or(false);
-                    }
-                }
-            }
-        }
         if let Ok(h) = get_json(&format!(
             "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={}&size=150x150&format=Png&isCircular=false",
             join(&ids)
@@ -2688,67 +2792,32 @@ pub fn fetch_user_friends(id: u64, cookie: Option<&str>) -> Result<Vec<User>, St
         &format!("https://friends.roblox.com/v1/users/{id}/friends"),
         cookie,
     )?;
-    let mut friends: Vec<User> = v["data"]
-        .as_array()
+    // `/friends` increasingly answers ids only, so every row is name-resolved as a batch here
+    // instead of trusting it to carry `name`/`displayName`.
+    // Names first - one call per 100 ids, and anything already known comes from the session
+    // book without a request - then headshots and presence.
+    let mut friends: Vec<User> = resolve_friend_rows(&v, cookie)
         .into_iter()
-        .flatten()
-        .filter_map(|u| {
-            let name = str_of(&u["name"]);
-            let disp = str_of(&u["displayName"]);
-            Some(User {
-                id: u["id"].as_u64()?,
-                name: name.clone(),
-                display: if disp.is_empty() { name } else { disp },
-                headshot: String::new(),
-                presence: 0,
-                location: String::new(),
-                place_id: None,
-                verified: u["hasVerifiedBadge"].as_bool().unwrap_or(false),
-            })
-        })
+        .map(user_from_row)
         .collect();
     enrich_users(&mut friends, cookie);
 
-    // The friends endpoint increasingly returns only ids for some accounts, which used
-    // to leave every home bubble labelled "Player". Fill missing names (and anything
-    // else that came back blank) from the users endpoint instead of showing a placeholder.
-    if friends.is_empty() || friends.iter().any(|f| f.name.is_empty()) {
-        let ids: Vec<u64> = if friends.is_empty() {
-            auth_get_json(
-                &format!("https://friends.roblox.com/v1/users/{id}/friends/find?limit=50"),
+    // Some accounts get an empty list instead; `friends/find` still answers with ids, which the
+    // same batch resolve turns into real names.
+    if friends.is_empty() {
+        if let Ok(found) = auth_get_json(
+            &format!("https://friends.roblox.com/v1/users/{id}/friends/find?limit=50"),
+            cookie,
+        ) {
+            let mut list: Vec<User> = resolve_friend_rows(
+                &serde_json::json!({ "data": found["PageItems"].clone() }),
                 cookie,
             )
-            .ok()
-            .map(|v| {
-                v["PageItems"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|x| x["id"].as_u64())
-                    .collect()
-            })
-            .unwrap_or_default()
-        } else {
-            friends.iter().map(|f| f.id).collect()
-        };
-        if !ids.is_empty() {
-            if let Ok(list) = fetch_users_by_ids(&ids, cookie) {
-                if friends.is_empty() {
-                    friends = list;
-                } else {
-                    for f in &mut friends {
-                        if let Some(full) = list.iter().find(|u| u.id == f.id) {
-                            if f.name.is_empty() {
-                                f.name = full.name.clone();
-                            }
-                            if f.display.is_empty() {
-                                f.display = full.display.clone();
-                            }
-                            f.verified |= full.verified;
-                        }
-                    }
-                }
-            }
+            .into_iter()
+            .map(user_from_row)
+            .collect();
+            enrich_users(&mut list, cookie);
+            friends = list;
         }
     }
 
@@ -3875,7 +3944,7 @@ pub fn save_friends_cache(friends: &[User]) {
     }
     let rows: Vec<Value> = friends
         .iter()
-        .filter(|f| !f.name.is_empty())
+        .filter(|f| !f.name.is_empty() || !f.display.is_empty())
         .map(|f| {
             serde_json::json!({
                 "id": f.id,
