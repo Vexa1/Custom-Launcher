@@ -154,6 +154,28 @@ impl Creblox {
         ui.vertical(|ui| {
             ui.set_max_width(740.0);
 
+            // A newer build owns this settings.json: this build's keys are merged into it and
+            // its own settings are kept, so say that here and not only in the log.
+            if let Some(version) = crate::auth::newer_settings_file() {
+                card_frame(ui, 12).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new(format!("Settings file from a newer CREBLOX (v{version})"))
+                            .size(13.0)
+                            .strong()
+                            .color(ORANGE),
+                    );
+                    ui.add_space(2.0);
+                    small_text(
+                        ui,
+                        "Changes you make here are saved into it; its other settings are left \
+                         untouched."
+                            .to_string(),
+                    );
+                });
+                ui.add_space(10.0);
+            }
+
             // Section rail: one click swaps the page between groups, so nothing has to be
             // hunted for in one long scroll.
             ui.horizontal_wrapped(|ui| {

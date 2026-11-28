@@ -7,7 +7,7 @@
 
 use creblox_vm_tests::settings::Settings;
 use creblox_vm_tests::settings_json::{
-    SETTINGS_VERSION, load_settings_from, save_settings_to, settings_version,
+    SETTINGS_VERSION, SaveOutcome, load_settings_from, save_settings_to, settings_version,
 };
 use serde_json::Value;
 use std::fs;
@@ -407,18 +407,31 @@ fn a_newer_schema_still_opens() {
         (412, 236, 320, 128)
     );
 
-    // ... and this build must not write it back: a version 9 file holds settings this build
-    // has never heard of, and rewriting it would delete them for the newer build too.
-    let before = fs::read_to_string(dir.join("settings.json")).expect("fixture file");
-    assert!(
-        !save_settings_to(&dir, &loaded),
-        "a newer file is not ours to overwrite"
+    // ... and saving writes this build's keys into that file while keeping everything it does
+    // not know, so the newer build still finds its own settings.
+    let mut changed = loaded;
+    changed.overlay_image_x = 99;
+    changed.dark = false;
+    assert_eq!(
+        save_settings_to(&dir, &changed),
+        SaveOutcome::MergedIntoNewer,
+        "a newer file is merged into, not replaced"
     );
     let after = fs::read_to_string(dir.join("settings.json")).expect("fixture file");
-    assert_eq!(after, before, "the newer build's file is byte-for-byte untouched");
-    let untouched: Value = serde_json::from_str(&after).expect("settings.json parses");
-    assert_eq!(untouched["schema"], serde_json::json!(9));
-    assert_eq!(untouched["some_future_key"]["nested"], serde_json::json!(true));
+    let merged: Value = serde_json::from_str(&after).expect("settings.json parses");
+    assert_eq!(merged["schema"], serde_json::json!(9), "the layout version is kept");
+    assert_eq!(
+        merged["some_future_key"]["nested"],
+        serde_json::json!(true),
+        "keys this build does not know survive"
+    );
+    assert_eq!(merged["overlay_image_x"], serde_json::json!(99), "known keys are written");
+    assert_eq!(merged["dark"], serde_json::json!(false));
+    assert_eq!(
+        load_settings_from(&dir),
+        changed,
+        "the merged file reads back as this build's settings"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -427,12 +440,19 @@ fn a_newer_schema_still_opens() {
 fn a_current_version_file_is_still_written() {
     // The read-only rule is about newer files only: this build's own files save normally.
     let dir = temp_dir("schema-current");
-    assert!(save_settings_to(&dir, &picture_at_412_236()));
+    assert_eq!(
+        save_settings_to(&dir, &picture_at_412_236()),
+        SaveOutcome::Written
+    );
 
     let text = fs::read_to_string(dir.join("settings.json")).expect("settings.json written");
     let file: Value = serde_json::from_str(&text).expect("settings.json parses");
     assert_eq!(file["schema"], serde_json::json!(SETTINGS_VERSION));
-    assert!(save_settings_to(&dir, &Settings::default()), "a second save writes");
+    assert_eq!(
+        save_settings_to(&dir, &Settings::default()),
+        SaveOutcome::Written,
+        "a second save writes"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

@@ -184,12 +184,28 @@ pub fn load_settings() -> Settings {
 }
 
 pub fn save_settings(s: &Settings) {
-    // A settings.json written by a newer build is read-only here: it holds keys this build does
-    // not know, and rewriting it would throw them away. Say so once per save instead of
-    // silently doing it.
-    if !crate::settings_json::save_settings_to(&data_dir(), s) {
-        log("settings.json was written by a newer CREBLOX; leaving it untouched");
+    // A settings.json written by a newer build keeps the keys this build does not know: the save
+    // merges this build's own keys into it instead of replacing the file.
+    match crate::settings_json::save_settings_to(&data_dir(), s) {
+        crate::settings_json::SaveOutcome::Written => {}
+        crate::settings_json::SaveOutcome::MergedIntoNewer => log(
+            "settings.json was written by a newer CREBLOX; saved this build's settings into it \
+             and left its own alone",
+        ),
+        crate::settings_json::SaveOutcome::Failed => log("settings.json could not be written"),
     }
+}
+
+/// The schema version on disk when the settings file comes from a **newer build**, if it does.
+///
+/// Read once per process: the Settings page asks on every frame, and the answer cannot change
+/// without the file being replaced under a running app.
+pub fn newer_settings_file() -> Option<u64> {
+    static VERSION: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        crate::settings_json::existing_version(&data_dir())
+            .filter(|v| *v > crate::settings_json::SETTINGS_VERSION)
+    })
 }
 
 #[cfg(windows)]

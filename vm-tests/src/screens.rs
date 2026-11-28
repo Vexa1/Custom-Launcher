@@ -1014,6 +1014,26 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
     shell(ui, probe, "settings", |ui, probe| {
         heading(ui, probe, "settings.title", "Settings", 22.0);
         ui.add_space(10.0);
+        // Mirrors page_settings' notice for a settings.json written by a newer build. The page
+        // shows it only in that case; the fixture shows it so its layout is checked.
+        card_min(ui, probe, "settings.newer", 940.0, 58.0, |ui, probe| {
+            heading(
+                ui,
+                probe,
+                "settings.newer.title",
+                "Settings file from a newer CREBLOX (v9)",
+                13.0,
+            );
+            ui.add_space(4.0);
+            body(
+                ui,
+                probe,
+                "settings.newer.body",
+                "Changes you make here are saved into it; its other settings are left untouched.",
+                MUTED,
+            );
+        });
+        ui.add_space(10.0);
         ui.horizontal_top(|ui| {
             card_min(ui, probe, "settings.appearance", 470.0, 196.0, |ui, probe| {
                 heading(ui, probe, "settings.appearance.title", "Appearance", 15.0);

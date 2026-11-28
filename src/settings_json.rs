@@ -23,11 +23,15 @@ pub fn settings_version(v: &Value) -> u64 {
     v["schema"].as_u64().filter(|n| *n > 0).unwrap_or(1)
 }
 
+/// The `settings.json` already in `dir`, if there is a readable one.
+fn existing_object(dir: &Path) -> Option<serde_json::Map<String, Value>> {
+    let text = fs::read_to_string(dir.join("settings.json")).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?.as_object().cloned()
+}
+
 /// The version of the `settings.json` already in `dir`, if there is a readable one.
 pub fn existing_version(dir: &Path) -> Option<u64> {
-    let text = fs::read_to_string(dir.join("settings.json")).ok()?;
-    let v = serde_json::from_str::<Value>(&text).ok()?;
-    Some(settings_version(&v))
+    existing_object(dir).map(|o| settings_version(&Value::Object(o)))
 }
 
 fn read_opt_rgb(v: &Value, key: &str) -> Option<[u8; 3]> {
@@ -365,15 +369,25 @@ pub fn load_settings_from(dir: &Path) -> Settings {
     }
 }
 
-/// Writes `s` into `dir/settings.json`, returning whether the file was written.
+/// What a save did to the file that was already there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveOutcome {
+    /// Written as this build's own layout.
+    Written,
+    /// A newer build's file was updated in place: this build's keys were written into it and
+    /// the file kept its schema version and every key this build does not know.
+    MergedIntoNewer,
+    /// Nothing could be written (an I/O error).
+    Failed,
+}
+
+/// Writes `s` into `dir/settings.json`.
 ///
-/// A file from a **newer build** is left exactly as it is: this build understands only its own
-/// keys, so rewriting it would drop every setting the newer build added - the newer build would
-/// then open its own file with those settings missing. `false` means "not ours to overwrite".
-pub fn save_settings_to(dir: &Path, s: &Settings) -> bool {
-    if existing_version(dir).is_some_and(|version| version > SETTINGS_VERSION) {
-        return false;
-    }
+/// A file from a **newer build** holds keys this build has never heard of, so it is never
+/// replaced: this build's own keys are merged into it, and its `schema` and unknown keys are
+/// kept as they are. The newer build therefore finds its settings intact, with the ones this
+/// build owns updated.
+pub fn save_settings_to(dir: &Path, s: &Settings) -> SaveOutcome {
     let mode_str = match s.bg_mode {
         BgMode::ThemeDefault => "default",
         BgMode::SolidColor => "color",
@@ -486,8 +500,26 @@ pub fn save_settings_to(dir: &Path, s: &Settings) -> bool {
         }
         .insert_into(obj);
     }
-    if let Ok(text) = serde_json::to_string_pretty(&v) {
-        return fs::write(dir.join("settings.json"), text).is_ok();
+    let (out, outcome) = match existing_object(dir) {
+        Some(mut existing) if settings_version(&Value::Object(existing.clone())) > SETTINGS_VERSION => {
+            // Keep the newer layout's version and everything this build does not recognise;
+            // overwrite only the keys it owns.
+            let version = settings_version(&Value::Object(existing.clone()));
+            if let Some(ours) = v.as_object() {
+                for (key, value) in ours {
+                    existing.insert(key.clone(), value.clone());
+                }
+            }
+            existing.insert("schema".to_string(), json!(version));
+            (Value::Object(existing), SaveOutcome::MergedIntoNewer)
+        }
+        _ => (v, SaveOutcome::Written),
+    };
+    match serde_json::to_string_pretty(&out) {
+        Ok(text) => match fs::write(dir.join("settings.json"), text) {
+            Ok(()) => outcome,
+            Err(_) => SaveOutcome::Failed,
+        },
+        Err(_) => SaveOutcome::Failed,
     }
-    false
 }
