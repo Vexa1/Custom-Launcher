@@ -5730,14 +5730,10 @@ impl Creblox {
             Some(info) => (info.place_id, info.job_id.clone()),
             None => (0, String::new()),
         };
-        let me = self.me.as_ref().map(|profile| profile.user.id);
-        let tiles = self.party_hud.update(
-            self.party_state.as_ref(),
-            place,
-            &job,
-            me,
-            Instant::now(),
-        );
+        // Your own member is part of the strip, so no "skip me" filter is involved.
+        let tiles = self
+            .party_hud
+            .update(self.party_state.as_ref(), place, &job, Instant::now());
         crate::game_overlay::set_party_tiles(tiles);
     }
 

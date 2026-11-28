@@ -114,16 +114,13 @@ pub fn status_for(
 }
 
 /// The tiles for one snapshot, in the order the party lists its members.
-pub fn tiles(
-    snapshot: &PartySnapshot,
-    my_place: u64,
-    my_job: &str,
-    me: Option<u64>,
-) -> Vec<Tile> {
+///
+/// Your own member is included: the strip is the whole party, and your own square is green
+/// while you are in the server the rest of the strip is compared against.
+pub fn tiles(snapshot: &PartySnapshot, my_place: u64, my_job: &str) -> Vec<Tile> {
     snapshot
         .members
         .iter()
-        .filter(|m| Some(m.user.id) == me || me.is_none() || m.user.id != 0)
         .map(|m| tile_for(m, my_place, my_job))
         .collect()
 }
@@ -171,7 +168,6 @@ impl Tracker {
         snapshot: Option<&PartySnapshot>,
         my_place: u64,
         my_job: &str,
-        me: Option<u64>,
         now: Instant,
     ) -> Vec<Tile> {
         let Some(snapshot) = snapshot else {
@@ -184,7 +180,7 @@ impl Tracker {
             self.seen.clear();
             self.code = snapshot.code.clone();
         }
-        let present = tiles(snapshot, my_place, my_job, me);
+        let present = tiles(snapshot, my_place, my_job);
         let mut out: Vec<Tile> = Vec::with_capacity(present.len() + self.seen.len());
         let mut next: Vec<(Tile, Instant)> = Vec::with_capacity(out.capacity());
         for tile in &present {

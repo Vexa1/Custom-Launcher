@@ -849,3 +849,106 @@ fn a_member_over_the_room_size_is_turned_away_for_good() {
     );
     host.handle.leave();
 }
+
+/// Peer state changes arrive over a real socket and become the party HUD's colours: grey while
+/// a member is launching, green when they are in this exact server, red once their connection
+/// is gone.
+///
+/// This is the whole chain the HUD relies on, with no fixture standing in for it: a host that
+/// listens, two guests that dial it, the real `Status` frames, the real roster the host
+/// broadcasts, and the real `party_hud` tracker the launcher feeds from those snapshots.
+#[test]
+fn peer_state_changes_become_grey_green_and_red_tiles() {
+    use creblox_vm_tests::party_hud::{Tracker, TileStatus, GRACE, RED};
+
+    let mut host = Client::new("host");
+    let mut guest = Client::new("guest");
+    let mut third = Client::new("third");
+
+    host.handle.create(user(100_001, "Ada"), 8, None);
+    let ready = host.snapshot(25, "the invite code", |s| !s.invite.is_empty());
+    let invite = party::parse_invite(&ready.invite).expect("the host's invite does not parse");
+
+    guest.handle.join(invite, user(100_002, "Grace"), None);
+    guest.snapshot(20, "the guest's roster", |s| {
+        s.connected && s.members.len() == 2
+    });
+    third.handle.join(invite, user(100_003, "Theo"), None);
+    let three = guest.snapshot(20, "the three-member roster", |s| s.members.len() == 3);
+    assert!(
+        three.members.iter().any(|m| m.user.id == 100_003),
+        "the third member never reached the guest"
+    );
+
+    let place = 920_587_237u64;
+    let job = "job-green";
+    let mut tracker = Tracker::new();
+    let now = Instant::now();
+
+    // Launching: the host's tile is grey, because their game is not up yet.
+    host.handle.set_status(PartyStatus::Launching, None, None);
+    let launching = guest.snapshot(15, "the host launching", |s| {
+        s.members
+            .iter()
+            .any(|m| m.user.id == 100_001 && m.status == PartyStatus::Launching)
+    });
+    let tiles = tracker.update(Some(&launching), place, job, now);
+    let host_tile = tiles
+        .iter()
+        .find(|t| t.id == 100_001)
+        .expect("the host has no tile");
+    assert_eq!(host_tile.status, TileStatus::Loading, "launching is grey");
+
+    // In that exact server: green.
+    host.handle
+        .set_status(PartyStatus::InGame, Some(place), Some(job.to_string()));
+    let in_game = guest.snapshot(15, "the host's server", |s| {
+        s.members
+            .iter()
+            .any(|m| m.user.id == 100_001 && m.job_id == job)
+    });
+    let tiles = tracker.update(Some(&in_game), place, job, now + Duration::from_secs(1));
+    assert_eq!(
+        tiles.iter().find(|t| t.id == 100_001).unwrap().status,
+        TileStatus::InServer,
+        "a member in this exact server is green"
+    );
+
+    // The same roster read from a different server is grey, not green: the place alone is not
+    // enough, which is the mistake a green outline must never make.
+    let elsewhere = tracker.update(
+        Some(&in_game),
+        place,
+        "another-job",
+        now + Duration::from_secs(1),
+    );
+    assert_eq!(
+        elsewhere.iter().find(|t| t.id == 100_001).unwrap().status,
+        TileStatus::Loading
+    );
+
+    // Theo is gone from the host's roster (a dropped socket and a removal arrive the same
+    // way on the wire: the next `Members` frame simply has no Theo in it), so the tile that
+    // was there a moment ago turns red.
+    host.handle.kick(100_003);
+    let without = guest.snapshot(20, "the roster without Theo", |s| s.members.len() == 2);
+    let tiles = tracker.update(Some(&without), place, job, now + Duration::from_secs(2));
+    let theo = tiles
+        .iter()
+        .find(|t| t.id == 100_003)
+        .expect("the dropped member's tile is still shown");
+    assert_eq!(theo.status, TileStatus::Disconnected);
+    assert_eq!(theo.status.rgb(), RED);
+
+    // After the grace window the tile (and its cached headshot) is gone.
+    let later = tracker.update(
+        Some(&without),
+        place,
+        job,
+        now + GRACE + Duration::from_secs(3),
+    );
+    assert!(later.iter().all(|t| t.id != 100_003));
+
+    guest.handle.leave();
+    host.handle.leave();
+}
