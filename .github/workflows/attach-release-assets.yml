@@ -1,0 +1,72 @@
+name: attach-release-assets
+
+# The archives live in the repository under `release/` (that is what the in-app updater
+# links to). This job also attaches them to the GitHub release itself, which the release
+# API cannot do from the publishing client.
+#
+# - `release: published` attaches the tag that was just published.
+# - A push to main backfills the latest release if it has no assets yet (v0.5.70 shipped
+#   before this job existed).
+# - `workflow_dispatch` accepts a tag for a manual backfill.
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to backfill (for example v0.5.70)
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Attach committed archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          attach() {
+            local tag="$1"
+            local ver="${tag#v}"
+            local update="release/CREBLOX-${ver}-update.zip"
+            local full="release/CREBLOX-${ver}-full.zip"
+            if [[ ! -f "$update" && ! -f "$full" ]]; then
+              echo "$tag: no committed archives, nothing to attach"
+              return 0
+            fi
+            local existing
+            existing="$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            for file in "$update" "$full"; do
+              [[ -f "$file" ]] || continue
+              local name
+              name="$(basename "$file")"
+              if grep -qxF "$name" <<<"$existing"; then
+                echo "$tag: $name already attached"
+              else
+                echo "$tag: attaching $name"
+                gh release upload "$tag" "$file"
+              fi
+            done
+          }
+
+          if [[ -n "${EVENT_TAG:-}" ]]; then
+            attach "$EVENT_TAG"
+          elif [[ -n "${INPUT_TAG:-}" ]]; then
+            attach "$INPUT_TAG"
+          else
+            # Latest release only: older releases stay exactly as they shipped.
+            tag="$(gh release view --json tagName --jq '.tagName')"
+            attach "$tag"
+          fi

@@ -18,5 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release with Apple's linker
-        run: cargo build --release --locked
+        with:
+          # macos-latest is arm64; the release binary is Intel (Catalina 10.15+).
+          # Apple's ld can cross-link x86_64 from an arm64 runner, so this still
+          # proves the exact target users install.
+          targets: x86_64-apple-darwin
+      - name: Build release for x86_64 with Apple's linker
+        run: cargo build --release --locked --target x86_64-apple-darwin
