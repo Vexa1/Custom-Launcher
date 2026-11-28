@@ -48,6 +48,14 @@ pub const ICON_TARGET: [u32; 2] = [64, 64];
 /// is ~2 MB), so it gets its own small budget instead of sharing the cards' one.
 pub const GALLERY_TEXTURE_CAP: usize = 8;
 
+/// The size a Game Store pass picture is decoded to: the pass card is at most ~190 px wide,
+/// so this covers a 2x display without holding the download size in memory.
+pub const PASS_TARGET: [u32; 2] = [256, 256];
+
+/// Decoded pass pictures kept alive. A pass tile is small (~256 KB), so a store's worth of
+/// passes across a few games fits in its own lane.
+pub const PASS_TEXTURE_CAP: usize = 32;
+
 /// The two texture budgets share one map but never each other's evictions.
 ///
 /// Card thumbnails and Game Details gallery pictures are both `TextureHandle`s in
@@ -57,6 +65,7 @@ pub const GALLERY_TEXTURE_CAP: usize = 8;
 #[derive(Debug, Default, Clone)]
 pub struct TextureBudget {
     cards: VecDeque<String>,
+    passes: VecDeque<String>,
     gallery: VecDeque<String>,
 }
 
@@ -64,6 +73,11 @@ impl TextureBudget {
     /// Records an uploaded card thumbnail.
     pub fn insert_card(&mut self, url: &str) {
         Self::insert(&mut self.cards, url);
+    }
+
+    /// Records an uploaded Game Store pass picture.
+    pub fn insert_pass(&mut self, url: &str) {
+        Self::insert(&mut self.passes, url);
     }
 
     /// Records an uploaded gallery picture.
@@ -80,16 +94,22 @@ impl TextureBudget {
 
     pub fn clear(&mut self) {
         self.cards.clear();
+        self.passes.clear();
         self.gallery.clear();
     }
 
-    /// The URLs to drop now, oldest first: over-budget card thumbnails, then over-budget
-    /// gallery pictures. A gallery picture is never returned while its own lane is inside its
-    /// budget, so opening game pages cannot push card thumbnails out of the cache.
+    /// The URLs to drop now, oldest first: over-budget card thumbnails, then pass pictures,
+    /// then gallery pictures. A lane is only ever asked to give up its own entries, so opening
+    /// game pages and stores cannot push card thumbnails out of the cache.
     pub fn evictions(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         while self.cards.len() > TEXTURE_CAP {
             if let Some(old) = self.cards.pop_front() {
+                out.push(old);
+            }
+        }
+        while self.passes.len() > PASS_TEXTURE_CAP {
+            if let Some(old) = self.passes.pop_front() {
                 out.push(old);
             }
         }

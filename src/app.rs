@@ -97,6 +97,8 @@ pub struct Creblox {
     pub thumb_budget: crate::thumb_pipeline::TextureBudget,
     /// Image URLs that are Game Details gallery pictures rather than card thumbnails.
     pub thumb_gallery: HashSet<String>,
+    /// Image URLs that are Game Store pass pictures, which have their own cache lane.
+    pub thumb_passes: HashSet<String>,
     /// Set when a texture is uploaded or dropped, so the cards' map is republished.
     pub thumb_tex_dirty: bool,
     /// One thumbnail batch in flight; the next is taken when this one answers.
@@ -474,6 +476,7 @@ impl Creblox {
             thumb_tex: HashMap::new(),
             thumb_budget: crate::thumb_pipeline::TextureBudget::default(),
             thumb_gallery: HashSet::new(),
+            thumb_passes: HashSet::new(),
             thumb_tex_dirty: false,
             thumb_in_flight: false,
             thumb_downloading: HashSet::new(),
@@ -1921,10 +1924,12 @@ impl Creblox {
                 image,
                 egui::TextureOptions::LINEAR,
             );
-            // Gallery pictures go in their own lane, so an overflowing gallery budget can
-            // never push a card thumbnail out of the cache.
+            // Gallery pictures and pass pictures go in their own lanes, so an overflowing
+            // page budget can never push a card thumbnail out of the cache.
             if self.thumb_gallery.contains(&url) {
                 self.thumb_budget.insert_gallery(&url);
+            } else if self.thumb_passes.contains(&url) {
+                self.thumb_budget.insert_pass(&url);
             } else {
                 self.thumb_budget.insert_card(&url);
             }
@@ -1945,6 +1950,7 @@ impl Creblox {
             // it again if it comes back on screen.
             self.thumb_tex.remove(&old);
             self.thumb_owned.remove(&old);
+            self.thumb_passes.remove(&old);
             self.thumb_tex_dirty = true;
             self.thumb_owned_dirty = true;
         }
@@ -2081,6 +2087,38 @@ impl Creblox {
         }
     }
 
+    /// Hands the Game Store's pass pictures to the texture pool the cards use.
+    ///
+    /// A pass tile is small and square, so it is decoded to `PASS_TARGET` and kept in its own
+    /// lane: opening a store never pushes card thumbnails out of the cache, and a picture the
+    /// store is already showing keeps painting while the list revalidates.
+    fn request_pass_thumbs(&mut self, urls: Vec<String>) {
+        let mut jobs: Vec<(String, [u32; 2])> = Vec::new();
+        for url in urls {
+            let url = url.trim().to_string();
+            if url.is_empty() {
+                continue;
+            }
+            // Marked before the texture exists: the upload pump needs to know its lane.
+            self.thumb_passes.insert(url.clone());
+            if self.thumb_owned.insert(url.clone()) {
+                jobs.push((url, crate::thumb_pipeline::PASS_TARGET));
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        for (url, _) in &jobs {
+            self.thumb_downloading.insert(url.clone());
+        }
+        self.thumb_owned_dirty = true;
+        crate::ui::widgets::publish_thumb_owned(
+            &self.ctx,
+            std::sync::Arc::new(self.thumb_owned.clone()),
+        );
+        self.spawn(move || Msg::ThumbPixels(crate::api::download_thumbnails(jobs)));
+    }
+
     /// Republishes the texture map straight away instead of waiting for the frame's upload
     /// pump, so a URL that just gained a replacement alias paints its old image on this very
     /// frame rather than showing a placeholder for one.
@@ -2096,6 +2134,7 @@ impl Creblox {
         self.thumb_budget.clear();
         self.thumb_tex.clear();
         self.thumb_gallery.clear();
+        self.thumb_passes.clear();
         self.thumb_aliases.clear();
         self.thumb_tex_dirty = true;
         self.thumb_pixels.clear();
@@ -2424,10 +2463,43 @@ impl Creblox {
                         self.game_passes_loading = false;
                         match r {
                             Ok(passes) => {
+                                // A revalidation that hands a pass a new picture keeps the
+                                // one the store is already showing until the replacement is
+                                // decoded and uploaded.
+                                let fresh: Vec<(u64, String)> = passes
+                                    .iter()
+                                    .map(|p| (p.id, p.thumb.clone()))
+                                    .collect();
+                                let old: Vec<(u64, String)> = self
+                                    .game_extra
+                                    .as_ref()
+                                    .map(|ex| {
+                                        ex.passes
+                                            .iter()
+                                            .map(|p| (p.id, p.thumb.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let replaced = crate::thumb_alias::record_keyed(
+                                    &mut self.thumb_aliases,
+                                    &fresh,
+                                    &old,
+                                );
+                                if replaced > 0 {
+                                    self.republish_thumbs_now();
+                                }
                                 if let Some(ex) = &mut self.game_extra {
                                     ex.passes = passes;
                                     ex.passes_loaded = true;
                                 }
+                                // Painted from our own textures from now on, so the store
+                                // opens on the pictures it already has, not grey tiles.
+                                let urls: Vec<String> = self
+                                    .game_extra
+                                    .as_ref()
+                                    .map(|ex| ex.passes.iter().map(|p| p.thumb.clone()).collect())
+                                    .unwrap_or_default();
+                                self.request_pass_thumbs(urls);
                                 self.game_passes_err = None;
                             }
                             Err(e) => {
@@ -4281,6 +4353,9 @@ impl Creblox {
             // can swap its pictures without going through egui's placeholder.
             self.game_extra = Some(ex.clone());
             self.request_shown_gallery_thumb();
+            let pass_thumbs: Vec<String> =
+                ex.passes.iter().map(|p| p.thumb.clone()).collect();
+            self.request_pass_thumbs(pass_thumbs);
         }
         self.page = Page::Game(g);
         self.spawn(move || Msg::Details(games_by_universe(&[uid]).into_iter().next()));

@@ -422,3 +422,41 @@ fn a_revalidated_gallery_keeps_the_hero_it_is_showing() {
     assert_eq!(published.get(&fresh[0]), Some(&401));
     assert_eq!(published.get(&old[0]), Some(&301));
 }
+
+/// A revalidated Game Store keeps the pass pictures it is already showing.
+#[test]
+fn a_revalidated_store_keeps_the_pass_pictures_it_shows() {
+    let old = vec![
+        (11u64, "https://cdn.example/pass-11-v1.png".to_string()),
+        (22, "https://cdn.example/pass-22.png".to_string()),
+    ];
+    let fresh = vec![
+        (11u64, "https://cdn.example/pass-11-v2.png".to_string()),
+        (22, "https://cdn.example/pass-22.png".to_string()),
+        (33, "https://cdn.example/pass-33.png".to_string()),
+    ];
+    let mut textures: HashMap<String, u64> = HashMap::from([
+        (old[0].1.clone(), 701),
+        (old[1].1.clone(), 702),
+    ]);
+    let mut aliases = Aliases::new();
+
+    assert_eq!(thumb_alias::record_keyed(&mut aliases, &fresh, &old), 1);
+    let published = thumb_alias::published(&textures, &aliases);
+    assert_eq!(
+        published.get(&fresh[0].1),
+        Some(&701),
+        "the tile on screen keeps its picture while the new one decodes"
+    );
+    // A pass with an unchanged picture and a brand-new pass record no alias at all.
+    assert!(!aliases.contains_key(&fresh[1].1));
+    assert!(!aliases.contains_key(&fresh[2].1));
+    assert_eq!(thumb_alias::find(&textures, &aliases, &fresh[1].1), Some(&702));
+
+    // The replacement lands on one frame.
+    textures.insert(fresh[0].1.clone(), 801);
+    assert_eq!(
+        thumb_alias::published(&textures, &aliases).get(&fresh[0].1),
+        Some(&801)
+    );
+}

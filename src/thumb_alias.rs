@@ -40,6 +40,29 @@ pub fn record_media(aliases: &mut Aliases, fresh: &[String], old: &[String]) -> 
     recorded
 }
 
+/// Records the replacements between two lists of keyed image URLs, e.g. a game's pass id and
+/// its picture, and returns how many changed.
+///
+/// A pass that is new, or whose picture did not change, records nothing: only the pictures the
+/// store is already showing get an old-texture bridge.
+pub fn record_keyed(
+    aliases: &mut Aliases,
+    fresh: &[(u64, String)],
+    old: &[(u64, String)],
+) -> usize {
+    let mut recorded = 0;
+    for (key, fresh_url) in fresh {
+        let Some((_, old_url)) = old.iter().find(|(seen, _)| seen == key) else {
+            continue;
+        };
+        if !fresh_url.trim().is_empty() && fresh_url != old_url {
+            record(aliases, fresh_url, old_url);
+            recorded += 1;
+        }
+    }
+    recorded
+}
+
 /// The texture to paint for `url`: its own if it has been uploaded, otherwise the newest one
 /// along its replacement chain. `None` only when nothing in the chain was ever uploaded.
 pub fn find<'a, T>(

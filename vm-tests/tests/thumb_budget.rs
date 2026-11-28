@@ -73,3 +73,22 @@ fn the_hero_asks_for_the_picture_it_is_showing() {
     assert_eq!(thumb_pipeline::shown_media(&[], 0), None);
     assert_eq!(thumb_pipeline::shown_media(&vec![String::new()], 0), None);
 }
+
+#[test]
+fn pass_pictures_have_their_own_lane_too() {
+    let mut budget = TextureBudget::default();
+    for i in 0..thumb_pipeline::TEXTURE_CAP {
+        budget.insert_card(&card(i));
+    }
+    for i in 0..thumb_pipeline::GALLERY_TEXTURE_CAP {
+        budget.insert_gallery(&hero(i));
+    }
+    for i in 0..thumb_pipeline::PASS_TEXTURE_CAP + 2 {
+        budget.insert_pass(&format!("pass-{i}.png"));
+    }
+    // Opening stores overflows only the pass lane: no card and no gallery picture moves.
+    assert_eq!(
+        budget.evictions(),
+        vec!["pass-0.png".to_string(), "pass-1.png".to_string()]
+    );
+}
