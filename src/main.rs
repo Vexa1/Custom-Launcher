@@ -25,6 +25,8 @@ mod sha256;
 mod game_overlay;
 mod net_probe;
 mod overlay_spec;
+mod settings;
+mod settings_json;
 mod overlay_window;
 mod party_hud;
 mod party;

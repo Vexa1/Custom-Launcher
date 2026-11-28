@@ -8,6 +8,9 @@
 //! This package is not referenced by `Cargo.toml` at the repository root and ships in no
 //! release artifact.
 
+// `src/settings_json.rs` writes settings.json with one long `json!` block.
+#![recursion_limit = "512"]
+
 pub mod api;
 pub mod auth;
 pub mod roblox_process;
@@ -58,6 +61,12 @@ pub mod net_probe;
 
 #[path = "../../src/overlay_spec.rs"]
 pub mod overlay_spec;
+
+#[path = "../../src/settings.rs"]
+pub mod settings;
+
+#[path = "../../src/settings_json.rs"]
+pub mod settings_json;
 
 #[path = "../../src/profile_cache.rs"]
 pub mod profile_cache;
