@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.63
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.64
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -24,8 +24,10 @@
 
 CREBLOX is a native desktop launcher for Roblox that replaces the website with a fast,
 keyboard-and-trackpad-friendly shell: browse charts and search, see friends' presence, launch
-games into the installed Roblox client, tune the client's FastFlags, and keep a small in-game
-HUD (server region, CPU/RAM/ping, active flags, crosshair) on top of the game window.
+games into the installed Roblox client, tune the client's FastFlags, play with friends in the
+same server through an ephemeral party, hop to another public server without leaving the game,
+and keep a small in-game HUD (server region, CPU/RAM/ping, the party, active flags, crosshair)
+on top of the game window.
 
 It is written in **pure Rust** with no Electron/WebView, no JavaScript runtime and no C++
 application layer:
@@ -148,7 +150,7 @@ Nothing on the HUD is a placeholder: if a value cannot be measured it prints `�
 | Server region | Game server IP parsed from Roblox's own player log, resolved through `lookup_server_location` on a worker thread and cached per IP | spec loop in `game_overlay.rs` |
 | CPU % | Delta of the Roblox process's own CPU time over the sample window via `proc_pidinfo(PROC_PIDTASKINFO)` — instantaneous, and 100 % means one busy core, the same scale Activity Monitor uses for a process | `process_counters` (`game_overlay.rs:467`), `Usage` (`:620`) |
 | RAM | `pti_resident_size` of that same process, never system-wide memory | `Usage::sample` (`game_overlay.rs:620`) |
-| Ping | TCP handshake RTT to the game server itself (ICMP fallback), re-measured every 2 s and cleared when the server changes; `—` until a server is known | `measure_ping` (`game_overlay.rs`) |
+| Ping | Four tiers, in order: the Roblox client's own latency sample from its log (no packets), the public room list's ping for the exact job, a regional-edge handshake in the server's city, then ICMP/RakNet/TCP against the server itself - skipped for `128.116.x.x` relays, which blackhole unsolicited packets. Re-measured every 2 s and cleared when the server changes; `—` until a server is known | `net_probe::preferred_ping`, `measure_ping` (`game_overlay.rs`) |
 | FastFlags | Preset derived from the config actually on disk (`Competitive` / `Quality` / `Custom`) plus the exact count of applied flags | `active_preset_name` (`game_overlay.rs:66`) |
 | Session / clock | Local monotonic timer and `localtime_r` | `fmt_session`, `local_clock` |
 
@@ -446,7 +448,63 @@ cross-sort dedupe, the in-flight/`429` guards and the viewport row window.
 - **One syscall per second** for CPU/RAM instead of forking `/bin/ps`, and every region
   lookup, game lookup and ping runs on a worker thread, never on the UI thread.
 
-### 2.6 Shell, menu bar and integrations
+### 2.6 Memory, refresh and scroll discipline
+
+The launcher is built to stay flat while the user scrolls all day, and to give memory back the
+moment it is not being looked at.
+
+| Mechanism | Rule | Where |
+|---|---|---|
+| RAM ceiling | Uploaded textures, decoded images, VP8 preview frames and the 3D avatar scene are all charged their real bytes. `plan` drops the cheapest cache first (video, avatar, profiles, then the page's own pictures) so an endless scroll cannot sit above 192 MB, and a tray tuck leaves every tracked cache at zero. Settings -> Performance prints the same total. | `ram_budget.rs` |
+| macOS memory pressure | The dispatch source only records a level and wakes egui, because a flush may not drop textures mid-frame. The next frame turns `Warn` into `Flush` and `Critical` into `DeepFlush`, debounced for 30 s, and does nothing while the launcher already lives in the menu bar - the pending level is considered again when the window is shown. | `memory_pressure.rs`, `memory_pressure_macos.rs` |
+| Automatic refresh | One switch (`auto_refresh`) gates every periodic fetch: game lists, player counts and friends activity only refresh on load, tab change, filter change or an explicit refresh when it is off. Thumbnail staleness follows the same switch. | `refresh_policy.rs` |
+| Scroll pacing | A decaying estimate of how fast the page is moving suppresses hover animations, tooltips and preview lookups while the content flies past, and restores them the moment it settles. A per-frame budget also caps how much decoded avatar work a single frame adopts. | `scroll.rs` |
+| Thumbnail lanes | Two LIFO lanes - cards inside the viewport, then two lookahead rows - pruned against the frame's visible set, so an id the user scrolled past is cancelled before its request is sent. 100 ids per `thumbnails.roblox.com` call, a bounded download pool, and nothing ever touches the disk. | `thumb_pipeline.rs` |
+| Stale-while-revalidate | A refresh folds the fresh answer into the cards already on screen by `universe_id`; a failed or empty answer leaves the visible list untouched rather than blanking it. | `live_refresh.rs` |
+
+### 2.7 Party: play in the same server
+
+The Party bar sits at the top of **Home** (`ui/party.rs`). *Create Party* opens an ephemeral
+room; *Join* takes a `CRB-…` invite code, or a `creblox://party/<code>` link the process was
+started with. The bar then shows the room label, every member with their status (*Ready*,
+*Launching*, *In game*), the Ready Check / Game Vote board, and one button that joins the
+server the host is playing in.
+
+The design constraint is that there is nothing to deploy and nothing to sign up for:
+
+| Rule | How |
+|---|---|
+| **The host is the server** | Create Party binds a TCP listener inside the launcher process (UPnP asks the router for a port for up to 5 s, then falls back to LAN), and guests dial it directly over a WebSocket. A CREBLOX-only magic header and a per-room token are required before the handshake completes, so a stray HTTP client is refused at the door. |
+| **Nothing runs when idle** | One dedicated worker thread blocks on its command channel; no listener, socket or timer exists until a party is created or joined. While a party is open it wakes every 25 ms and reads each socket with a 1 ms timeout - a handful of syscalls a second, and nothing at all once the party closes. |
+| **No Roblox credentials on the wire** | Members are identified by public user id, name, display name and headshot URL. The launch ticket and `.ROBLOSECURITY` never leave the machine: each member's own client joins the same `(place id, job id)`. |
+| **Bounded and honest** | `MAX_PARTY_SIZE` is 8; a ninth friend is refused rather than silently dropped. A keepalive every 5 s, a silent peer dropped after 5 s (guests ping every 2 s) and a 16 s reconnect backoff bound every stale state. |
+| **A party survives a closed port** | When the host cannot be dialled (CGNAT, strict router, refused port mapping) members keep the party alive by polling the host's public Roblox presence every 4 s and launching into whatever server the host enters. The bar says the direct link is down instead of pretending it is connected. |
+| **Capacity-aware server selection** | A party launch lists public servers for the place, ranks the rooms that can take the whole party (ping and free slots, not just "not full"), fetches another page only when page one has nothing, and explains the failure when no room fits. A late joiner is checked against how many slots are actually left. |
+| **Party overlay** | Settings -> Overlay HUD -> *Party overlay* draws the member strip inside the game: 60x60 headshot tiles with a 2 px outline, green in this exact server (place *and* job id), grey while loading or waiting in the lobby, red for 30 s after the connection drops. |
+
+`vm-tests` runs the real socket code over loopback (`party_loopback`, `party_cross_platform`,
+`party_follow`, `party_slots`, `party_capacity`, `party_board`, `party_hud`): create, join,
+roster changes, kicks, a host that disappears, presence fallback, and a macOS-tagged client
+talking to a Windows-tagged host.
+
+### 2.8 Server hop
+
+Mid-game, the tray's **Server Hop** submenu (`server_hop.rs`) moves the player to another public
+server of the same experience without touching the browser:
+
+| Mode | Ranking |
+|---|---|
+| **Quick Hop** | Any joinable server that is not the one being played. Three pages are fetched and one is picked at random. |
+| **Least Players** | Fewest players first, then lowest ping. One ascending page is enough to find the emptiest room. |
+| **Lowest Ping** | Lowest reported ping first, falling back to Quick Hop when Roblox publishes no ping for the experience. Three pages are fetched, because ping telemetry only appears on busier pages. |
+
+Servers that are full, unjoinable, the current server, or were seen in the last few minutes are
+dropped before ranking. The running client is closed **only after** a target has been chosen, so
+a failed lookup never costs the player the game they are in, and a 45 s window suppresses the
+"you left the game" restore while the old client exits and the new one joins. The submenu is
+disabled unless the log watcher has published a live session (place and job id).
+
+### 2.9 Shell, menu bar and integrations
 
 | Feature | How it works |
 |---|---|
@@ -475,7 +533,7 @@ src/
                      Builds the eframe ViewportBuilder (size, min size, icon,
                      Renderer::Glow) and the App.
 
-  app.rs             The application shell and all state. ~5k lines.
+  app.rs             The application shell and all state. ~7.5k lines.
                        * `Creblox` struct: settings, session,
                          caches, page state, worker channels (Msg queue),
                          tray/overlay handles.
@@ -514,9 +572,13 @@ src/
     page_add_friend.rs  Friend search, requests, followers/following
     page_login.rs       Quick Login card, QR rendering, Rec Room-style backdrop
     page_notifications.rs Notification feed + status cards
-    page_settings.rs    Every setting (~2.6k lines): theme, FastFlags editor,
-                        performance, overlay, Discord, tray, updates, Roblox
-                        install, data folder
+    page_settings.rs    Every setting (~3.4k lines): theme and appearance,
+                        FastFlags editor, performance and RAM, servers, the
+                        overlay HUD (panels, party strip, picture, crosshair),
+                        Discord, tray, updates, Roblox install, data folder
+    page_inventory.rs   The inventory viewer modal: tabs, culled grid, batched
+                        thumbnails, private / rate-limited states
+    party.rs            Home's party bar and the invite window
 
   api.rs             All Roblox HTTP: JSON GET/POST with CSRF + cookie, games,
                      sorts, thumbnails, video ids, friends, presence, profiles,
@@ -645,6 +707,38 @@ src/
                      here is in RAM: no thumbnail ever touches the disk.
   telemetry.rs       RAM sampling, self-imposed RAM/CPU limits, the
                      window-visibility key used by the idle animation pacer.
+  chart_feed.rs      Cursor-following state for the endless Charts feed: one
+                     request in flight, dedupe by universe id, 429 back-off,
+                     labels formatted on arrival, visible-row window.
+  game_log.rs        The Roblox client log -> the server the player is on.
+                     Pure parsing, every spelling the client has shipped.
+  inventory.rs       Inventory endpoints' JSON, per-tab cache, privacy and 429
+                     policy, batched thumbnails. No egui, no I/O.
+  net_probe.rs       Ping against the game server in four tiers: the client's own
+                     latency sample, the room list's job ping, a regional edge,
+                     then ICMP/RakNet/TCP (never for 128.116.x.x relays).
+  overlay_spec.rs    The panels JSON the overlay window draws, assembled without
+                     egui so the "no server yet -> live ping" transition is
+                     testable in vm-tests.
+  party.rs           Ephemeral party rooms: invite codec, host listener, guest
+                     sockets, ready check / game vote, presence fallback.
+  party_server.rs    Capacity-aware server selection for a whole party.
+  party_hud.rs       Party overlay tiles and their in-server / loading /
+                     disconnected outlines.
+  server_hop.rs      Quick Hop / Least Players / Lowest Ping, and the 45 s window
+                     that keeps the launcher hidden across the relaunch.
+  settings.rs        The `Settings` value and its colour-mode enums, free of egui
+                     so vm-tests round-trips the real struct through the file.
+  settings_json.rs   `settings.json` read/write and the schema migrations; a newer
+                     file is merged into, never overwritten.
+  memory_pressure.rs What a macOS memory-pressure level should do this frame.
+  memory_pressure_macos.rs  The dispatch source that reports it.
+  refresh_policy.rs  When an automatic background refresh may run.
+  scroll.rs          Fling detection and the per-frame adopt budgets.
+  window_lifecycle.rs One pure table of when the window is on screen.
+  release_links.rs   Which release archive belongs to this platform, and its hash.
+  sha256.rs          SHA-256 in plain Rust for the updater's verification.
+  zip_update.rs      Reading `creblox.exe` out of a Windows release zip.
   types.rs           Data model: Game, Profile, User, Friend, Settings (+ Default),
                      Page/Action/Msg enums, NavIcon, AvatarTab, SocialTab, etc.
   platform.rs        OS-specific UI strings ("menu bar" vs "system tray").
@@ -764,17 +858,26 @@ Roblox-side paths CREBLOX reads or writes:
 | `<RobloxPlayer.app>/Contents/MacOS/ClientSettings/ClientAppSettings.json` | Legacy FastFlags location (also written). |
 | Roblox log directory (resolved at runtime by `roblox_logs_dir()`) | Session state detection. |
 
-### `settings.json` schema (abridged)
+### `settings.json` schema
 
-Source of truth: `types.rs::Settings`. All fields are optional on read.
+Source of truth: `src/settings.rs::Settings`; the file mapping and migrations live in
+`src/settings_json.rs`. All fields are optional on read, so old and new configs both load.
 
 | Group | Keys |
 |---|---|
-| Appearance | `dark`, `bg_mode` (`theme_default`/`solid_color`/`wallpaper`), `bg_color: [r,g,b]`, `bg_wallpaper`, `bg_overlay`, `text_mode`, `borders_color`, `profile_color`, `friends_color`, `games_border_color`, `text_border_color`, `glass_edition`, `glass_opacity`, `glass_highlight`, `corner_roundness`, `animations_enabled` |
+| Appearance | `dark`, `bg_mode` (`theme_default`/`solid_color`/`wallpaper`), `bg_color: [r,g,b]`, `bg_wallpaper`, `bg_overlay`, `text_mode` (`auto`/`white`/`green`/`dark`), `borders_color`, `profile_color`, `friends_color`, `games_border_color`, `text_border_color`, `glass_edition`, `glass_opacity`, `glass_highlight`, `corner_roundness`, `animations_enabled`, `hover_animations`, `animated_backgrounds`, `video_previews` |
 | Performance | `target_fps`, `ram_limit_mb`, `cpu_limit_pct` |
-| Behaviour | `tray_enabled`, `tray_minimize_on_close`, `start_with_windows` (launch at login), `start_minimized_to_tray`, `auto_close_roblox`, `notifications_silent`, `auto_check_updates` (legacy, ignored), `minimize_on_game_launch`, `close_launcher_during_game`, `return_to_launcher_on_leave`, `show_server_badge` |
-| Overlay | `overlay_enabled`, `overlay_corner`, `overlay_duration_secs`, `overlay_opacity`, `overlay_show_ip`, `overlay_show_job_id`, `overlay_stats_enabled`, `overlay_stats_corner`, `overlay_stats_cpu/ram/ping/session/clock/fps_cap`, `overlay_flags_enabled`, `overlay_flags_corner` |
+| Behaviour | `tray_enabled`, `tray_minimize_on_close`, `start_with_windows` (launch at login), `start_minimized_to_tray`, `auto_close_roblox`, `multi_instance`, `notifications_silent`, `auto_check_updates` / `auto_download_updates` (dormant update UI), `auto_refresh`, `minimize_on_game_launch`, `close_launcher_during_game`, `return_to_launcher_on_leave`, `show_server_badge` |
+| Overlay HUD | `overlay_enabled`, `overlay_corner`, `overlay_duration_secs`, `overlay_opacity`, `overlay_show_ip`, `overlay_show_job_id`, `overlay_panels` (one `{id,x,y}` per card), `overlay_stats_enabled`, `overlay_stats_corner`, `overlay_stats_cpu/ram/ping/session/clock/fps_cap`, `party_overlay`, `party_overlay_corner`, `overlay_flags_enabled`, `overlay_flags_corner`, `overlay_flags_max_lines`, `overlay_game_enabled`, `overlay_game_corner` |
+| Overlay picture & crosshair | `overlay_image_enabled`, `overlay_image_path`, `overlay_image_corner`, `overlay_image_size`, `overlay_image_opacity`, `overlay_image_offset_x/y`, `overlay_image_x/y/w/h` (the box the HUD editor saved; `w`/`h` at 0 fall back to the slider), `crosshair_enabled`, `crosshair_style`, `crosshair_size`, `crosshair_thickness`, `crosshair_gap`, `crosshair_color`, `crosshair_opacity`, `crosshair_offset_x/y`, `crosshair_image` |
+| Server browser | `server_filter_low_ping`, `server_filter_few_players`, `server_filter_good_fps`, `server_min_players`, `server_max_players`, `server_max_ping`, `server_show_players` |
 | Integrations | `discord_rpc_enabled`, `discord_rpc_show_idle`, `discord_rpc_app_id` |
+
+The file also carries a `schema` number (`SETTINGS_VERSION`). A newer build's `settings.json`
+is never overwritten: this build merges its own keys into it, keeps every key it does not know,
+keeps the newer schema number, and Settings says so. Older files are migrated on read - a
+version 1 file, for example, keeps a dragged picture's position in the offsets, while version 2
+reads it only from `overlay_image_x/y` so the offset sliders keep their own meaning.
 
 ### `fastflags.json` schema
 
@@ -891,8 +994,11 @@ scripts/verify.sh
 
 | Step | What it proves | Runs where |
 |---|---|---|
-| `cargo test --locked --manifest-path vm-tests/Cargo.toml` | The real `src/party.rs` and `src/server_hop.rs` - invite codec, room-token handshake, roster/kick, presence fallback, hop ranking - plus loopback end-to-end joins | Any host, including a Linux VM where the GUI crate cannot compile |
-| `cargo test --locked --manifest-path vm-tests/Cargo.toml --test shots` | Renders Home, Charts, Game details, Party, Settings, the updater and the overlay HUD to PNG with the real egui, and fails on clipped, collapsed or overlapping widgets, text that does not fit, hit targets under 24x24 and contrast below 4.5:1 | Any host |
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml --test stub_drift` | Every restated struct field, enum payload and function signature the harness relies on still matches the real `types.rs`, `api.rs`, `auth.rs` and `roblox_process.rs` | Any host |
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml --test party_cross_platform` | A macOS-tagged client and a Windows-tagged host create, join, sync HUD statuses and launch over loopback | Any host |
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml` | The real `party`, `party_server`, `server_hop`, `net_probe`, `settings_json`, `window_lifecycle`, `memory_pressure`, `refresh_policy`, `scroll`, `release_links`, `sha256`, `zip_update`, chart, inventory, avatar and thumbnail code, plus loopback end-to-end joins | Any host, including a Linux VM where the GUI crate cannot compile |
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml --test overlay_ping_e2e` | A replayed Roblox log, mock UDMUX relays on loopback, the real probe chain, the panels JSON written atomically, and the HUD rendered from those bytes | Any host |
+| `cargo test --locked --manifest-path vm-tests/Cargo.toml --test shots` | Renders every page in both the dark and light palettes at 1280x800 and 1440x900 with the real egui, and fails on clipped, collapsed or overlapping widgets, text that does not fit, hit targets under 24x24 and contrast below 4.5:1 | Any host |
 | `cargo check --locked --target x86_64-apple-darwin` | The whole GUI crate, including `#[cfg(macos)]` FFI and every `#[cfg(test)]` module, still compiles for the release target | Any host with the target installed |
 | `cargo test --locked` (macOS only) | The in-crate suites: layout, updater parsing, auth paths, theme tokens, Roblox log parser | A Mac; they need the window and OS APIs |
 
@@ -905,17 +1011,24 @@ there when you want host-runnable coverage of it, and put new checks in `vm-test
 
 `cargo test --manifest-path vm-tests/Cargo.toml --test shots` renders the launcher's pages with
 the real `egui` (0.37, the version the app uses) through a small software rasterizer, at 1280x800
-and 1440x900, and writes `vm-tests/artifacts/<page>-<width>x<height>.png`: Home, Charts, Game
-details, Party, Settings, the in-app Updater and the overlay HUD.
+and 1440x900 **in both palettes**, and writes `vm-tests/artifacts/<page>-<width>x<height>.png` and
+`<page>-light-<width>x<height>.png`. The pages are Home, Charts, Game details, Party, Settings,
+the in-app Updater, the overlay HUD, the inventory viewer (populated and private), the navigation
+rail and a player profile - 44 images per run.
 
-The same test is the automated layout check. Every registered widget must stay inside the
-window, keep a non-zero size, avoid illegal overlap, fit its text, offer a hit target of at least
-24x24 when interactive, and keep 4.5:1 contrast. UI changes additionally require looking at
-the images - a green test is not a visual check; the rule is in `AGENTS.md`.
+The same test is the automated layout check, run once per theme. Every registered widget must
+stay inside the window, keep a non-zero size, avoid illegal overlap, fit its text, offer a hit
+target of at least 24x24 when interactive, and keep 4.5:1 contrast. That contrast rule is what
+keeps accent *text* readable on the light canvas: accents are fills, so their text form goes
+through `theme::text_ink` / `theme::ink` (unchanged on dark, an `*_INK` or hue-preserving darker
+shade on light), and filled accent buttons paint `ON_ACCENT` rather than white. UI changes
+additionally require looking at the images - a green test is not a visual check; the rule is in
+`AGENTS.md`.
 
 The GUI crate cannot be linked on a Linux host (`src/ui/*` needs `crate::app::Creblox`, eframe and
 the OS APIs), so the screens in `vm-tests/src/screens.rs` mirror `src/ui/*`, `src/theme.rs` and
-the overlay; keep them in step when a page's layout changes. `vm-tests/artifacts/` is gitignored,
+the overlay; keep them in step when a page's layout changes (and ink accent text at the call
+site there, so a fixture that forgets it is caught by the shots test). `vm-tests/artifacts/` is gitignored,
 and none of it is part of a release build.
 
 A stand-in can go stale without breaking the harness, so `vm-tests/tests/stub_drift.rs`
@@ -948,6 +1061,8 @@ Why a release build is untouched:
 | FastFlags don't apply | They are written on launch (`sync_saved_fastflags_before_launch`) and on save. Check both `~/Library/Preferences/com.roblox.Roblox/ClientAppSettings.json` and the bundle copy; Roblox updates wipe the bundle copy. |
 | TLS/certificate errors | Networking is `rustls` + bundled `webpki-roots` — it does not use Catalina's system root store, so expired system certificates cannot break it. A corporate MITM proxy will. |
 | Menu bar icon missing | `tray_enabled` is off, or another instance owns `.instance.lock`. |
+| Party won't connect | The host dialled is the router's answer: a CGNAT or strict router can refuse the port mapping. The party keeps working through the host's Roblox presence, so members still follow the host's server; the bar says the direct link is down. LAN-only parties connect without a mapping at all. |
+| Server Hop is greyed out | It needs a live session with a parsed place id; it enables once the log watcher has seen the join banner. A hop also needs at least one other joinable server that is not full. |
 | Won't update | Updates are manual: download the archive from **Releases** and run `Update CREBLOX.command` (or `Build CREBLOX.command` on a new machine). There is no in-app update check to debug. If the script cannot find your source folder, check `~/Library/Application Support/CREBLOX/source-folder` and the `Cargo.toml` inside it. |
 
 ---
