@@ -18,6 +18,7 @@ mod companion;
 mod discord_rpc;
 mod fastflags;
 mod friend_names;
+mod live_refresh;
 mod game_log;
 mod inventory;
 mod sha256;

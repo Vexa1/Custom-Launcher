@@ -184,6 +184,9 @@ impl Creblox {
                 }
             });
         });
+        if self.charts_freshness.is_silent() {
+            small_text(ui, "Updating players and ranks\u{2026}");
+        }
         ui.add_space(10.0);
 
         // Filters: Players is one wide group - a minimum rail, then a minimum pill and a
@@ -450,7 +453,9 @@ impl Creblox {
         let matched = self.feed_pool.len();
         match &self.sorts {
             None => {
-                ui.spinner();
+                if self.charts_freshness.skeleton(0) {
+                    ui.spinner();
+                }
             }
             Some(Err(e)) => {
                 ui.colored_label(RED, e);

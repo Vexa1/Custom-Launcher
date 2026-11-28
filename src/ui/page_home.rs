@@ -165,10 +165,14 @@ impl Creblox {
         match &self.sorts {
             None => {
                 ui.add_space(20.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Loading games from Roblox...");
-                });
+                // A skeleton is only honest when nothing has ever loaded; a refresh over a
+                // populated page never reaches this arm.
+                if self.charts_freshness.skeleton(0) {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading games from Roblox\u{2026}");
+                    });
+                }
             }
             Some(Err(e)) => {
                 ui.add_space(20.0);
@@ -198,6 +202,9 @@ impl Creblox {
                             "Topics & played games auto-sync in background (click to sync now)",
                             acts,
                         );
+                        if self.home_freshness.is_silent() || self.charts_freshness.is_silent() {
+                            small_text(ui, "Updating players\u{2026}");
+                        }
                     });
                     ui.add_space(6.0);
                     wide_grid(

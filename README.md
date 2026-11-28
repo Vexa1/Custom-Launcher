@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.32
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.33
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -601,6 +601,13 @@ src/
                      5-minute TTL that serves a revisit instantly and refreshes a stale
                      one underneath. Plus the 120 ms hover dwell that warms a profile
                      from the friends strip without a mouse sweep starting anything.
+  live_refresh.rs    Stale-while-revalidate for the game lists. `Freshness` says whether a list
+                     is on its first load (the only time a skeleton is honest), refreshing
+                     silently behind cards, ready, or failed with nothing to show;
+                     `merge_games`/`merge_sorts` fold a fresh answer into the list that is
+                     already on screen by `universe_id`, keeping every id (and therefore every
+                     cached texture) and appending only the cards that are genuinely new. An
+                     empty or failed answer leaves the visible list untouched.
   friend_names.rs    What a friend's bubble says. `friends.roblox.com` now often answers
                      `/friends` with ids only, so the loader batch-resolves every id through
                      `POST users.roblox.com/v1/users` (100 per request), remembers

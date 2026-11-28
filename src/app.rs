@@ -149,6 +149,11 @@ pub struct Creblox {
     /// Only a refresh the user asked for may show the home loading spinner;
     /// background auto-syncs stay invisible.
     pub home_sync_spinner: bool,
+    /// Stale-while-revalidate state: Home sections, the Charts catalogue, one game's details.
+    /// A refresh behind data never blanks the page, so these only decide hints vs skeletons.
+    pub home_freshness: crate::live_refresh::Freshness,
+    pub charts_freshness: crate::live_refresh::Freshness,
+    pub game_freshness: crate::live_refresh::Freshness,
     pub just_launched: Vec<(u64, Instant)>,
     pub pending_favs: HashMap<u64, (bool, Instant)>,
     pub was_focused: bool,
@@ -501,6 +506,9 @@ impl Creblox {
             last_saved_sync: None,
             last_auth_sync: None,
             home_sync_spinner: false,
+            home_freshness: crate::live_refresh::Freshness::default(),
+            charts_freshness: crate::live_refresh::Freshness::default(),
+            game_freshness: crate::live_refresh::Freshness::default(),
             just_launched: Vec::new(),
             pending_favs: HashMap::new(),
             was_focused: true,
@@ -742,6 +750,8 @@ impl Creblox {
         }
         self.sid = new_session_id();
         self.sorts_sync_started = Some(Instant::now());
+        // Silent: the catalogue on screen keeps drawing while this runs.
+        self.charts_freshness.request();
         let sid = self.sid.clone();
         let cookie = self.cookie.clone();
         self.spawn(move || Msg::Sorts(fetch_sorts(&sid, cookie.as_deref())));
@@ -755,6 +765,8 @@ impl Creblox {
             return;
         }
         self.saved_sync_started = Some(Instant::now());
+        // Silent: Continue/Favorites keep their cards and textures while this runs.
+        self.home_freshness.request();
         let uid = self.me.as_ref().map(|p| p.user.id);
         let r = self.recent_ids.clone();
         let f = self.fav_ids.clone();
@@ -1636,6 +1648,9 @@ impl Creblox {
         self.last_saved_sync = None;
         self.last_auth_sync = None;
         self.home_sync_spinner = false;
+        self.home_freshness.reset();
+        self.charts_freshness.reset();
+        self.game_freshness.reset();
         self.just_launched.clear();
         self.pending_favs.clear();
         self.my_profile = None;
@@ -2068,28 +2083,49 @@ impl Creblox {
                     self.clear_home_sync_spinner_if_idle();
                     match r {
                         Ok(page) => {
-                            // A fresh sync replaces the catalogue and resets the cursor.
-                            let mut sorts: Vec<Sort> = Vec::new();
-                            self.chart_feed.absorb_initial(&mut sorts, page);
-                            let ids: Vec<u64> = sorts
-                                .iter()
-                                .flat_map(|sort| sort.games.iter().map(|g| g.universe_id))
-                                .collect();
-                            crate::api::save_sorts_cache(&sorts);
-                            if !sorts.is_empty() {
-                                if self.chart >= sorts.len() {
+                            // Stale-while-revalidate: merge into the catalogue that is on
+                            // screen instead of replacing it, so rows, scroll position and
+                            // every already-loaded texture survive the refresh.
+                            let mut fresh: Vec<Sort> = Vec::new();
+                            self.chart_feed.absorb_initial(&mut fresh, page);
+                            let have_cards =
+                                matches!(&self.sorts, Some(Ok(sorts)) if !sorts.is_empty());
+                            if !fresh.is_empty() {
+                                let next = match self.sorts.take() {
+                                    Some(Ok(mut old)) if !old.is_empty() => {
+                                        crate::live_refresh::merge_sorts(&mut old, fresh);
+                                        old
+                                    }
+                                    _ => fresh,
+                                };
+                                if self.chart >= next.len() {
                                     self.chart = 0;
                                 }
-                                self.sorts = Some(Ok(sorts));
-                            } else if self.sorts.is_none() || matches!(self.sorts, Some(Err(_))) {
-                                self.sorts = Some(Ok(sorts));
+                                self.sorts = Some(Ok(next));
+                            } else if !have_cards
+                                && (self.sorts.is_none() || matches!(self.sorts, Some(Err(_))))
+                            {
+                                // Nothing was on screen, so an empty catalogue is the truth:
+                                // this is the first-ever load, not a refresh over cards.
+                                self.sorts = Some(Ok(fresh));
                             }
-                            self.request_thumbs(ids);
+                            if let Some(Ok(sorts)) = &self.sorts {
+                                crate::api::save_sorts_cache(sorts);
+                                // Only ids without a thumbnail are fetched again; a game that
+                                // already has its texture keeps it.
+                                let ids: Vec<u64> = sorts
+                                    .iter()
+                                    .flat_map(|sort| sort.games.iter().map(|g| g.universe_id))
+                                    .collect();
+                                self.request_thumbs(ids);
+                            }
+                            self.charts_freshness.succeed();
                         }
                         Err(e) => {
                             if self.sorts.is_none() || matches!(self.sorts, Some(Err(_))) {
                                 self.sorts = Some(Err(e));
                             }
+                            self.charts_freshness.fail();
                         }
                     }
                 }
@@ -2164,6 +2200,7 @@ impl Creblox {
                     if !logged_in {
                         continue;
                     }
+                    self.game_freshness.succeed();
                     let mut updated_current = false;
                     if let Page::Game(cur) = &mut self.page {
                         if cur.universe_id == full.universe_id {
@@ -2180,6 +2217,7 @@ impl Creblox {
                     if !logged_in {
                         continue;
                     }
+                    self.game_freshness.succeed();
                     self.game_video_ids
                         .insert(ex.universe_id, ex.preview_video_id.clone());
                     let uid = ex.universe_id;
@@ -2363,6 +2401,7 @@ impl Creblox {
                     self.saved_sync_started = None;
                     self.last_saved_sync = Some(Instant::now());
                     self.clear_home_sync_spinner_if_idle();
+                    self.home_freshness.succeed();
                     let mut thumb_ids = Vec::new();
 
                     self.just_launched
@@ -2409,7 +2448,8 @@ impl Creblox {
                             self.recent_ids = next_ids;
                             write_ids("recent.txt", &self.recent_ids);
                         }
-                        self.recent = v;
+                        // Merged, not replaced: a narrower remote list must not empty the row.
+                        crate::live_refresh::apply_refresh(&mut self.recent, Some(v));
                     }
 
                     self.pending_favs
@@ -2442,7 +2482,7 @@ impl Creblox {
                             .collect();
                         self.fav_ids = next_ids;
                         write_ids("favorites.txt", &self.fav_ids);
-                        self.favs = v;
+                        crate::live_refresh::apply_refresh(&mut self.favs, Some(v));
                     }
 
                     self.request_thumbs(thumb_ids);
@@ -4098,7 +4138,11 @@ impl Creblox {
         let cookie = self.cookie.clone();
         self.request_thumbs(vec![uid]);
         self.game_tab = GameTab::About;
-        self.game_extra = None;
+        // Re-opening the game that is already on screen keeps its details (and the cached
+        // hero image) drawn while the revalidation runs; only a different game starts empty.
+        if self.game_extra.as_ref().is_none_or(|e| e.universe_id != uid) {
+            self.game_extra = None;
+        }
         self.game_media_idx = 0;
         self.game_passes_loading = false;
         self.game_passes_err = None;
@@ -4119,6 +4163,7 @@ impl Creblox {
         self.page = Page::Game(g);
         self.spawn(move || Msg::Details(games_by_universe(&[uid]).into_iter().next()));
         if !fresh {
+            self.game_freshness.request();
             let cookie = cookie.clone();
             self.spawn(move || {
                 Msg::GameExtraLoaded(Box::new(fetch_game_extra(uid, cookie.as_deref())))
