@@ -66,7 +66,7 @@ fn rapid_clicks_coalesce_into_one_request_after_the_debounce() {
         .take_request(now + Duration::from_millis(200))
         .is_none());
     // The save is a background concern, so its wait is only about coalescing clicks.
-    assert_eq!(EQUIP_DEBOUNCE, Duration::from_millis(400));
+    assert_eq!(EQUIP_DEBOUNCE, Duration::from_millis(300));
 
     let (revision, assets) = sync
         .take_request(now + Duration::from_millis(120) + EQUIP_DEBOUNCE)

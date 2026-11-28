@@ -21,6 +21,11 @@ pub mod shots;
 #[path = "../../src/avatar_anim.rs"]
 pub mod avatar_anim;
 
+pub use ::egui;
+
+#[path = "../../src/avatar_render.rs"]
+pub mod avatar_render;
+
 #[path = "../../src/avatar_scene.rs"]
 pub mod avatar_scene;
 

@@ -1213,11 +1213,27 @@ impl Creblox {
 
         debug_assert_eq!(
             self.avatar_3d.scene.base_reloads, 0,
-            "equipping an item must never re-render the composite"
+            "the local scene must never ask for a composite re-render"
         );
         if changed {
             self.ctx.request_repaint();
         }
+    }
+
+    /// Waits for Roblox to finish baking the edited avatar and swaps it in when it does.
+    ///
+    /// Nothing the user sees waits on it: the local scene already drew the click, the viewport
+    /// keeps showing that model, and the baked mesh replaces it the moment the service reports
+    /// a new render. The loader polls at 150/300/500 ms instead of the old 1.5 s steps.
+    pub fn poll_avatar_bake(&mut self) {
+        if self.avatar_3d.loading {
+            self.avatar_3d.reload_queued = true;
+            return;
+        }
+        // Require a mesh different from the one on screen: the old render is still served for
+        // a moment after the edit, and adopting it would silently undo the click.
+        self.avatar_3d.expect_change = true;
+        self.load_avatar_3d();
     }
 
     /// Splits the composite by asset: a material whose texture belongs to a worn item is that
@@ -2607,10 +2623,11 @@ impl Creblox {
                                 }
                                 self.avatar_err = None;
                                 self.status = note;
-                                // The save landed, but the viewport has been showing this
-                                // look since the click: it is never re-rendered for it, so
-                                // the equip costs no composite download at all.
+                                // The save landed. The viewport has been showing this look
+                                // since the click; now ask Roblox to bake the real composite
+                                // and swap it in when it arrives.
                                 self.refresh_avatar_scene();
+                                self.poll_avatar_bake();
                             }
                         }
                         Err(e) => {

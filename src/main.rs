@@ -5,6 +5,11 @@ mod api;
 mod app;
 mod auth;
 mod avatar_anim;
+/// egui from the one place this crate gets it, so shared modules can name its types
+/// without a direct `egui` dependency.
+pub use eframe::egui;
+
+mod avatar_render;
 mod avatar_scene;
 mod avatar_sync;
 mod chart_feed;
@@ -42,7 +47,6 @@ mod zip_update;
 
 use std::env;
 
-use eframe::egui;
 
 use app::Creblox;
 use auth::log;

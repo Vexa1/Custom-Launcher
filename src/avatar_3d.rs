@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use crate::avatar_anim::{
-    accessory_triangle_mask, classify_triangles, island_ids, AnimPlayer, AnimationKind, Mat4, Part,
+    accessory_triangle_mask, classify_triangles, island_ids, AnimPlayer, AnimationKind, Part,
     PartCounts, Pose, Skeleton, PART_COUNT,
 };
 use crate::avatar_scene::{self, Scene};
@@ -67,7 +67,12 @@ pub struct AvatarVertex {
 pub struct AvatarTriangle {
     pub v: [AvatarVertex; 3],
     pub texture_index: Option<usize>,
+    /// `Kd` of the material, multiplied with the vertex colour and the texture.
     pub base_color: Color32,
+    /// `d` from the MTL times any `map_d` alpha.
+    pub alpha: f32,
+    pub alpha_mode: crate::avatar_render::AlphaMode,
+    pub double_sided: bool,
     pub normal: [f32; 3],
     /// Rig part this triangle belongs to (`Part` index). Drives the per-limb transform during
     /// an animation.
@@ -91,6 +96,8 @@ pub struct Avatar3DModel {
     pub skeleton: Skeleton,
     /// How the triangles split across the rig: logged and written next to the dumped model.
     pub part_counts: PartCounts,
+    /// `camera` and `aabb` from the `avatar-3d` metadata, in the model's own stud space.
+    pub framing: Option<crate::avatar_render::Framing>,
 }
 
 impl Avatar3DModel {
@@ -151,13 +158,10 @@ fn textures_from_images(images: &[(String, egui::ColorImage)]) -> Vec<LoadedText
 pub fn decode_texture(hash: String, bytes: &[u8]) -> Option<LoadedTexture> {
     let img = image::load_from_memory(bytes).ok()?;
     let size = [img.width() as _, img.height() as _];
-    let mut rgba = img.to_rgba8();
-    // Roblox's avatar textures can carry alpha (clothing cut-outs, faded decals). CREBLOX
-    // stacks the layers by depth, so a transparent texel would let whatever is behind show
-    // through the clothes. Bake the alpha out.
-    for px in rgba.pixels_mut() {
-        px.0[3] = 255;
-    }
+    // The alpha channel is kept: it is the shape of every hair, eyebrow and face decal Roblox
+    // ships. Whether it is a cut-out, a blend or ignored is the material's `rbx_alphamode`,
+    // so an opaque body texture with junk alpha still draws solid.
+    let rgba = img.to_rgba8();
     let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice());
     Some(LoadedTexture {
         hash,
@@ -389,7 +393,8 @@ const DRAG_DIR_X: f32 = 1.0;
 const DRAG_DIR_Y: f32 = 1.0;
 
 const DEFAULT_YAW: f32 = 0.0;
-const DEFAULT_PITCH: f32 = 0.05;
+/// No extra tilt: the metadata camera already frames the avatar the way Roblox does.
+const DEFAULT_PITCH: f32 = 0.0;
 
 impl Default for Avatar3DState {
     fn default() -> Self {
@@ -415,11 +420,17 @@ impl Default for Avatar3DState {
     }
 }
 
-/// Material definition parsed from MTL file
+/// One `newmtl` block, flattened for the parser. Alpha and `Kd` come from
+/// [`crate::avatar_render::parse_mtl`]; this type only adds the resolved texture index.
 struct MaterialDef {
     name: String,
     texture_hash: Option<String>,
+    #[allow(dead_code)]
+    alpha_hash: Option<String>,
     color: Color32,
+    alpha: f32,
+    mode: crate::avatar_render::AlphaMode,
+    double_sided: bool,
 }
 
 /// Parse OBJ and MTL bytes into an Avatar3DModel
@@ -430,58 +441,33 @@ pub fn parse_avatar_3d(
 ) -> Result<Avatar3DModel, String> {
     let obj_str = String::from_utf8_lossy(obj_bytes);
 
-    // 1. Parse MTL if available
-    let mut materials: Vec<MaterialDef> = Vec::new();
-    if let Some(mb) = mtl_bytes {
-        let mtl_str = String::from_utf8_lossy(mb);
-        let mut cur_name = String::new();
-        let mut cur_tex = None;
-        let mut cur_col = Color32::from_rgb(210, 210, 215);
+    // 1. Parse MTL. Roblox's `.mtl` is where alpha lives: `map_d`, `d`/`Tr` and its own
+    // `rbx_alphamode` say whether a hair or face texture is a cut-out or a blend, and `Kd` is
+    // the tint multiplied into `map_Kd`. `avatar_render` owns that grammar so `vm-tests` can
+    // check it against real-shaped files.
+    let parsed_materials = mtl_bytes.map(crate::avatar_render::parse_mtl).unwrap_or_default();
+    let materials: Vec<MaterialDef> = parsed_materials
+        .iter()
+        .map(|m| MaterialDef {
+            name: m.name.clone(),
+            texture_hash: m.texture.clone(),
+            alpha_hash: m.alpha_texture.clone(),
+            color: Color32::from_rgb(
+                (m.kd[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                (m.kd[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                (m.kd[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+            ),
+            alpha: m.alpha,
+            mode: m.mode,
+            double_sided: m.double_sided,
+        })
+        .collect();
 
-        for line in mtl_str.lines() {
-            let line = line.trim();
-            if line.starts_with("newmtl ") {
-                if !cur_name.is_empty() {
-                    materials.push(MaterialDef {
-                        name: cur_name.clone(),
-                        texture_hash: cur_tex.take(),
-                        color: cur_col,
-                    });
-                }
-                cur_name = line["newmtl ".len()..].trim().to_string();
-                cur_col = Color32::from_rgb(210, 210, 215);
-            } else if line.starts_with("Kd ") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let r = parts[1].parse::<f32>().unwrap_or(0.8);
-                    let g = parts[2].parse::<f32>().unwrap_or(0.8);
-                    let b = parts[3].parse::<f32>().unwrap_or(0.8);
-                    cur_col = Color32::from_rgb(
-                        (r.clamp(0.0, 1.0) * 255.0) as u8,
-                        (g.clamp(0.0, 1.0) * 255.0) as u8,
-                        (b.clamp(0.0, 1.0) * 255.0) as u8,
-                    );
-                }
-            } else if line.starts_with("map_Kd ") || line.starts_with("map_Ka ") {
-                let tex = line.split_whitespace().nth(1).unwrap_or("").trim();
-                if !tex.is_empty() {
-                    cur_tex = Some(tex.to_string());
-                }
-            }
-        }
-        if !cur_name.is_empty() {
-            materials.push(MaterialDef {
-                name: cur_name,
-                texture_hash: cur_tex,
-                color: cur_col,
-            });
-        }
-    }
-
-    // Build unique texture hash list
+    // Build unique texture hash list. `map_d` alpha maps are downloaded and sampled with the
+    // colour texture, so they belong in the same set.
     let mut texture_hashes = manifest_textures.to_vec();
     for m in &materials {
-        if let Some(h) = &m.texture_hash {
+        for h in [&m.texture_hash, &m.alpha_hash].into_iter().flatten() {
             if !texture_hashes.contains(h) {
                 texture_hashes.push(h.clone());
             }
@@ -628,6 +614,10 @@ pub fn parse_avatar_3d(
             };
 
             let v0 = parse_vertex(face_tokens[0]);
+            let (mat_alpha, mat_mode, mat_double) = materials
+                .get(current_mtl_idx)
+                .map(|m| (m.alpha, m.mode, m.double_sided))
+                .unwrap_or((1.0, crate::avatar_render::AlphaMode::Opaque, false));
             let (tex_idx, base_col) = if let Some(m) = materials.get(current_mtl_idx) {
                 let tidx = m
                     .texture_hash
@@ -680,6 +670,9 @@ pub fn parse_avatar_3d(
                     v: [v0_tri, v1, v2],
                     texture_index: tex_idx,
                     base_color: base_col,
+                    alpha: mat_alpha,
+                    alpha_mode: mat_mode,
+                    double_sided: mat_double,
                     normal: fnorm,
                     part: current_part.map(|p| p.index() as u8).unwrap_or(255),
                     vidx: [
@@ -727,6 +720,7 @@ pub fn parse_avatar_3d(
         obj_hash: String::new(),
         skeleton,
         part_counts,
+        framing: None,
     })
 }
 
@@ -807,12 +801,19 @@ pub fn load_avatar_3d_data_ex(
     stale_obj_hash: Option<&str>,
 ) -> Result<(Avatar3DModel, Vec<LoadedTexture>), String> {
     let url = format!("https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}");
-    let max_attempts = if stale_obj_hash.is_some() { 10 } else { 6 };
+    // After an edit the service is already baking, so poll it promptly: 150/300/500 ms.
+    let max_attempts = if stale_obj_hash.is_some() {
+        crate::avatar_render::BAKE_ATTEMPTS
+    } else {
+        6
+    };
     let mut last_err = String::from("Avatar 3D thumbnail is not ready yet");
     let mut manifest_and_hash: Option<(Value, String)> = None;
     for attempt in 0..max_attempts {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::avatar_render::bake_backoff_ms(attempt),
+            ));
         }
         let mut req = ureq::get(&url)
             .set(
@@ -835,11 +836,17 @@ pub fn load_avatar_3d_data_ex(
                 continue;
             }
         };
+        let state = json["state"].as_str().unwrap_or("unknown");
         let Some(image_url) = json["imageUrl"].as_str().filter(|u| !u.is_empty()) else {
-            let state = json["state"].as_str().unwrap_or("unknown");
             last_err = format!("Avatar 3D thumbnail status: {state}");
             continue; // Pending / not generated yet: try again shortly
         };
+        // After an edit only a *finished* render of the new look counts: a Completed state and
+        // a manifest hash different from the one already on screen.
+        if stale_obj_hash.is_some() && !state.eq_ignore_ascii_case("Completed") {
+            last_err = format!("Avatar 3D thumbnail status: {state}");
+            continue;
+        }
         let manifest: Value = match ureq::get(image_url)
             .set("User-Agent", "Mozilla/5.0")
             .call()
@@ -915,6 +922,8 @@ pub fn load_avatar_3d_data_ex(
 
     let mut model = parse_avatar_3d(&obj_bytes, mtl_bytes.as_deref(), &tex_hashes)?;
     model.obj_hash = obj_hash_owned.clone();
+    // The camera the service used to frame this render, so the viewport reproduces it.
+    model.framing = crate::avatar_render::parse_framing(&manifest);
     save_avatar_dump(user_id, &obj_bytes, mtl_bytes.as_deref(), &model);
 
     // Keep the decoded result, bounded by the shared RAM budget, so coming back to this look
@@ -932,114 +941,9 @@ pub fn load_avatar_3d_data_ex(
     Ok((model, raw_textures))
 }
 
-fn normalize3(v: [f32; 3]) -> [f32; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 1e-6 {
-        [v[0] / len, v[1] / len, v[2] / len]
-    } else {
-        [0.0, 0.0, -1.0]
-    }
-}
 
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
 
-fn rotate_normal(n: [f32; 3], cos_y: f32, sin_y: f32, cos_p: f32, sin_p: f32) -> [f32; 3] {
-    let nx = n[0] * cos_y + n[2] * sin_y;
-    let ny_pre = n[1];
-    let nz_pre = -n[0] * sin_y + n[2] * cos_y;
-    let rny = ny_pre * cos_p - nz_pre * sin_p;
-    let rnz = ny_pre * sin_p + nz_pre * cos_p;
-    normalize3([nx, rny, rnz])
-}
-
-/// Three-point studio lighting (warm key + cool fill + Fresnel rim + hemisphere AO).
-fn shade_studio_vertex(
-    view_pos: [f32; 3],
-    raw_normal: [f32; 3],
-    face_normal: [f32; 3],
-    cos_y: f32,
-    sin_y: f32,
-    cos_p: f32,
-    sin_p: f32,
-    untextured_base: Option<Color32>,
-) -> Color32 {
-    let n_src = if dot3(raw_normal, raw_normal) > 1e-6 {
-        raw_normal
-    } else {
-        face_normal
-    };
-    let n = rotate_normal(n_src, cos_y, sin_y, cos_p, sin_p);
-    let v = normalize3([-view_pos[0], -view_pos[1], -(4.8 + view_pos[2])]);
-
-    // Vectors point from surface toward studio lights (camera sits on -Z).
-    let l_key = normalize3([-0.46, 0.68, -0.72]);
-    let l_fill = normalize3([0.78, 0.14, -0.50]);
-    let l_rim = normalize3([0.44, 0.56, 0.70]);
-
-    // Key light: soft-wrapped diffuse + Blinn-Phong studio softbox specular
-    let diff_key = ((dot3(n, l_key) + 0.24) / 1.24).clamp(0.0, 1.0).powf(1.12);
-    let h_key = normalize3([l_key[0] + v[0], l_key[1] + v[1], l_key[2] + v[2]]);
-    let spec = dot3(n, h_key).max(0.0).powf(16.0) * 0.26;
-
-    // Cool opposite fill light
-    let diff_fill = ((dot3(n, l_fill) + 0.34) / 1.34).clamp(0.0, 1.0);
-
-    // Fresnel rim highlight along silhouette edges
-    let ndotv = dot3(n, v).clamp(0.0, 1.0);
-    let fresnel = (1.0 - ndotv).powf(2.4);
-    let rim_gate = ((dot3(n, l_rim) + 0.40) / 1.40).clamp(0.0, 1.0);
-    let rim = fresnel * (0.16 + 0.34 * rim_gate);
-
-    // Hemisphere ambient (studio ceiling vs floor bounce) + subtle vertical grounding AO
-    let hemi = (n[1] * 0.5 + 0.5).clamp(0.0, 1.0);
-    let amb_rgb = [
-        0.24 + (0.37 - 0.24) * hemi,
-        0.25 + (0.39 - 0.25) * hemi,
-        0.30 + (0.44 - 0.30) * hemi,
-    ];
-    let ao = 0.86 + 0.14 * ((view_pos[1] + 1.0) * 0.5).clamp(0.0, 1.0);
-
-    let key_tint = [1.04f32, 0.99f32, 0.92f32];
-    let fill_tint = [0.82f32, 0.91f32, 1.08f32];
-    let rim_tint = [0.92f32, 0.96f32, 1.06f32];
-
-    let mut lr =
-        amb_rgb[0] * ao + (0.62 * diff_key * key_tint[0]) + (0.24 * diff_fill * fill_tint[0]);
-    let mut lg =
-        amb_rgb[1] * ao + (0.62 * diff_key * key_tint[1]) + (0.24 * diff_fill * fill_tint[1]);
-    let mut lb =
-        amb_rgb[2] * ao + (0.62 * diff_key * key_tint[2]) + (0.24 * diff_fill * fill_tint[2]);
-
-    let sr = spec * key_tint[0] + rim * rim_tint[0];
-    let sg = spec * key_tint[1] + rim * rim_tint[1];
-    let sb = spec * key_tint[2] + rim * rim_tint[2];
-
-    if let Some(base) = untextured_base {
-        let br = base.r() as f32 / 255.0;
-        let bg = base.g() as f32 / 255.0;
-        let bb = base.b() as f32 / 255.0;
-        Color32::from_rgba_unmultiplied(
-            ((br * lr + sr * 0.72).clamp(0.0, 1.0) * 255.0) as u8,
-            ((bg * lg + sg * 0.72).clamp(0.0, 1.0) * 255.0) as u8,
-            ((bb * lb + sb * 0.72).clamp(0.0, 1.0) * 255.0) as u8,
-            base.a(),
-        )
-    } else {
-        lr = (lr + sr).clamp(0.0, 1.0);
-        lg = (lg + sg).clamp(0.0, 1.0);
-        lb = (lb + sb).clamp(0.0, 1.0);
-        Color32::from_rgba_unmultiplied(
-            (lr * 255.0) as u8,
-            (lg * 255.0) as u8,
-            (lb * 255.0) as u8,
-            255,
-        )
-    }
-}
-
-/// Key for the cached, software-rasterised avatar image.
+/// Everything that changes the picture, so an unchanged frame is a cache hit.
 #[derive(PartialEq)]
 struct RasterKey {
     yaw: u32,
@@ -1144,8 +1048,16 @@ pub fn render_avatar_3d_mesh(
         None => {
             let started = std::time::Instant::now();
             let image = rasterize_avatar(
-                model, textures, scene, material_owners, overlays, yaw, pitch, zoom, width, height,
-                pose, anim_frame,
+                model,
+                textures,
+                scene,
+                material_owners,
+                overlays,
+                crate::avatar_render::Orbit::new(yaw, pitch, zoom),
+                width,
+                height,
+                pose,
+                anim_frame,
             );
             if anim_frame != 0 {
                 raster_ms = Some(started.elapsed().as_secs_f32() * 1000.0);
@@ -1176,227 +1088,17 @@ pub fn render_avatar_3d_mesh(
     raster_ms
 }
 
-fn edge_fn(a: Pos2, b: Pos2, px: f32, py: f32) -> f32 {
-    (px - a.x) * (b.y - a.y) - (py - a.y) * (b.x - a.x)
-}
-
-/// Nearest-neighbour texture lookup with wrapping, always opaque (Roblox avatar textures can
-/// carry alpha in unused texels; blending that would make the avatar see-through again).
-fn sample_texture(img: &egui::ColorImage, u: f32, v: f32) -> Color32 {
-    let [tw, th] = img.size;
-    if tw == 0 || th == 0 {
-        return Color32::WHITE;
-    }
-    let uu = u - u.floor();
-    let vv = v - v.floor();
-    let x = ((uu * tw as f32).floor() as usize).min(tw - 1);
-    let y = ((vv * th as f32).floor() as usize).min(th - 1);
-    let c = img.pixels[y * tw + x];
-    Color32::from_rgb(c.r(), c.g(), c.b())
-}
-
-/// The rasteriser's target: the picture, a depth buffer and the camera.
-///
-/// Both the avatar composite and an individual item's mesh go through [`Raster::triangle`], so
-/// a separately downloaded hat is depth-tested against the body it lands on instead of being
-/// painted over it.
-struct Raster<'a> {
-    pixels: &'a mut [Color32],
-    zbuf: &'a mut [f32],
-    width: usize,
-    height: usize,
-    cx: f32,
-    cy: f32,
-    aspect_scale: f32,
-    cos_y: f32,
-    sin_y: f32,
-    cos_p: f32,
-    sin_p: f32,
-    dist: f32,
-}
-
-impl Raster<'_> {
-    /// Draws one triangle.
-    ///
-    /// `limb` is the animation's transform for the triangle's rig part, and `origin`/`scale`
-    /// map the triangle's own coordinates into the normalised space the camera looks at: the
-    /// composite's centre and scale for its own triangles, the item render's for an overlay.
-    fn triangle(
-        &mut self,
-        tri: &AvatarTriangle,
-        limb: Option<Mat4>,
-        origin: [f32; 3],
-        scale: f32,
-        lookup: &[Option<&LoadedTexture>],
-    ) {
-        let hf = self.height as f32;
-        let wf = self.width as f32;
-        let mut screen = [Pos2::ZERO; 3];
-        let mut zs = [0.0f32; 3];
-        let mut persp = [0.0f32; 3];
-        let mut view = [[0.0f32; 3]; 3];
-
-        for i in 0..3 {
-            let v = &tri.v[i];
-            let pos = match limb {
-                Some(m) => m.transform_point(v.pos),
-                None => v.pos,
-            };
-            let px = (pos[0] - origin[0]) * scale;
-            let py = (pos[1] - origin[1]) * scale;
-            let pz = (pos[2] - origin[2]) * scale;
-
-            let rx = px * self.cos_y + pz * self.sin_y;
-            let rz = -px * self.sin_y + pz * self.cos_y;
-            let fy = py * self.cos_p - rz * self.sin_p;
-            let fz = py * self.sin_p + rz * self.cos_p;
-
-            let p = self.dist / (self.dist + fz);
-            let sx = self.cx + rx * p * self.aspect_scale;
-            let sy = self.cy - fy * p * self.aspect_scale + hf * 0.02;
-
-            screen[i] = Pos2::new(sx, sy);
-            zs[i] = fz;
-            persp[i] = p;
-            view[i] = [rx, fy, fz];
-        }
-
-        let total = edge_fn(screen[0], screen[1], screen[2].x, screen[2].y);
-        if total.abs() < 1e-6 {
-            return;
-        }
-        // Keep the same faces the old 2D cross-product cull kept.
-        let cross = (screen[1].x - screen[0].x) * (screen[2].y - screen[0].y)
-            - (screen[1].y - screen[0].y) * (screen[2].x - screen[0].x);
-        if cross <= 0.0 {
-            return;
-        }
-
-        let tex = tri
-            .texture_index
-            .and_then(|idx| lookup.get(idx))
-            .copied()
-            .flatten();
-        let has_tex = tex.is_some();
-
-        let mut colors = [[0.0f32; 3]; 3];
-        let normal = match limb {
-            Some(m) => m.transform_dir(tri.normal),
-            None => tri.normal,
-        };
-        for i in 0..3 {
-            let v = &tri.v[i];
-            let vnormal = match limb {
-                Some(m) => m.transform_dir(v.normal),
-                None => v.normal,
-            };
-            let base = if has_tex {
-                None
-            } else if v.color != Color32::WHITE {
-                Some(v.color)
-            } else {
-                Some(tri.base_color)
-            };
-            let c = shade_studio_vertex(
-                view[i], vnormal, normal, self.cos_y, self.sin_y, self.cos_p, self.sin_p, base,
-            );
-            colors[i] = [c.r() as f32, c.g() as f32, c.b() as f32];
-        }
-
-        let uvs = [
-            [tri.v[0].uv[0], 1.0 - tri.v[0].uv[1]],
-            [tri.v[1].uv[0], 1.0 - tri.v[1].uv[1]],
-            [tri.v[2].uv[0], 1.0 - tri.v[2].uv[1]],
-        ];
-
-        let min_x = screen[0]
-            .x
-            .min(screen[1].x)
-            .min(screen[2].x)
-            .floor()
-            .max(0.0);
-        let max_x = screen[0]
-            .x
-            .max(screen[1].x)
-            .max(screen[2].x)
-            .ceil()
-            .min(wf - 1.0);
-        let min_y = screen[0]
-            .y
-            .min(screen[1].y)
-            .min(screen[2].y)
-            .floor()
-            .max(0.0);
-        let max_y = screen[0]
-            .y
-            .max(screen[1].y)
-            .max(screen[2].y)
-            .ceil()
-            .min(hf - 1.0);
-        if max_x < min_x || max_y < min_y {
-            return;
-        }
-
-        for y in (min_y as usize)..=(max_y as usize) {
-            let py = y as f32 + 0.5;
-            let row = y * self.width;
-            for x in (min_x as usize)..=(max_x as usize) {
-                let px = x as f32 + 0.5;
-                let e0 = edge_fn(screen[1], screen[2], px, py) / total;
-                let e1 = edge_fn(screen[2], screen[0], px, py) / total;
-                let e2 = edge_fn(screen[0], screen[1], px, py) / total;
-                if e0 < 0.0 || e1 < 0.0 || e2 < 0.0 {
-                    continue;
-                }
-
-                // Perspective-correct barycentric weights.
-                let i0 = e0 / persp[0];
-                let i1 = e1 / persp[1];
-                let i2 = e2 / persp[2];
-                let inv = i0 + i1 + i2;
-                if inv.abs() < 1e-9 {
-                    continue;
-                }
-                let z = (i0 * zs[0] + i1 * zs[1] + i2 * zs[2]) / inv;
-                let idx = row + x;
-                if z >= self.zbuf[idx] {
-                    continue;
-                }
-                self.zbuf[idx] = z;
-
-                let lr = (i0 * colors[0][0] + i1 * colors[1][0] + i2 * colors[2][0]) / inv;
-                let lg = (i0 * colors[0][1] + i1 * colors[1][1] + i2 * colors[2][1]) / inv;
-                let lb = (i0 * colors[0][2] + i1 * colors[1][2] + i2 * colors[2][2]) / inv;
-
-                let (r, g, b) = if let Some(tex) = tex {
-                    let u = (i0 * uvs[0][0] + i1 * uvs[1][0] + i2 * uvs[2][0]) / inv;
-                    let v = (i0 * uvs[0][1] + i1 * uvs[1][1] + i2 * uvs[2][1]) / inv;
-                    let t = sample_texture(&tex.image, u, v);
-                    (
-                        t.r() as f32 * lr / 255.0,
-                        t.g() as f32 * lg / 255.0,
-                        t.b() as f32 * lb / 255.0,
-                    )
-                } else {
-                    (lr, lg, lb)
-                };
-
-                self.pixels[idx] = Color32::from_rgb(
-                    r.round().clamp(0.0, 255.0) as u8,
-                    g.round().clamp(0.0, 255.0) as u8,
-                    b.round().clamp(0.0, 255.0) as u8,
-                );
-            }
-        }
-    }
-}
+/// Supersampling factor: the viewport is rendered at twice the display size and box-filtered
+/// down. egui has no multisampling, and a 700 px avatar with hair-thin geometry needs it.
+const SUPERSAMPLE: usize = 2;
 
 /// Renders the avatar: the composite's visible groups, then any item mesh the composite does
 /// not have yet.
 ///
-/// Nothing in here waits for `set-wearing-assets`: an unequip is a group that is no longer
-/// drawn, and an equip is either geometry that was already in the model or a decoded mesh the
-/// caller has in hand.
+/// The camera is Roblox's own when the metadata carried one (`camera.position`,
+/// `camera.direction`, `camera.fov`, framed on the `aabb`), and the user's drag orbits around
+/// that same centre. Alpha, `Kd` and the three-point lighting are [`crate::avatar_render`]'s
+/// job, so the viewport looks like the website's viewer rather than an approximation of it.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_avatar(
     model: &Avatar3DModel,
@@ -1404,32 +1106,34 @@ fn rasterize_avatar(
     scene: &Scene,
     material_owners: &[u64],
     overlays: &HashMap<u64, OverlayMesh>,
-    yaw: f32,
-    pitch: f32,
-    zoom: f32,
+    orbit: crate::avatar_render::Orbit,
     width: usize,
     height: usize,
     pose: &Pose,
     anim_frame: u32,
 ) -> egui::ColorImage {
-    let mut pixels = vec![Color32::TRANSPARENT; width * height];
-    let mut zbuf = vec![f32::INFINITY; width * height];
+    let sw = width * SUPERSAMPLE;
+    let sh = height * SUPERSAMPLE;
+    let mut pixels = vec![Color32::TRANSPARENT; sw * sh];
+    let mut zbuf = vec![f32::INFINITY; sw * sh];
 
-    let hf = height as f32;
-    let wf = width as f32;
-    let mut raster = Raster {
+    // The OBJ and the reported camera share one space, so both are scaled into the model's
+    // normalised space together: the framing stays exactly the service's.
+    let framing = model
+        .framing
+        .as_ref()
+        .map(|f| crate::avatar_render::normalize_framing(f, model.center, model.scale));
+    let mut camera = crate::avatar_render::orbit_camera(framing.as_ref(), orbit, 2.0);
+    camera.focal = crate::avatar_render::focal_px(camera.fov, sh as f32);
+    let focal = camera.focal;
+
+    let mut raster = crate::avatar_render::Raster {
         pixels: &mut pixels,
         zbuf: &mut zbuf,
-        width,
-        height,
-        cx: wf * 0.5,
-        cy: hf * 0.5,
-        aspect_scale: hf * 0.49 * zoom,
-        cos_y: yaw.cos(),
-        sin_y: yaw.sin(),
-        cos_p: pitch.cos(),
-        sin_p: pitch.sin(),
-        dist: 4.8,
+        width: sw,
+        height: sh,
+        camera,
+        focal,
     };
 
     // Striking the pose: one hierarchical FK pass, then each triangle is carried by its limb.
@@ -1439,13 +1143,19 @@ fn rasterize_avatar(
         Some(model.skeleton.transforms(pose))
     };
 
-    // Material texture indices point into `texture_hashes`; resolve them by hash so a texture
-    // that failed to download cannot shift every later texture onto the wrong body part.
-    let lookup: Vec<Option<&LoadedTexture>> = model
+    let lookup: Vec<Option<&egui::ColorImage>> = model
         .texture_hashes
         .iter()
-        .map(|hash| textures.iter().find(|t| &t.hash == hash))
+        .map(|hash| textures.iter().find(|t| &t.hash == hash).map(|t| &t.image))
         .collect();
+
+    let to_space = |p: [f32; 3]| -> [f32; 3] {
+        [
+            (p[0] - model.center[0]) * model.scale,
+            (p[1] - model.center[1]) * model.scale,
+            (p[2] - model.center[2]) * model.scale,
+        ]
+    };
 
     for tri in &model.triangles {
         // A group the user has unequipped stays in the model and is simply not drawn, which
@@ -1458,7 +1168,41 @@ fn rasterize_avatar(
             .as_ref()
             .and_then(|t| t.get(tri.part as usize))
             .copied();
-        raster.triangle(tri, limb, model.center, model.scale, &lookup);
+        let carried = |p: [f32; 3]| match limb {
+            Some(m) => m.transform_point(p),
+            None => p,
+        };
+        let kd = tri.base_color;
+        raster.triangle(&crate::avatar_render::Tri {
+            pos: [
+                to_space(carried(tri.v[0].pos)),
+                to_space(carried(tri.v[1].pos)),
+                to_space(carried(tri.v[2].pos)),
+            ],
+            vertex_normals: [
+                limb.map(|m| m.transform_dir(tri.v[0].normal))
+                    .unwrap_or(tri.v[0].normal),
+                limb.map(|m| m.transform_dir(tri.v[1].normal))
+                    .unwrap_or(tri.v[1].normal),
+                limb.map(|m| m.transform_dir(tri.v[2].normal))
+                    .unwrap_or(tri.v[2].normal),
+            ],
+            uv: [tri.v[0].uv, tri.v[1].uv, tri.v[2].uv],
+            color: [tri.v[0].color, tri.v[1].color, tri.v[2].color],
+            texture: tri
+                .texture_index
+                .and_then(|i| lookup.get(i))
+                .copied()
+                .flatten(),
+            kd: [
+                kd.r() as f32 / 255.0,
+                kd.g() as f32 / 255.0,
+                kd.b() as f32 / 255.0,
+            ],
+            alpha: tri.alpha,
+            mode: tri.alpha_mode,
+            double_sided: tri.double_sided,
+        });
     }
 
     // Items this composite never had (equipped a moment ago): their own decoded mesh, drawn
@@ -1467,23 +1211,70 @@ fn rasterize_avatar(
         if !scene.shows_mesh(*asset_id) {
             continue;
         }
-        let lookup: Vec<Option<&LoadedTexture>> = overlay
+        let lookup: Vec<Option<&egui::ColorImage>> = overlay
             .texture_hashes
             .iter()
-            .map(|hash| overlay.textures.iter().find(|t| &t.hash == hash))
+            .map(|hash| overlay.textures.iter().find(|t| &t.hash == hash).map(|t| &t.image))
             .collect();
+        let own = |p: [f32; 3]| -> [f32; 3] {
+            [
+                (p[0] - overlay.origin[0]) * overlay.scale,
+                (p[1] - overlay.origin[1]) * overlay.scale,
+                (p[2] - overlay.origin[2]) * overlay.scale,
+            ]
+        };
         for tri in &overlay.triangles {
             let limb = transforms
                 .as_ref()
                 .and_then(|t| t.get(tri.part as usize))
                 .copied();
-            raster.triangle(tri, limb, overlay.origin, overlay.scale, &lookup);
+            let carried = |p: [f32; 3]| match limb {
+                Some(m) => m.transform_point(p),
+                None => p,
+            };
+            let kd = tri.base_color;
+            raster.triangle(&crate::avatar_render::Tri {
+                pos: [
+                    own(carried(tri.v[0].pos)),
+                    own(carried(tri.v[1].pos)),
+                    own(carried(tri.v[2].pos)),
+                ],
+                vertex_normals: [
+                    limb.map(|m| m.transform_dir(tri.v[0].normal))
+                        .unwrap_or(tri.v[0].normal),
+                    limb.map(|m| m.transform_dir(tri.v[1].normal))
+                        .unwrap_or(tri.v[1].normal),
+                    limb.map(|m| m.transform_dir(tri.v[2].normal))
+                        .unwrap_or(tri.v[2].normal),
+                ],
+                uv: [tri.v[0].uv, tri.v[1].uv, tri.v[2].uv],
+                color: [tri.v[0].color, tri.v[1].color, tri.v[2].color],
+                texture: tri
+                    .texture_index
+                    .and_then(|i| lookup.get(i))
+                    .copied()
+                    .flatten(),
+                kd: [
+                    kd.r() as f32 / 255.0,
+                    kd.g() as f32 / 255.0,
+                    kd.b() as f32 / 255.0,
+                ],
+                alpha: tri.alpha,
+                mode: tri.alpha_mode,
+                double_sided: tri.double_sided,
+            });
         }
     }
     drop(raster);
 
-    egui::ColorImage::new([width, height], pixels)
+    crate::avatar_render::downsample(
+        &egui::ColorImage::new([sw, sh], pixels),
+        width,
+        height,
+        SUPERSAMPLE,
+    )
 }
+
 
 /// Render the complete avatar preview viewport with studio lighting, floor shadow,
 /// 2D/3D mode switch, camera reset, and click-and-drag 3D rotation grab.
@@ -1862,47 +1653,17 @@ pub fn render_avatar_viewport(
 
 #[cfg(test)]
 mod tests {
-    use super::{Avatar3DState, DEFAULT_PITCH, DEFAULT_YAW, shade_studio_vertex};
-    use eframe::egui::Color32;
+    use super::{Avatar3DState, DEFAULT_PITCH, DEFAULT_YAW};
 
     #[test]
-    fn default_camera_faces_front_and_studio_lighting_has_contrast() {
+    fn the_viewport_starts_on_robloxs_own_framing() {
         let st = Avatar3DState::default();
+        // No orbit offset at all: the metadata camera is the starting view, so the avatar sits
+        // where the website's viewer puts it.
         assert_eq!(st.yaw, DEFAULT_YAW);
         assert_eq!(st.pitch, DEFAULT_PITCH);
-
-        let key_lit = shade_studio_vertex(
-            [0.0, 0.2, -0.3],
-            [-0.3, 0.5, -0.8],
-            [-0.3, 0.5, -0.8],
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            None,
-        );
-        let shadow_side = shade_studio_vertex(
-            [0.3, -0.2, 0.1],
-            [0.85, -0.45, 0.25],
-            [0.85, -0.45, 0.25],
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            None,
-        );
-        assert!(key_lit.r() > shadow_side.r() + 45);
-
-        let dark_lit = shade_studio_vertex(
-            [-0.2, 0.4, -0.4],
-            [-0.22, 0.34, -0.91],
-            [-0.22, 0.34, -0.91],
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            Some(Color32::from_rgb(20, 20, 22)),
-        );
-        assert!(dark_lit.r() > 50);
+        assert_eq!(DEFAULT_PITCH, 0.0);
+        assert_eq!(st.zoom, 1.0);
+        assert!(st.is_3d && st.model.is_none());
     }
 }

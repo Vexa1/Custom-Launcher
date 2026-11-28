@@ -132,7 +132,7 @@ pub fn compute_toggled_assets(
 ///
 /// Nothing the user sees waits for it: the 3D viewport is already showing the click, and the
 /// request is a silent save that never triggers a re-render of the composite.
-pub const EQUIP_DEBOUNCE: Duration = Duration::from_millis(400);
+pub const EQUIP_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// The editor's equip state machine.
 #[derive(Debug, Default)]

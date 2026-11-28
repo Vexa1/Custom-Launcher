@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.26
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.27
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -550,13 +550,24 @@ src/
                      `<data dir>/avatar3d/` with its per-part triangle counts in
                      the log, and posed frames are timed so a heavy avatar is
                      redrawn less often instead of saturating a core.
+  avatar_render.rs   How the 3D viewport looks. Parses Roblox's `.mtl` (`Kd`, `map_Kd`,
+                     `map_d`, `d`/`Tr`, `rbx_alphamode`, `doubleSided`), multiplies `Kd`
+                     into the texture and the vertex colour, cuts out or blends per-pixel
+                     alpha so hair, eyebrows and face decals keep their shape, lights the
+                     avatar with a neutral key, a cool fill and a rim over a hemisphere
+                     ambient, and reads `camera`/`aabb`/`fov` from the `avatar-3d`
+                     metadata so the default view and the orbit centre are Roblox's own.
+                     Colour textures are sampled bilinearly and the frame is rendered at
+                     2x and box-filtered down, which is where the clean edges come from.
+                     No eframe and no network, so `vm-tests` renders a real viewport PNG
+                     from it (`artifacts/avatar_viewport_real.png`).
   avatar_anim.rs     R15/R6 joint hierarchy, hierarchical forward kinematics, the
                      joint bands calibrated against the head the model actually
                      has (a tall hat must not move the waist), the keyframed
                      Idle/Walk/Run/Jump/Fall/Swim/Climb/Emote clips and the
                      click-to-play player (no work while stopped, cost-paced
                      while playing).
-  avatar_sync.rs     Avatar editor equip state: optimistic toggles, the 400 ms
+  avatar_sync.rs     Avatar editor equip state: optimistic toggles, the 300 ms
                      single-request debounce, the monotonic revision that discards
                      stale 3D responses, rollback on failure and the mesh cache's
                      LRU/budget policy.
@@ -564,9 +575,11 @@ src/
                      set, which composite materials belong to which asset (each
                      worn item is drawn with its own texture atlas), which items
                      have their own decoded mesh, and what still needs fetching.
-                     An equip or unequip is a visibility flip on the click frame:
-                     nothing here waits for `set-wearing-assets` and nothing here
-                     re-renders the composite (the app asserts `base_reloads == 0`).
+                     An equip or unequip is a visibility flip on the click frame, before
+                     the save: nothing here waits for `set-wearing-assets` and the scene
+                     never re-renders the composite itself. Roblox's freshly baked avatar
+                     is polled at 150/300/500 ms after an edit and swapped in when it
+                     lands, so the click is instant *and* the result is the real model.
   telemetry.rs       RAM sampling, self-imposed RAM/CPU limits, the
                      window-visibility key used by the idle animation pacer.
   types.rs           Data model: Game, Profile, User, Friend, Settings (+ Default),
