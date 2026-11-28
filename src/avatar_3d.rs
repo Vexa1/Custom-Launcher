@@ -51,6 +51,21 @@ pub fn download_rbx_asset(hash: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Downloads one avatar texture, with the same byte ceiling as a thumbnail.
+///
+/// The OBJ and MTL keep using the plain download (they are text meshes, not decoded images),
+/// while a texture that would exceed the ceiling is refused before `image` sees it.
+fn download_texture(hash: &str) -> Result<Vec<u8>, String> {
+    let bytes = download_rbx_asset(hash)?;
+    if bytes.len() as u64 > crate::thumb_pipeline::MAX_IMAGE_BYTES {
+        return Err(format!(
+            "texture {hash} is {} bytes, past the decode cap",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Single 3D vertex with position, normal, UV coordinates, and color
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -156,6 +171,12 @@ fn textures_from_images(images: &[(String, egui::ColorImage)]) -> Vec<LoadedText
 /// This runs on the loader thread: an avatar carries a dozen or more textures, and decoding
 /// them all inside the frame that receives the model was a visible hitch.
 pub fn decode_texture(hash: String, bytes: &[u8]) -> Option<LoadedTexture> {
+    // An avatar texture is drawn at body-part size, so a picture past the budget's per-decode
+    // ceiling is refused instead of allocated: this is the same gate the thumbnails use.
+    if !crate::api::image_dimensions_fit(bytes) {
+        crate::auth::log(&format!("avatar: refused an oversized texture {hash}"));
+        return None;
+    }
     let img = image::load_from_memory(bytes).ok()?;
     let size = [img.width() as _, img.height() as _];
     // The alpha channel is kept: it is the shape of every hair, eyebrow and face decal Roblox
@@ -337,7 +358,7 @@ pub fn fetch_asset_overlay(asset_id: u64) -> Result<OverlayMesh, String> {
             .iter()
             .map(|h| {
                 s.spawn(move || {
-                    download_rbx_asset(h)
+                    download_texture(h)
                         .ok()
                         .and_then(|bytes| decode_texture(h.clone(), &bytes))
                 })
@@ -902,7 +923,7 @@ pub fn load_avatar_3d_data_ex(
             .iter()
             .map(|th| {
                 s.spawn(move || {
-                    download_rbx_asset(th)
+                    download_texture(th)
                         .ok()
                         .and_then(|bytes| decode_texture(th.clone(), &bytes))
                 })

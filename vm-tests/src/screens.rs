@@ -1077,6 +1077,24 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     "settings.cache.parts",
                     "0 B textures · 0 B waiting · 0 B video · 0 B avatar · 0 B profiles · process 0 MB",
                 );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    probe.widget("settings.auto_refresh", toggle(ui, true), true);
+                    ui.add_space(10.0);
+                    body(
+                        ui,
+                        probe,
+                        "settings.auto_refresh.label",
+                        "Automatic background refresh",
+                        TEXT,
+                    );
+                });
+                meta(
+                    ui,
+                    probe,
+                    "settings.auto_refresh.hint",
+                    "Silently update lists, player counts and friends",
+                );
             });
         });
         ui.add_space(14.0);

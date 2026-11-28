@@ -176,6 +176,23 @@ pub fn patch_games(old: &mut [Game], fresh: &[Game]) -> MergeStats {
     stats
 }
 
+/// Updates the numbers of the cards already shown in each sort, keeping every position.
+///
+/// A background revalidation must not re-rank rows under the pointer: sorts are matched by
+/// title, games by `universe_id`, and each shown card takes the fresh numbers where it already
+/// sits. Newcomers and a genuinely new ranking arrive through [`merge_sorts`], which an
+/// explicit refresh (or a first load) still uses.
+pub fn patch_sorts(old: &mut [crate::types::Sort], fresh: &[crate::types::Sort]) -> MergeStats {
+    let mut stats = MergeStats::default();
+    for sort in old.iter_mut() {
+        if let Some(new) = fresh.iter().find(|shown| shown.title == sort.title) {
+            stats.updated += patch_games(&mut sort.games, &new.games).updated;
+        }
+        stats.kept += sort.games.len();
+    }
+    stats
+}
+
 /// Merges a fresh page of sorts into the ones on screen, matching sorts by title.
 ///
 /// A sort is a *ranking*, so a sort the answer contains takes the fresh games in the **fresh

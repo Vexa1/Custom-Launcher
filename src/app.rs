@@ -163,6 +163,9 @@ pub struct Creblox {
     pub home_freshness: crate::live_refresh::Freshness,
     pub charts_freshness: crate::live_refresh::Freshness,
     pub game_freshness: crate::live_refresh::Freshness,
+    /// The next `Msg::Sorts` may re-rank the chart rows. Set by an explicit refresh or a first
+    /// load; a background sync only takes fresh numbers, so nothing jumps under the pointer.
+    pub sorts_rerank_on_merge: bool,
     pub just_launched: Vec<(u64, Instant)>,
     pub pending_favs: HashMap<u64, (bool, Instant)>,
     pub was_focused: bool,
@@ -521,6 +524,7 @@ impl Creblox {
             home_freshness: crate::live_refresh::Freshness::default(),
             charts_freshness: crate::live_refresh::Freshness::default(),
             game_freshness: crate::live_refresh::Freshness::default(),
+            sorts_rerank_on_merge: false,
             just_launched: Vec::new(),
             pending_favs: HashMap::new(),
             was_focused: true,
@@ -789,6 +793,9 @@ impl Creblox {
         self.sorts_sync_started = Some(Instant::now());
         // Silent: the catalogue on screen keeps drawing while this runs.
         self.charts_freshness.request();
+        // Only an explicit refresh (or the first load) may re-rank the rows; a silent one takes
+        // the numbers and leaves every card where the user can see it.
+        self.sorts_rerank_on_merge |= force;
         let sid = self.sid.clone();
         let cookie = self.cookie.clone();
         self.spawn(move || Msg::Sorts(fetch_sorts(&sid, cookie.as_deref())));
@@ -1094,21 +1101,38 @@ impl Creblox {
             Duration::from_secs(30)
         };
 
-        if Self::is_stale(
-            &self.last_saved_sync,
-            &self.saved_sync_started,
+        // The one switch that stops every periodic list/statistics fetch. Timers stay armed -
+        // the clocks are what a page change or an explicit refresh reads - but nothing is
+        // fetched while this is off, so the only requests are the user's own.
+        if !self.settings.auto_refresh {
+            return;
+        }
+        let now = Instant::now();
+        if crate::refresh_policy::should_refresh(
+            true,
+            self.last_saved_sync,
+            self.saved_sync_started,
             saved_interval,
+            now,
         ) {
             self.sync_saved(false);
         }
-        if Self::is_stale(
-            &self.last_sorts_sync,
-            &self.sorts_sync_started,
+        if crate::refresh_policy::should_refresh(
+            true,
+            self.last_sorts_sync,
+            self.sorts_sync_started,
             sorts_interval,
+            now,
         ) {
             self.sync_sorts(false);
         }
-        if Self::is_stale(&self.last_auth_sync, &self.auth_sync_started, auth_interval) {
+        if crate::refresh_policy::should_refresh(
+            true,
+            self.last_auth_sync,
+            self.auth_sync_started,
+            auth_interval,
+            now,
+        ) {
             self.sync_auth_session(false);
         }
         let req_interval = if gained_focus {
@@ -1116,9 +1140,13 @@ impl Creblox {
         } else {
             Duration::from_secs(30)
         };
-        let req_stale = self
-            .last_requests_poll
-            .map_or(true, |t| t.elapsed() >= req_interval);
+        let req_stale = crate::refresh_policy::should_refresh(
+            true,
+            self.last_requests_poll,
+            None,
+            req_interval,
+            now,
+        );
         if req_stale && !self.social_loading.contains(&SocialTab::Requests) {
             self.last_requests_poll = Some(Instant::now());
             self.load_social_tab(SocialTab::Requests, false);
@@ -2344,9 +2372,16 @@ impl Creblox {
                             let have_cards =
                                 matches!(&self.sorts, Some(Ok(sorts)) if !sorts.is_empty());
                             if !fresh.is_empty() {
+                                let rerank = std::mem::take(&mut self.sorts_rerank_on_merge);
                                 let next = match self.sorts.take() {
                                     Some(Ok(mut old)) if !old.is_empty() => {
-                                        crate::live_refresh::merge_sorts(&mut old, fresh);
+                                        if rerank {
+                                            crate::live_refresh::merge_sorts(&mut old, fresh);
+                                        } else {
+                                            // Background sync: every card keeps its slot and
+                                            // only its counts change, so rows never shuffle.
+                                            crate::live_refresh::patch_sorts(&mut old, &fresh);
+                                        }
                                         old
                                     }
                                     _ => fresh,

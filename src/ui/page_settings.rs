@@ -836,6 +836,32 @@ impl Creblox {
 
             ui.add_space(10.0);
 
+            // One switch for every periodic background refresh. Off means the lists and counts
+            // only move when the user loads a page, changes a tab or filter, or asks for a
+            // refresh: no timer re-fetches anything.
+            let mut auto_refresh = self.settings.auto_refresh;
+            if ui
+                .checkbox(&mut auto_refresh, "Automatic background refresh")
+                .changed()
+            {
+                self.settings.auto_refresh = auto_refresh;
+                save_needed = true;
+                self.status = if auto_refresh {
+                    "Automatic background refresh on.".to_string()
+                } else {
+                    "Automatic background refresh off: lists only change when you ask."
+                        .to_string()
+                };
+            }
+            ui.label(
+                RichText::new(
+                    "Silently update game lists, player counts, and friends activity in the background",
+                )
+                .size(12.0)
+                .color(p.muted),
+            );
+            ui.add_space(10.0);
+
             let mut startup_enabled = self.settings.start_with_windows;
             if ui
                 .checkbox(

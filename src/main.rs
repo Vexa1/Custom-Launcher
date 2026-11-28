@@ -32,6 +32,7 @@ mod platform;
 mod playtime;
 mod profile_cache;
 mod ram_budget;
+mod refresh_policy;
 mod release_links;
 mod roblox_process;
 mod scroll;

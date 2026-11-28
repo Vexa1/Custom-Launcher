@@ -57,6 +57,9 @@ pub struct Settings {
     pub auto_check_updates: bool,
     /// Download an available update automatically; installing still needs a click.
     pub auto_download_updates: bool,
+    /// Silently re-fetch game lists, player counts and friends activity in the background.
+    /// Off means data is only fetched on load, tab change, filter change or an explicit refresh.
+    pub auto_refresh: bool,
     /// Show the server region popup on top of the Roblox game window.
     pub overlay_enabled: bool,
     /// 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
@@ -168,6 +171,7 @@ impl Default for Settings {
             notifications_silent: false,
             auto_check_updates: true,
             auto_download_updates: false,
+            auto_refresh: true,
             overlay_enabled: true,
             overlay_corner: 3,
             overlay_duration_secs: 10,

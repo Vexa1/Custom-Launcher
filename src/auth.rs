@@ -294,6 +294,7 @@ pub fn load_settings() -> Settings {
         notifications_silent: v["notifications_silent"].as_bool().unwrap_or(false),
         auto_check_updates: v["auto_check_updates"].as_bool().unwrap_or(true),
         auto_download_updates: v["auto_download_updates"].as_bool().unwrap_or(false),
+        auto_refresh: v["auto_refresh"].as_bool().unwrap_or(true),
         overlay_enabled: v["overlay_enabled"]
             .as_bool()
             .unwrap_or(def.overlay_enabled),
@@ -538,6 +539,7 @@ pub fn save_settings(s: &Settings) {
         "notifications_silent": s.notifications_silent,
         "auto_check_updates": s.auto_check_updates,
         "auto_download_updates": s.auto_download_updates,
+        "auto_refresh": s.auto_refresh,
         "overlay_enabled": s.overlay_enabled,
         "overlay_corner": s.overlay_corner,
         "overlay_duration_secs": s.overlay_duration_secs,

@@ -161,8 +161,14 @@ pub fn fetch_inventory_thumbnails(
             .call()
             .ok()?
             .into_reader()
+            // Same caps as the game covers: an icon is drawn at 150x150 and must not be able
+            // to allocate a budget-breaking picture.
+            .take(crate::thumb_pipeline::MAX_IMAGE_BYTES)
             .read_to_end(&mut bytes)
             .ok()?;
+        if !crate::api::image_dimensions_fit(&bytes) {
+            return None;
+        }
         let image = image::load_from_memory(&bytes).ok()?;
         let rgba = image.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
@@ -1839,6 +1845,23 @@ pub fn download_gallery_images(urls: Vec<String>) -> Vec<(String, egui::ColorIma
     decode_images(urls.into_iter().map(|url| (url, target)).collect(), false)
 }
 
+/// Whether an encoded image's header says it is small enough to decode inside the budget.
+///
+/// Every image path in the app goes through this before calling into `image`: the RAM budget
+/// counts bytes after a decode, so the decoder's own full-size allocation is the one place a
+/// single picture could still dwarf the ceiling. A header that cannot be parsed returns `true`
+/// and leaves the download byte cap as the only bound, which is what the app did before.
+pub fn image_dimensions_fit(bytes: &[u8]) -> bool {
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok());
+    match dimensions {
+        Some((width, height)) => crate::thumb_pipeline::decode_fits(width, height),
+        None => true,
+    }
+}
+
 fn decode_images(
     items: Vec<(String, [u32; 2])>,
     crop: bool,
@@ -1858,19 +1881,10 @@ fn decode_images(
             .read_to_end(&mut bytes)
             .ok()?;
         // The decoder allocates w*h*4 before the resize below, so a picture that would blow
-        // the whole RAM budget in one worker is refused here. Dimensions come from the header;
-        // when a header cannot be parsed, the byte cap above is the only bound, as before.
-        let dimensions = image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok());
-        if let Some((width, height)) = dimensions {
-            if !crate::thumb_pipeline::decode_fits(width, height) {
-                crate::auth::log(&format!(
-                    "thumb: refused a {width}x{height} decode for {url}"
-                ));
-                return None;
-            }
+        // the whole RAM budget in one worker is refused here.
+        if !image_dimensions_fit(&bytes) {
+            crate::auth::log(&format!("thumb: refused an oversized decode for {url}"));
+            return None;
         }
         let image = image::load_from_memory(&bytes).ok()?;
         // Downscale once, on the worker: the texture the UI uploads is never bigger than the
