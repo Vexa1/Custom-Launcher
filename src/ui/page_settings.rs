@@ -14,6 +14,7 @@ use crate::theme::{
 use crate::tray::set_startup;
 use crate::types::{Action, BgMode, Settings, TextColorMode};
 use crate::ui::page_login::draw_login_marquee;
+use crate::ui::update_card;
 use crate::ui::widgets::*;
 use crate::updater::{CREBLOX_RELEASES_URL, UpdateKind};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
@@ -3237,17 +3238,7 @@ impl Creblox {
                         }
                         if !rel.notes.is_empty() {
                             ui.add_space(6.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt("creblox_release_notes")
-                                .max_height(110.0)
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&rel.notes).size(12.0).color(p.text),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
+                            update_card::paint_notes(ui, &rel.notes);
                         }
                     });
             } else if let Some(status) = &self.app_update_status {
@@ -3255,16 +3246,35 @@ impl Creblox {
                 ui.label(RichText::new(status).size(12.0).color(p.muted));
             }
 
-            if let Some(err) = &self.app_update_error {
+            if let Some(err) = self.app_update_error.clone() {
                 ui.add_space(6.0);
+                let build_failed = update_card::is_build_failure(&err);
+                let release_url = self
+                    .app_update_available
+                    .as_ref()
+                    .map(|rel| rel.html_url.clone());
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(err).size(12.0).color(crate::theme::text_ink(ui, ORANGE)));
-                    if let Some(rel) = &self.app_update_available {
+                    ui.label(RichText::new(&err).size(12.0).color(crate::theme::text_ink(ui, ORANGE)));
+                    if let Some(url) = release_url {
                         if ui.small_button("Download in Browser").clicked() {
-                            acts.push(Action::OpenUrl(rel.html_url.clone()));
+                            acts.push(Action::OpenUrl(url));
+                        }
+                    }
+                    if build_failed {
+                        let label = if self.app_update_error_open {
+                            "Hide Error Log"
+                        } else {
+                            "View Error Log"
+                        };
+                        if ui.small_button(label).clicked() {
+                            self.app_update_error_open = !self.app_update_error_open;
                         }
                     }
                 });
+                if build_failed && self.app_update_error_open {
+                    ui.add_space(4.0);
+                    update_card::paint_log(ui, &self.app_update_error_log);
+                }
             }
         });
     }

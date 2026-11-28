@@ -53,8 +53,11 @@ cargo test --locked --manifest-path vm-tests/Cargo.toml --test overlay_ping_e2e
 echo "== vm-tests: UI screenshots rendered to vm-tests/artifacts/"
 cargo test --locked --manifest-path vm-tests/Cargo.toml --test shots
 
-echo "== creblox: compiles for the macOS release target"
-cargo check --locked --target x86_64-apple-darwin
+# `--all-targets` is deliberate: the app binary, its test target and every extra binary are
+# checked for the release OS. A plain `cargo check` hid a macOS-only error behind
+# CREBLOX_SKIP_LINK_GATE once (the 0.5.63 build failure users hit while installing).
+echo "== creblox: every target compiles for the macOS release target"
+cargo check --locked --target x86_64-apple-darwin --all-targets
 
 # Same trick as above for Windows: the C parts of the Windows build (ring, mimalloc) need a
 # cross cc, and zig's mingw-w64 backend is one. On a Windows host these variables are unset,

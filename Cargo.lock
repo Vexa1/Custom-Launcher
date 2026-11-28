@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "creblox"
-version = "0.5.68"
+version = "0.5.69"
 dependencies = [
  "aes-gcm",
  "eframe",

@@ -807,7 +807,7 @@ fn install_macos_update_in_app(
     )?;
     if !status.success() {
         return Err(format!(
-            "The build failed (exit {}). Open Details for the output.",
+            "The build failed (exit {}). Open the error log for the output.",
             status.code().unwrap_or(-1)
         ));
     }

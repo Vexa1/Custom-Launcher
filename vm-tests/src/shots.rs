@@ -277,6 +277,20 @@ impl Default for Harness {
 impl Harness {
     pub fn new() -> Self {
         let ctx = egui::Context::default();
+        // The app installs a "Bold" family in `theme::install_fonts`; the harness has only the
+        // default fonts, so alias it to the proportional chain. Without this every heading and
+        // every **bold** run in real widget code (`font_section`, notes spans) draws tofu.
+        let mut fonts = egui::FontDefinitions::default();
+        if let Some(chain) = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+        {
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("Bold".into()), chain);
+        }
+        ctx.set_fonts(fonts);
         ctx.all_styles_mut(|style| {
             style.visuals = egui::Visuals::dark();
             style.visuals.panel_fill = crate::screens::BG();

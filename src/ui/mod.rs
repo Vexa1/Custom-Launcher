@@ -12,4 +12,5 @@ pub mod page_profile;
 pub mod page_search;
 pub mod page_settings;
 pub mod party;
+pub mod update_card;
 pub mod widgets;

@@ -110,6 +110,7 @@ pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
         ("party", party),
         ("settings", settings),
         ("settings-animations", settings_animations),
+        ("settings-updates", settings_updates),
         ("updater", updater),
         ("overlay", overlay),
         ("inventory", inventory),
@@ -1220,6 +1221,76 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     );
                 });
             });
+        });
+    });
+}
+
+/// The Launcher Updates card: formatted release notes with a Details drawer, and a failed
+/// local build whose compiler output is one click away.
+pub fn settings_updates(ui: &mut egui::Ui, probe: &mut Probe) {
+    const NOTES: &str = "## What changed\n\n- **Disabled controls** no longer hint at the accent.\n- Overlay images drag from one press-resolved hitbox.\n- Arrow keys move the segmented picker.\n\n## Downloads\n\n- Quick update: https://github.com/Vexa1/Custom-Launcher/raw/main/release/CREBLOX-0.5.69-update.zip\n- SHA-256: `768b0f92ee77f646b486ba9570cc8649650a1a532bddb7c4efce260b9ee7b52c`";
+    const LOG: &[&str] = &[
+        "   Compiling creblox v0.5.69",
+        "error[E0308]: mismatched types",
+        "  --> src/overlay_window.rs:2041:9",
+        "   |",
+        "41 |     ctx.send_viewport_cmd(command)",
+        "   |         ^^^^^^^^^^^^^^^^^^^^^^^^ expected `ViewportCommand`, found `Command`",
+        "error: could not compile `creblox` (bin \"creblox\") due to 1 previous error",
+    ];
+    shell(ui, probe, "settings", |ui, probe| {
+        heading(ui, probe, "settings.title", "Settings", 22.0);
+        ui.add_space(10.0);
+        card_min(ui, probe, "settings.updates.available", 940.0, 0.0, |ui, probe| {
+            heading(
+                ui,
+                probe,
+                "settings.updates.available.title",
+                "New version ready: v0.5.69",
+                14.0,
+            );
+            ui.add_space(6.0);
+            crate::update_card::paint_notes(ui, NOTES);
+        });
+        ui.add_space(14.0);
+        card_min(ui, probe, "settings.updates.error", 940.0, 0.0, |ui, probe| {
+            heading(
+                ui,
+                probe,
+                "settings.updates.error.title",
+                "Launcher Updates",
+                14.0,
+            );
+            ui.add_space(6.0);
+            body(
+                ui,
+                probe,
+                "settings.updates.error.text",
+                "The build failed (exit 101). Open the error log for the output.",
+                ink(ORANGE),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                probe.button(
+                    ui,
+                    "settings.updates.error.browser",
+                    "Download in Browser",
+                    Vec2::new(142.0, 28.0),
+                    SURFACE(),
+                    TEXT(),
+                );
+                probe.button(
+                    ui,
+                    "settings.updates.error.log",
+                    "Hide Error Log",
+                    Vec2::new(104.0, 28.0),
+                    SURFACE(),
+                    TEXT(),
+                );
+            });
+            ui.add_space(6.0);
+            let lines: Vec<String> = LOG.iter().map(|line| line.to_string()).collect();
+            crate::update_card::paint_log(ui, &lines);
         });
     });
 }

@@ -62,6 +62,9 @@ pub mod net_probe;
 #[path = "../../src/ui/controls.rs"]
 pub mod controls;
 
+#[path = "../../src/ui/update_card.rs"]
+pub mod update_card;
+
 #[path = "../../src/overlay_spec.rs"]
 pub mod overlay_spec;
 

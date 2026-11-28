@@ -17,6 +17,13 @@ cd "$(dirname "$0")/.."
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [[ -n "$VERSION" ]] || { echo "Could not read version from Cargo.toml" >&2; exit 1; }
 
+# --- Compile gate ---------------------------------------------------------
+# The link gate below can be skipped on a host without a Mach-O linker, but a shipped source
+# archive must still compile for macOS on every target. This is the check that would have
+# caught the 0.5.63 update that downloaded fine and then failed to build on the user's Mac.
+echo "== package gate: every macOS target compiles"
+cargo check --locked --target x86_64-apple-darwin --all-targets
+
 # --- Release link gate ----------------------------------------------------
 # These archives are what users download. Never write them from a tree that was
 # only `cargo check`ed: prove the real Catalina link runs cc/ld first and abort
@@ -27,7 +34,7 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 # on stderr every time, so an unverified archive is never a silent one.
 if [[ "${CREBLOX_SKIP_LINK_GATE:-0}" == "1" ]]; then
     printf '\nwarning: CREBLOX_SKIP_LINK_GATE=1 - the x86_64 Catalina link was NOT verified.\n' >&2
-    printf '         These archives must still be built once on macOS before publishing.\n\n' >&2
+    printf '         The macOS targets were compile-checked; the final link was not.\n\n' >&2
 else
     scripts/verify-release-link.sh
 fi

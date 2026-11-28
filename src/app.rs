@@ -217,6 +217,9 @@ pub struct Creblox {
     /// Live stage and streamed output of the in-app installer (no Terminal window).
     pub app_update_install: Option<crate::updater::UpdateProgress>,
     pub app_update_error: Option<String>,
+    /// Installer/compiler output kept after a failed install so the error row can expand it.
+    pub app_update_error_log: Vec<String>,
+    pub app_update_error_open: bool,
     pub update_token_input: String,
     pub update_token_saved: bool,
     pub app_patch_applied: Option<String>,
@@ -577,6 +580,8 @@ impl Creblox {
             app_update_installing: false,
             app_update_install: None,
             app_update_error: None,
+            app_update_error_log: Vec::new(),
+            app_update_error_open: false,
             update_token_input: String::new(),
             update_token_saved: crate::updater::has_github_update_token(),
             app_patch_applied: None,
@@ -906,6 +911,8 @@ impl Creblox {
             return;
         };
         self.app_update_error = None;
+        self.app_update_error_log.clear();
+        self.app_update_error_open = false;
         self.app_update_installing = true;
         self.app_update_status = Some(format!("Installing v{version}..."));
         self.status = format!("Installing CREBLOX v{version}...");
@@ -914,11 +921,16 @@ impl Creblox {
         let progress = crate::updater::UpdateProgress::new();
         self.app_update_install = Some(progress.clone());
         let ctx = self.ctx.clone();
+        let log_source = progress.clone();
         self.spawn(move || {
-            Msg::AppInstallDone(
-                version.clone(),
-                crate::updater::install_update_in_app(&zip, &version, &progress, &ctx),
-            )
+            let result = crate::updater::install_update_in_app(&zip, &version, &progress, &ctx);
+            // Keep the compiler output even though the live progress is dropped on failure.
+            let lines = log_source
+                .log()
+                .lock()
+                .map(|lines| lines.clone())
+                .unwrap_or_default();
+            Msg::AppInstallDone(version.clone(), result, lines)
         });
     }
 
@@ -967,6 +979,8 @@ impl Creblox {
         }
         self.app_update_checking = true;
         self.app_update_error = None;
+        self.app_update_error_log.clear();
+        self.app_update_error_open = false;
         if manual {
             self.app_update_status = Some("Checking GitHub releases...".to_string());
         }
@@ -994,6 +1008,8 @@ impl Creblox {
             self.app_update_progress = Some((Arc::clone(&downloaded), Arc::clone(&total)));
             self.app_update_downloading = true;
             self.app_update_error = None;
+            self.app_update_error_log.clear();
+            self.app_update_error_open = false;
             self.app_update_zip = None;
             self.app_update_status = Some(format!("Downloading v{ver}..."));
             let ctx = self.ctx.clone();
@@ -4309,7 +4325,7 @@ impl Creblox {
                         }
                     }
                 }
-                Msg::AppInstallDone(ver, res) => match res {
+                Msg::AppInstallDone(ver, res, log) => match res {
                     Ok(()) => {
                         self.app_update_status =
                             Some(format!("Restarting CREBLOX v{ver}..."));
@@ -4324,6 +4340,12 @@ impl Creblox {
                         self.app_update_installing = false;
                         self.app_update_install = None;
                         self.app_update_error = Some(e.clone());
+                        self.app_update_error_log = if log.is_empty() {
+                            vec![e.clone()]
+                        } else {
+                            log
+                        };
+                        self.app_update_error_open = false;
                         self.app_update_status = None;
                         self.status = format!("Update failed: {e}");
                     }
