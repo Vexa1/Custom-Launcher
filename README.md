@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.30
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.31
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -414,6 +414,12 @@ and shows *"End of chart"* only when the API sends no cursor.
   maximum is the pill past the en dash. An empty, `Max` or `0` ceiling
   (`FilterBox::edited_ceiling`) means no upper limit, so `<= 500` or `<= 5,000` is one number
   away. Clear empties both pills along with Like % and Visits.
+- **Typed numbers are exact and unclamped.** `parse_filter_amount` takes plain digits,
+  separators and `k`/`m`/`b`, and the filter keeps the value - `10` filters by 10, `500K` by
+  500,000. Only the rail's thumb is bounded: `rail_position(value, rail_max)` is a display copy
+  clamped to the slider's span, so egui's own snap-to-step and range clamp can no longer rewrite
+  a typed value (which used to turn `10` into 0 and `500K` into `100K`). `in_player_range`
+  keeps the band inclusive at both ends.
 - **Centred pills.** A filter pill paints its own rounded frame and hosts a frameless text box
   in a centred, justified child with `TextEdit::align(CENTER_CENTER)`, so a two-character value
   sits in the middle of the box instead of the top-left corner - hint text takes the same

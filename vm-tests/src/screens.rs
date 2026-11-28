@@ -530,11 +530,11 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                         .inner;
                     probe.widget("charts.f.players.rail", rail.rect, true);
                     ui.add_space(6.0);
-                    pill(ui, probe, "charts.f.players.min", "Min", true);
+                    pill(ui, probe, "charts.f.players.min", "10", false);
                     ui.add_space(6.0);
                     dash(ui, probe);
                     ui.add_space(6.0);
-                    pill(ui, probe, "charts.f.players.max", "Max", true);
+                    pill(ui, probe, "charts.f.players.max", "500K", false);
                 },
             );
 
@@ -617,7 +617,7 @@ fn charts_filter_bar(ui: &mut egui::Ui, probe: &mut Probe) {
                         .inner;
                     probe.widget("charts.f.visits.rail", rail.rect, true);
                     ui.add_space(6.0);
-                    pill(ui, probe, "charts.f.visits", "Min", true);
+                    pill(ui, probe, "charts.f.visits", "0", true);
                 },
             );
 

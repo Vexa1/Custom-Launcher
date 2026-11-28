@@ -24,6 +24,9 @@ fn mix(mut h: u64, v: u64) -> u64 {
 /// Width of a filter pill (the rounded box you type in) and its height.
 const VALUE_BOX_W: f32 = 64.0;
 const PILL_H: f32 = 26.0;
+/// What the rails span. Only the thumb is bounded by these; the filters keep the typed value.
+const PLAYERS_RAIL_MAX: u64 = 100_000;
+const VISITS_RAIL_MAX: u64 = 100_000_000;
 /// The en dash between the two player pills, the gap between filter groups, and Clear's width.
 const DASH_W: f32 = 14.0;
 const GAP: f32 = 8.0;
@@ -217,13 +220,17 @@ impl Creblox {
                     let rail_w =
                         (ui.available_width() - VALUE_BOX_W * 2.0 - DASH_W - 18.0).max(72.0);
                     ui.spacing_mut().slider_width = rail_w;
+                    // The rail is a copy: egui clamps and snaps whatever value it is given,
+                    // which would otherwise rewrite a typed `10` to 0 and `500K` to 100K.
+                    let mut rail_pos =
+                        crate::chart_feed::rail_position(min_players, PLAYERS_RAIL_MAX);
                     let slider_changed = ui
                         .scope(|ui| {
                             ui.visuals_mut().widgets.inactive.bg_fill = rail;
                             ui.visuals_mut().widgets.hovered.bg_fill = rail;
                             ui.visuals_mut().widgets.active.bg_fill = rail;
                             ui.add(
-                                egui::Slider::new(&mut min_players, 0..=100_000u32)
+                                egui::Slider::new(&mut rail_pos, 0.0..=PLAYERS_RAIL_MAX as f64)
                                     .step_by(50.0)
                                     .show_value(false),
                             )
@@ -231,6 +238,9 @@ impl Creblox {
                         })
                         .inner
                         .changed();
+                    if slider_changed {
+                        min_players = rail_pos as u64;
+                    }
                     ui.add_space(6.0);
                     let edit = filter_pill(
                         ui,
@@ -242,7 +252,7 @@ impl Creblox {
                     // stay exactly as typed.
                     if edit.changed() {
                         if let Some(v) = players_box.edited_value() {
-                            min_players = v.min(u32::MAX as u64) as u32;
+                            min_players = v;
                         }
                     }
                     if slider_changed {
@@ -263,7 +273,7 @@ impl Creblox {
                     // An empty box, \"Max\" or 0 means no upper limit at all.
                     if max_edit.changed() {
                         if let Some(ceiling) = max_players_box.edited_ceiling() {
-                            max_players = ceiling.map(|v| v.min(u32::MAX as u64) as u32);
+                            max_players = ceiling;
                         }
                     }
                     if max_edit.lost_focus() {
@@ -314,13 +324,16 @@ impl Creblox {
                     ui.add_space(6.0);
                     let rail_w = (ui.available_width() - VALUE_BOX_W - 6.0).max(72.0);
                     ui.spacing_mut().slider_width = rail_w;
+                    // Same display-only copy as the Players rail: a typed `55` stays 55.
+                    let mut rail_pos =
+                        crate::chart_feed::rail_position(min_visits, VISITS_RAIL_MAX);
                     let slider_changed = ui
                         .scope(|ui| {
                             ui.visuals_mut().widgets.inactive.bg_fill = rail;
                             ui.visuals_mut().widgets.hovered.bg_fill = rail;
                             ui.visuals_mut().widgets.active.bg_fill = rail;
                             ui.add(
-                                egui::Slider::new(&mut min_visits, 0..=100_000_000u64)
+                                egui::Slider::new(&mut rail_pos, 0.0..=VISITS_RAIL_MAX as f64)
                                     .step_by(100_000.0)
                                     .show_value(false),
                             )
@@ -328,6 +341,9 @@ impl Creblox {
                         })
                         .inner
                         .changed();
+                    if slider_changed {
+                        min_visits = rail_pos as u64;
+                    }
                     ui.add_space(6.0);
                     let edit = filter_pill(
                         ui,
@@ -422,7 +438,7 @@ impl Creblox {
         sig = mix(sig, self.feed_shuffled as u64);
         sig = mix(sig, min_players as u64);
         // 0 already means "no ceiling" in the hash, so a set ceiling is biased by one.
-        sig = mix(sig, max_players.map_or(0, |v| v as u64 + 1));
+        sig = mix(sig, max_players.map_or(0, |v| v.wrapping_add(1)));
         sig = mix(sig, min_rating as u64);
         sig = mix(sig, min_visits);
         sig = mix(sig, self.game_visits.len() as u64);
@@ -524,8 +540,8 @@ impl Creblox {
     /// it. Results are cached in `feed_pool` so drawing is a plain slice read.
     fn rebuild_feed_pool(
         &mut self,
-        min_players: u32,
-        max_players: Option<u32>,
+        min_players: u64,
+        max_players: Option<u64>,
         min_rating: u8,
         min_visits: u64,
     ) {
@@ -550,10 +566,7 @@ impl Creblox {
                 refs.sort_unstable_by(|a, b| b.playing.cmp(&a.playing));
             }
             refs.retain(|g| {
-                if g.playing < min_players as u64 {
-                    return false;
-                }
-                if max_players.is_some_and(|max| g.playing > max as u64) {
+                if !crate::chart_feed::in_player_range(g.playing, min_players, max_players) {
                     return false;
                 }
                 let votes = g.up + g.down;

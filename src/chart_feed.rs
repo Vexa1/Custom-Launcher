@@ -106,6 +106,19 @@ pub fn parse_filter_amount(raw: &str) -> Option<u64> {
     Some((value * multiplier).round() as u64)
 }
 
+/// Where the rail's thumb sits for a filter value: clamped to the slider's range, because a
+/// slider can only draw what it spans. The filter value itself is never clamped - typing
+/// `500k` filters by 500,000 even though the rail stops at 100,000.
+pub fn rail_position(value: u64, max: u64) -> f64 {
+    value.min(max) as f64
+}
+
+/// Whether a game's player count is inside the Player filters: at least `min` and, when a
+/// ceiling is set, at most it. `None` is no upper limit, so `min` alone matches everything.
+pub fn in_player_range(playing: u64, min: u64, max: Option<u64>) -> bool {
+    playing >= min && !max.is_some_and(|max| playing > max)
+}
+
 /// One filter's text buffer.
 ///
 /// The buffer is owned by the app and lives across frames, which is the whole point: a box the

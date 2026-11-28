@@ -65,9 +65,10 @@ pub struct Creblox {
     /// Which settings section is open (0 accounts ... 7 updates). Runtime only.
     pub settings_section: u8,
     /// Chart filters: minimum players online and minimum like percentage.
-    pub chart_min_players: u32,
+    /// No clamping here: the rail's thumb is clamped when it is drawn, the filter is not.
+    pub chart_min_players: u64,
     /// No upper limit until the user types a maximum into its pill.
-    pub chart_max_players: Option<u32>,
+    pub chart_max_players: Option<u64>,
     pub chart_min_rating: u8,
     /// How many games each Home row shows; grows as you keep asking for more.
     /// Charts feed: natural order until the user asks for a shuffle.
