@@ -601,7 +601,9 @@ impl Creblox {
                     ui.set_width((ui.available_width() - 4.0).max(260.0));
                     ui.label(RichText::new("Passes").size(17.0).strong());
                     ui.add_space(10.0);
-                    if self.game_passes_loading {
+                    // A load in flight is only shown while there is nothing to show: passes
+                    // that already arrived stay on screen at full brightness.
+                    if self.game_passes_loading && ex.is_none_or(|e| e.passes.is_empty()) {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label("Loading passes from Roblox...");
@@ -1386,7 +1388,9 @@ impl Creblox {
                             }
                         }
                     }
-                    if self.game_servers_loading {
+                    // Same rule as the passes: a refresh behind an existing server list is
+                    // silent, so the spinner is only for the first load of an empty list.
+                    if self.game_servers_loading && ex.is_none_or(|e| e.servers.is_empty()) {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.spinner();

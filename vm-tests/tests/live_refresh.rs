@@ -6,6 +6,7 @@
 //! flight, then merges the new numbers in place.
 
 use creblox_vm_tests::live_refresh::{self, Freshness, Phase};
+use creblox_vm_tests::thumb_alias::{self, Aliases};
 use creblox_vm_tests::types::{Game, Sort};
 use std::collections::{HashMap, HashSet};
 
@@ -28,10 +29,15 @@ fn game(id: u64, playing: u64) -> Game {
 /// The launcher's thumbnail pool: `universe_id -> image URL`, exactly what `request_thumbs`
 /// consults before spending a request.
 fn thumbs(games: &[Game]) -> HashMap<u64, String> {
-    games
-        .iter()
-        .map(|g| (g.universe_id, format!("https://cdn.example/{}.png", g.universe_id)))
-        .collect()
+    games.iter().map(|g| (g.universe_id, url(g.universe_id))).collect()
+}
+
+fn url(id: u64) -> String {
+    format!("https://cdn.example/{id}.png")
+}
+
+fn ids(games: &[Game]) -> Vec<u64> {
+    games.iter().map(|g| g.universe_id).collect()
 }
 
 /// Mirrors `request_thumbs`: only ids without a URL are fetched.
@@ -54,7 +60,7 @@ fn a_refresh_over_populated_home_keeps_cards_and_textures() {
 
     // A background refresh starts. Nothing is cleared and no skeleton appears.
     freshness.request();
-    assert!(freshness.is_silent());
+    assert_eq!(freshness.phase(), Phase::Silent);
     assert!(!freshness.skeleton(recent.len()));
     assert_eq!(
         recent.iter().map(|g| g.universe_id).collect::<Vec<_>>(),
@@ -140,7 +146,6 @@ fn a_first_load_becomes_silent_once_it_has_data() {
 
     freshness.request();
     assert_eq!(freshness.phase(), Phase::Silent);
-    assert!(freshness.is_silent());
     freshness.succeed();
     assert_eq!(freshness.phase(), Phase::Ready);
 
@@ -271,7 +276,7 @@ fn game_details_revalidate_without_losing_the_open_game() {
     freshness.succeed();
 
     freshness.request();
-    assert!(freshness.is_silent());
+    assert_eq!(freshness.phase(), Phase::Silent);
     assert_eq!(open.universe_id, 42, "the page does not change game");
     assert!(hero.contains_key(&42), "the hero image is still cached");
     assert_eq!(would_fetch(&hero, std::slice::from_ref(&open)), Vec::<u64>::new());
@@ -287,4 +292,95 @@ fn game_details_revalidate_without_losing_the_open_game() {
     assert_eq!(open.name, "Game 42", "identity does not change");
     assert_eq!(open.universe_id, 42);
     assert_eq!(freshness.phase(), Phase::Ready);
+}
+
+/// A refresh over a populated row must produce no "grey" state at all: no skeleton, no hint
+/// row, the same card indices, and the same texture handles until the replacements exist.
+#[test]
+fn a_silent_refresh_keeps_cards_bright_and_their_textures_until_ready() {
+    let mut recent = vec![game(1, 10), game(2, 20), game(3, 30)];
+    let indices = ids(&recent);
+    let mut textures: HashMap<String, u64> = HashMap::from([
+        (url(1), 101),
+        (url(2), 102),
+        (url(3), 103),
+    ]);
+    let mut aliases = Aliases::new();
+    let mut freshness = Freshness::default();
+    freshness.succeed();
+
+    // The fetch starts. Zero grey/dim state: no skeleton over loaded cards, no index moves.
+    freshness.request();
+    assert_eq!(freshness.phase(), Phase::Silent);
+    assert!(!freshness.skeleton(recent.len()));
+    assert_eq!(ids(&recent), indices, "no card moved when the fetch started");
+    for (id, handle) in [(1, 101u64), (2, 102), (3, 103)] {
+        assert_eq!(
+            thumb_alias::find(&textures, &aliases, &url(id)),
+            Some(&handle),
+            "card {id} still paints its loaded texture"
+        );
+    }
+
+    // The refresh hands game 1 a new thumbnail URL; the card keeps the old handle while the
+    // replacement decodes rather than dropping to a placeholder.
+    let fresh_url = "https://cdn.example/1-v2.png".to_string();
+    thumb_alias::record(&mut aliases, &fresh_url, &url(1));
+    let published = thumb_alias::published(&textures, &aliases);
+    assert_eq!(published.get(&fresh_url), Some(&101));
+
+    let fresh = vec![game(1, 110), game(2, 220), game(3, 330)];
+    live_refresh::apply_refresh(&mut recent, Some(fresh));
+    assert_eq!(ids(&recent), indices, "numbers merge in place, indices do not move");
+    assert_eq!(recent[0].players_text, "110 playing");
+    assert_eq!(recent[2].players_text, "330 playing");
+    assert_eq!(
+        published.get(&fresh_url),
+        Some(&101),
+        "the old handle is still what the card paints"
+    );
+
+    // Decode + upload finished: the very next publication paints the new handle, on one frame.
+    textures.insert(fresh_url.clone(), 201);
+    let published = thumb_alias::published(&textures, &aliases);
+    assert_eq!(published.get(&fresh_url), Some(&201));
+    assert_eq!(published.get(&url(1)), Some(&101), "the old URL is untouched");
+
+    freshness.succeed();
+    assert_eq!(freshness.phase(), Phase::Ready);
+    assert!(!freshness.skeleton(recent.len()));
+    assert!(!freshness.skeleton(0), "and no skeleton once it is empty either");
+}
+
+/// A URL replaced twice in a session still resolves to the newest decoded image, with no gap.
+#[test]
+fn a_thumbnail_replaced_twice_never_shows_a_gap() {
+    let mut textures: HashMap<String, u64> = HashMap::from([("v0".to_string(), 7)]);
+    let mut aliases = Aliases::new();
+    thumb_alias::record(&mut aliases, "v1", "v0");
+    thumb_alias::record(&mut aliases, "v2", "v1");
+
+    let published = thumb_alias::published(&textures, &aliases);
+    assert_eq!(published.get("v2"), Some(&7));
+    assert_eq!(published.get("v1"), Some(&7));
+
+    textures.insert("v1".into(), 8);
+    let published = thumb_alias::published(&textures, &aliases);
+    assert_eq!(published.get("v1"), Some(&8));
+    assert_eq!(published.get("v2"), Some(&8), "the newest decoded image wins");
+    assert_eq!(thumb_alias::find(&HashMap::<String, u64>::new(), &aliases, "v2"), None);
+}
+
+/// The ranked grid takes the fresh numbers at the positions it already shows.
+#[test]
+fn a_silent_charts_refresh_updates_numbers_without_reordering_the_grid() {
+    let mut pool = vec![game(3, 300), game(2, 200), game(1, 100)];
+    let fresh = vec![game(3, 330), game(2, 220), game(1, 110), game(9, 900)];
+    let stats = live_refresh::patch_games(&mut pool, &fresh);
+
+    assert_eq!(stats.updated, 3);
+    assert_eq!(stats.added, 0, "a newcomer waits for the pool rebuild, not a jump");
+    assert_eq!(ids(&pool), vec![3, 2, 1], "no card moves under the pointer");
+    assert_eq!(pool[2].playing, 110, "the numbers did follow the refresh");
+    assert_eq!(pool[2].players_text, "110 playing");
 }

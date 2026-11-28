@@ -76,11 +76,6 @@ impl Freshness {
         }
     }
 
-    /// A refresh is running behind data that is already on screen.
-    pub fn is_silent(&self) -> bool {
-        self.phase() == Phase::Silent
-    }
-
     /// Whether to draw a skeleton/spinner for a list of `visible` items. Never over real cards.
     pub fn skeleton(&self, visible: usize) -> bool {
         visible == 0 && self.phase() == Phase::FirstLoad
@@ -156,6 +151,29 @@ fn trim_to_row_cap(games: &mut Vec<Game>, listed: &HashSet<u64>) {
             .unwrap_or(games.len() - 1);
         games.remove(victim);
     }
+}
+
+/// Updates the numbers of cards already on screen, matching by `universe_id`, without moving
+/// any of them and without appending newcomers.
+///
+/// This is the ranked-grid path: the grid has to follow the fresh numbers, but re-sorting it
+/// would drag cards out from under the pointer. A card that is still in the catalogue takes the
+/// fresh game at the position it already holds; new games and a genuinely new ranking arrive
+/// through `merge_sorts` and the next pool rebuild.
+pub fn patch_games(old: &mut [Game], fresh: &[Game]) -> MergeStats {
+    let mut stats = MergeStats {
+        updated: 0,
+        added: 0,
+        kept: old.len(),
+    };
+    let mut by_id: HashMap<u64, &Game> = fresh.iter().map(|g| (g.universe_id, g)).collect();
+    for game in old.iter_mut() {
+        if let Some(fresh_game) = by_id.remove(&game.universe_id) {
+            *game = fresh_game.clone();
+            stats.updated += 1;
+        }
+    }
+    stats
 }
 
 /// Merges a fresh page of sorts into the ones on screen, matching sorts by title.

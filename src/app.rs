@@ -100,6 +100,9 @@ pub struct Creblox {
     /// Image URLs in the current download batch, so a failure can be forgotten (and asked
     /// for again) instead of leaving a card on its placeholder forever.
     pub thumb_downloading: HashSet<String>,
+    /// New image URL -> the URL it replaced. A card keeps painting its old texture until the
+    /// replacement is decoded and uploaded, so a refreshed thumbnail never flashes a grey box.
+    pub thumb_aliases: crate::thumb_alias::Aliases,
     /// Set when a section button is clicked, consumed by the page scroll area.
     pub scroll_to_top: bool,
     /// Cursor, dedupe set and back-off for the charts feed's infinite scroll.
@@ -146,11 +149,9 @@ pub struct Creblox {
     pub last_sorts_sync: Option<Instant>,
     pub last_saved_sync: Option<Instant>,
     pub last_auth_sync: Option<Instant>,
-    /// Only a refresh the user asked for may show the home loading spinner;
-    /// background auto-syncs stay invisible.
-    pub home_sync_spinner: bool,
     /// Stale-while-revalidate state: Home sections, the Charts catalogue, one game's details.
-    /// A refresh behind data never blanks the page, so these only decide hints vs skeletons.
+    /// A refresh behind data never blanks the page; only the first load of an empty page may
+    /// ever draw a skeleton.
     pub home_freshness: crate::live_refresh::Freshness,
     pub charts_freshness: crate::live_refresh::Freshness,
     pub game_freshness: crate::live_refresh::Freshness,
@@ -471,6 +472,7 @@ impl Creblox {
             thumb_tex_dirty: false,
             thumb_in_flight: false,
             thumb_downloading: HashSet::new(),
+            thumb_aliases: crate::thumb_alias::Aliases::new(),
             scroll_to_top: false,
             chart_feed: crate::chart_feed::ChartFeed::default(),
             chart_players_box: crate::chart_feed::FilterBox::default(),
@@ -505,7 +507,6 @@ impl Creblox {
             last_sorts_sync: None,
             last_saved_sync: None,
             last_auth_sync: None,
-            home_sync_spinner: false,
             home_freshness: crate::live_refresh::Freshness::default(),
             charts_freshness: crate::live_refresh::Freshness::default(),
             game_freshness: crate::live_refresh::Freshness::default(),
@@ -739,6 +740,26 @@ impl Creblox {
         self.spawn(move || {
             Msg::ChartMore(crate::api::fetch_sorts_more(&sid, cookie.as_deref(), &token))
         });
+    }
+
+    /// Applies a silent catalogue refresh to the ranked grid without re-sorting it.
+    ///
+    /// The grid is a cache of every chart, so its numbers have to follow the fresh data, but
+    /// re-sorting it would drag cards out from under the pointer. A card that is still in the
+    /// catalogue takes the fresh game at the position it already holds; new games and a
+    /// genuinely new ranking arrive through the pool rebuild on the next frame.
+    pub fn patch_feed_pool(&mut self) {
+        let Some(Ok(sorts)) = &self.sorts else {
+            return;
+        };
+        if self.feed_pool.is_empty() {
+            return;
+        }
+        let fresh: Vec<Game> = sorts
+            .iter()
+            .flat_map(|sort| sort.games.iter().cloned())
+            .collect();
+        crate::live_refresh::patch_games(&mut self.feed_pool, &fresh);
     }
 
     pub fn sync_sorts(&mut self, force: bool) {
@@ -1011,18 +1032,9 @@ impl Creblox {
             .map(|g| g.universe_id)
             .collect();
         self.request_thumbs(thumb_ids);
-        self.home_sync_spinner = true;
         self.sync_sorts(true);
         self.sync_saved(true);
         self.sync_auth_session(true);
-    }
-
-    fn clear_home_sync_spinner_if_idle(&mut self) {
-        if !Self::is_sync_active(&self.sorts_sync_started)
-            && !Self::is_sync_active(&self.saved_sync_started)
-        {
-            self.home_sync_spinner = false;
-        }
     }
 
     pub fn maybe_auto_sync(&mut self, ctx: &egui::Context) {
@@ -1071,7 +1083,6 @@ impl Creblox {
             &self.saved_sync_started,
             saved_interval,
         ) {
-            self.home_sync_spinner = false;
             self.sync_saved(false);
         }
         if Self::is_stale(
@@ -1079,7 +1090,6 @@ impl Creblox {
             &self.sorts_sync_started,
             sorts_interval,
         ) {
-            self.home_sync_spinner = false;
             self.sync_sorts(false);
         }
         if Self::is_stale(&self.last_auth_sync, &self.auth_sync_started, auth_interval) {
@@ -1647,7 +1657,6 @@ impl Creblox {
         self.last_sorts_sync = None;
         self.last_saved_sync = None;
         self.last_auth_sync = None;
-        self.home_sync_spinner = false;
         self.home_freshness.reset();
         self.charts_freshness.reset();
         self.game_freshness.reset();
@@ -1965,10 +1974,9 @@ impl Creblox {
         // 3. Publish the textures the cards may paint, and the URLs they must not hand back
         // to egui's loader (which would download the same image again).
         if std::mem::take(&mut self.thumb_tex_dirty) {
-            widgets::publish_thumb_textures(
-                &self.ctx,
-                std::sync::Arc::new(self.thumb_tex.clone()),
-            );
+            let published =
+                crate::thumb_alias::published(&self.thumb_tex, &self.thumb_aliases);
+            widgets::publish_thumb_textures(&self.ctx, std::sync::Arc::new(published));
         }
         if std::mem::take(&mut self.thumb_owned_dirty) {
             widgets::publish_thumb_owned(&self.ctx, std::sync::Arc::new(self.thumb_owned.clone()));
@@ -2010,6 +2018,7 @@ impl Creblox {
     pub fn reset_thumb_pipeline(&mut self) {
         self.thumb_tex_order.clear();
         self.thumb_tex.clear();
+        self.thumb_aliases.clear();
         self.thumb_tex_dirty = true;
         self.thumb_pixels.clear();
         self.thumb_owned.clear();
@@ -2080,7 +2089,6 @@ impl Creblox {
                     }
                     self.sorts_sync_started = None;
                     self.last_sorts_sync = Some(Instant::now());
-                    self.clear_home_sync_spinner_if_idle();
                     match r {
                         Ok(page) => {
                             // Stale-while-revalidate: merge into the catalogue that is on
@@ -2119,6 +2127,9 @@ impl Creblox {
                                     .collect();
                                 self.request_thumbs(ids);
                             }
+                            // The ranked grid keeps every card where it is: only the
+                            // numbers of games already on it change in place.
+                            self.patch_feed_pool();
                             self.charts_freshness.succeed();
                         }
                         Err(e) => {
@@ -2400,7 +2411,6 @@ impl Creblox {
                     }
                     self.saved_sync_started = None;
                     self.last_saved_sync = Some(Instant::now());
-                    self.clear_home_sync_spinner_if_idle();
                     self.home_freshness.succeed();
                     let mut thumb_ids = Vec::new();
 
@@ -2502,17 +2512,23 @@ impl Creblox {
                         continue;
                     }
                     for (uid, url) in wide {
-                        if let Some(old) = self.wide.get(&uid) {
-                            if old != &url {
-                                self.ctx.forget_image(old);
+                        if let Some(old) = self.wide.get(&uid).cloned() {
+                            if old != url {
+                                self.ctx.forget_image(&old);
+                                // The card keeps the old texture until the new URL's own is
+                                // uploaded, then swaps in one frame.
+                                crate::thumb_alias::record(&mut self.thumb_aliases, &url, &old);
+                                self.thumb_tex_dirty = true;
                             }
                         }
                         self.wide.insert(uid, url);
                     }
                     for (uid, url) in icon {
-                        if let Some(old) = self.icon.get(&uid) {
-                            if old != &url {
-                                self.ctx.forget_image(old);
+                        if let Some(old) = self.icon.get(&uid).cloned() {
+                            if old != url {
+                                self.ctx.forget_image(&old);
+                                crate::thumb_alias::record(&mut self.thumb_aliases, &url, &old);
+                                self.thumb_tex_dirty = true;
                             }
                         }
                         self.icon.insert(uid, url);
@@ -6404,7 +6420,6 @@ impl eframe::App for Creblox {
                     let reclicking_home =
                         matches!(p, Page::Home) && matches!(self.page, Page::Home);
                     if !reclicking_home && matches!(p, Page::Home | Page::Charts) {
-                        self.home_sync_spinner = false;
                         if Self::is_stale(
                             &self.last_sorts_sync,
                             &self.sorts_sync_started,
@@ -6711,7 +6726,6 @@ impl eframe::App for Creblox {
                         &self.sorts_sync_started,
                         Duration::from_secs(12),
                     ) {
-                        self.home_sync_spinner = false;
                         self.sync_sorts(false);
                     }
                 }

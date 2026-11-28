@@ -135,7 +135,6 @@ impl Creblox {
     /// as you scroll, so it never runs out of page before the catalogue does.
     pub fn page_charts(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
         let p = pal(ui);
-        let syncing = Self::is_sync_active(&self.sorts_sync_started);
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -147,15 +146,14 @@ impl Creblox {
                     .stroke(egui::Stroke::new(1.0, p.border))
                     .corner_radius(16)
                     .min_size(egui::vec2(84.0, 28.0));
+                // Always enabled and never accompanied by a spinner: a background sync is
+                // invisible, and a spinner beside the button would also shift the header.
                 if ui
-                    .add_enabled(!syncing, refresh)
+                    .add(refresh)
                     .on_hover_text("Games auto-sync in background (click to sync now)")
                     .clicked()
                 {
                     acts.push(Action::RefreshGames);
-                }
-                if syncing {
-                    ui.add(egui::Spinner::new().size(13.0));
                 }
                 // Fixed width for both captions: the button keeps its exact place when it
                 // changes between "Shuffle" and "Reshuffle".
@@ -184,9 +182,8 @@ impl Creblox {
                 }
             });
         });
-        if self.charts_freshness.is_silent() {
-            small_text(ui, "Updating players and ranks\u{2026}");
-        }
+        // No "updating" caption here: it would appear and disappear on every auto-sync and
+        // push the filter bar and grid up and down under the pointer.
         ui.add_space(10.0);
 
         // Filters: Players is one wide group - a minimum rail, then a minimum pill and a
@@ -444,7 +441,11 @@ impl Creblox {
         sig = mix(sig, max_players.map_or(0, |v| v.wrapping_add(1)));
         sig = mix(sig, min_rating as u64);
         sig = mix(sig, min_visits);
-        sig = mix(sig, self.game_visits.len() as u64);
+        // Visit counts only change the pool when they are being filtered on; otherwise a
+        // background visit fetch would rebuild (and re-order) a grid nobody asked to change.
+        if min_visits > 0 {
+            sig = mix(sig, self.game_visits.len() as u64);
+        }
         if sig != self.feed_sig {
             self.feed_sig = sig;
             self.rebuild_feed_pool(min_players, max_players, min_rating, min_visits);
@@ -568,7 +569,13 @@ impl Creblox {
                 let salt = self.feed_salt;
                 refs.sort_unstable_by_key(|g| feed_key(g.universe_id, salt));
             } else {
-                refs.sort_unstable_by(|a, b| b.playing.cmp(&a.playing));
+                // Ties break on the id, so two games with the same player count never swap
+                // places just because a rebuild happened.
+                refs.sort_unstable_by(|a, b| {
+                    b.playing
+                        .cmp(&a.playing)
+                        .then_with(|| a.universe_id.cmp(&b.universe_id))
+                });
             }
             refs.retain(|g| {
                 if !crate::chart_feed::in_player_range(g.playing, min_players, max_players) {

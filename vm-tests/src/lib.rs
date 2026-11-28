@@ -41,6 +41,9 @@ pub mod friend_names;
 #[path = "../../src/live_refresh.rs"]
 pub mod live_refresh;
 
+#[path = "../../src/thumb_alias.rs"]
+pub mod thumb_alias;
+
 #[path = "../../src/thumb_pipeline.rs"]
 pub mod thumb_pipeline;
 

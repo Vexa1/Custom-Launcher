@@ -159,8 +159,6 @@ impl Creblox {
         }
 
         // Explore sorts
-        let syncing = Self::is_sync_active(&self.sorts_sync_started)
-            || Self::is_sync_active(&self.saved_sync_started);
         let mut retry = false;
         match &self.sorts {
             None => {
@@ -196,15 +194,14 @@ impl Creblox {
                         if link.clicked() {
                             acts.push(Action::GoChart(0));
                         }
+                        // The button never greys out and no hint appears beside it: a
+                        // background refresh must not add or remove a row, because that is
+                        // what would shift the grid below it.
                         sync_refresh_control(
                             ui,
-                            syncing && self.home_sync_spinner,
                             "Topics & played games auto-sync in background (click to sync now)",
                             acts,
                         );
-                        if self.home_freshness.is_silent() || self.charts_freshness.is_silent() {
-                            small_text(ui, "Updating players\u{2026}");
-                        }
                     });
                     ui.add_space(6.0);
                     wide_grid(

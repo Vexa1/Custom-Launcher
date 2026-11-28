@@ -355,18 +355,19 @@ pub fn section_link(ui: &mut egui::Ui, text: &str) -> bool {
     resp
 }
 
-pub fn sync_refresh_control(ui: &mut egui::Ui, syncing: bool, tip: &str, acts: &mut Vec<Action>) {
+/// The Refresh button for a game row.
+///
+/// It never disables itself and never grows a spinner: a background sync has to stay invisible,
+/// and greying the control out (or adding width beside it) is the visible part of it.
+pub fn sync_refresh_control(ui: &mut egui::Ui, tip: &str, acts: &mut Vec<Action>) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let p = pal(ui);
         let btn = egui::Button::new(RichText::new("Refresh").size(13.0).color(p.text))
             .fill(p.surface_bg)
             .stroke(egui::Stroke::new(1.0, p.border))
             .corner_radius(16);
-        if ui.add_enabled(!syncing, btn).on_hover_text(tip).clicked() {
+        if ui.add(btn).on_hover_text(tip).clicked() {
             acts.push(Action::RefreshGames);
-        }
-        if syncing {
-            ui.add(egui::Spinner::new().size(13.0));
         }
     });
 }
