@@ -256,7 +256,7 @@ impl Creblox {
                                                 verified_badge_tip(ui, 12.5, "Verified Account");
                                             }
                                             if is_active {
-                                                ui.label(RichText::new("• Active").size(11.5).color(GREEN));
+                                                ui.label(RichText::new("• Active").size(11.5).color(crate::theme::text_ink(ui, GREEN)));
                                             }
                                         });
                                         small_text(ui, format!("@{}", acc.name));
@@ -264,7 +264,7 @@ impl Creblox {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.button(RichText::new("Remove").size(11.5).color(RED)).clicked() {
+                                            if ui.button(RichText::new("Remove").size(11.5).color(crate::theme::text_ink(ui, RED))).clicked() {
                                                 acts.push(Action::RemoveAccount(acc.id));
                                             }
                                             if !is_active && ui.button("Switch").clicked() {
@@ -591,7 +591,7 @@ impl Creblox {
                     });
                 } else {
                     ui.colored_label(
-                        ORANGE,
+                        crate::theme::text_ink(ui, ORANGE),
                         format!(
                             "{} was not found. Install Roblox once from roblox.com first.",
                             crate::platform::player_label()
@@ -684,7 +684,12 @@ impl Creblox {
                         .corner_radius(6)
                         .inner_margin(egui::Margin::symmetric(8, 3))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(badge_txt).size(11.5).strong().color(badge_col));
+                            ui.label(
+                                RichText::new(badge_txt)
+                                    .size(11.5)
+                                    .strong()
+                                    .color(crate::theme::text_ink(ui, badge_col)),
+                            );
                         });
                 });
             });
@@ -792,7 +797,7 @@ impl Creblox {
                                 RichText::new(badge_txt)
                                     .size(11.5)
                                     .strong()
-                                    .color(badge_col),
+                                    .color(crate::theme::text_ink(ui, badge_col)),
                             );
                         });
                 });
@@ -844,7 +849,7 @@ impl Creblox {
                             self.hide_to_tray(&ui.ctx().clone(), show_tip);
                         }
                         if ui
-                            .button(RichText::new("Quit Launcher").color(RED))
+                            .button(RichText::new("Quit Launcher").color(crate::theme::text_ink(ui, RED)))
                             .clicked()
                         {
                             self.quit_app();
@@ -941,7 +946,7 @@ impl Creblox {
             small_text(ui, crate::platform::tray_help_text().to_string());
             if let Some(err) = &self.startup_err {
                 ui.add_space(4.0);
-                ui.label(RichText::new(err).size(12.0).color(RED));
+                ui.label(RichText::new(err).size(12.0).color(crate::theme::text_ink(ui, RED)));
             }
         });
 
@@ -1360,7 +1365,7 @@ impl Creblox {
                     if !self.settings.overlay_image_path.is_empty()
                         && !std::path::Path::new(&self.settings.overlay_image_path).is_file()
                     {
-                        ui.colored_label(RED, "That file does not exist (or cannot be read).");
+                        ui.colored_label(crate::theme::text_ink(ui, RED), "That file does not exist (or cannot be read).");
                     }
                     ui.horizontal(|ui| {
                         ui.label("Position:");
@@ -1698,7 +1703,7 @@ impl Creblox {
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .button(RichText::new("Remove").size(11.0).color(RED))
+                                .button(RichText::new("Remove").size(11.0).color(crate::theme::text_ink(ui, RED)))
                                 .clicked()
                             {
                                 self.fastflags.custom_flags.remove(&k);
@@ -1747,7 +1752,7 @@ impl Creblox {
 
             if let Some(err) = &self.ff_err {
                 ui.add_space(4.0);
-                ui.colored_label(RED, err);
+                ui.colored_label(crate::theme::text_ink(ui, RED), err);
             }
 
             if changed {
@@ -2026,7 +2031,7 @@ impl Creblox {
                     }
                 });
                 if let Some(err) = &self.wallpaper_err {
-                    ui.colored_label(RED, err);
+                    ui.colored_label(crate::theme::text_ink(ui, RED), err);
                 }
             }
 
@@ -2939,7 +2944,7 @@ impl Creblox {
                     ui.label(
                         RichText::new("GitHub token saved — private repository checks are enabled.")
                             .size(12.0)
-                            .color(GREEN),
+                            .color(crate::theme::text_ink(ui, GREEN)),
                     );
                     if ui.small_button("Remove").clicked() {
                         self.clear_update_token();
@@ -3086,7 +3091,7 @@ impl Creblox {
                             } else {
                                 format!("New version ready: v{}", rel.version)
                             };
-                            ui.label(RichText::new(heading).size(13.5).strong().color(GREEN));
+                            ui.label(RichText::new(heading).size(13.5).strong().color(crate::theme::text_ink(ui, GREEN)));
                             let shown_size = if rel.zip_size > 0 {
                                 rel.zip_size
                             } else {
@@ -3242,7 +3247,7 @@ impl Creblox {
             if let Some(err) = &self.app_update_error {
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(err).size(12.0).color(ORANGE));
+                    ui.label(RichText::new(err).size(12.0).color(crate::theme::text_ink(ui, ORANGE)));
                     if let Some(rel) = &self.app_update_available {
                         if ui.small_button("Download in Browser").clicked() {
                             acts.push(Action::OpenUrl(rel.html_url.clone()));

@@ -304,7 +304,7 @@ impl Creblox {
                                     .corner_radius(10)
                                     .inner_margin(egui::Margin::symmetric(14, 10))
                                     .show(ui, |ui| {
-                                        ui.colored_label(RED, err);
+                                        ui.colored_label(crate::theme::text_ink(ui, RED), err);
                                     });
                                 ui.add_space(12.0);
                             } else if ql.code.is_empty() {
@@ -454,7 +454,10 @@ impl Creblox {
                                     ui.label(
                                         RichText::new(&ql.status_text)
                                             .size(12.5)
-                                            .color(if linked { GREEN } else { p.text }),
+                                            .color(crate::theme::text_ink(
+                                                ui,
+                                                if linked { GREEN } else { p.text },
+                                            )),
                                     );
                                 });
                             }

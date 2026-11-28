@@ -186,7 +186,7 @@ impl Creblox {
                                 ui,
                                 |ui| {
                                     ui.set_width(ui.available_width());
-                                    ui.colored_label(RED, format!("Search failed: {e}"));
+                                    ui.colored_label(crate::theme::text_ink(ui, RED), format!("Search failed: {e}"));
                                     ui.add_space(6.0);
                                     ui.horizontal(|ui| {
                                         if ui.button("Retry").clicked() {
@@ -453,7 +453,7 @@ impl Creblox {
         if let Some(err) = self.social_errs.get(&active_tab) {
             card_frame_colored(20, p.friends_card_bg, p.friends_border).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.colored_label(RED, format!("Could not load {}: {err}", active_tab.label()));
+                ui.colored_label(crate::theme::text_ink(ui, RED), format!("Could not load {}: {err}", active_tab.label()));
                 ui.add_space(8.0);
                 if ui.button("Retry").clicked() {
                     acts.push(Action::RefreshSocialTab(active_tab));
@@ -653,11 +653,14 @@ impl Creblox {
                                         ui.add(
                                             egui::Label::new(
                                                 RichText::new(pres_text).size(11.0).color(
-                                                    if u.presence > 0 {
-                                                        dot_color
-                                                    } else {
-                                                        p.muted
-                                                    },
+                                                    crate::theme::text_ink(
+                                                        ui,
+                                                        if u.presence > 0 {
+                                                            dot_color
+                                                        } else {
+                                                            p.muted
+                                                        },
+                                                    ),
                                                 ),
                                             )
                                             .truncate(),
@@ -733,7 +736,7 @@ impl Creblox {
                                                 ui.label(
                                                     RichText::new("Friends \u{2713}")
                                                         .size(12.0)
-                                                        .color(GREEN)
+                                                        .color(crate::theme::text_ink(ui, GREEN))
                                                         .strong(),
                                                 );
                                             }
@@ -741,7 +744,7 @@ impl Creblox {
                                             ui.label(
                                                 RichText::new("Friends \u{2713}")
                                                     .size(12.0)
-                                                    .color(GREEN)
+                                                    .color(crate::theme::text_ink(ui, GREEN))
                                                     .strong(),
                                             );
                                         }
@@ -755,7 +758,7 @@ impl Creblox {
                                             ui.label(
                                                 RichText::new("Friends \u{2713}")
                                                     .size(12.0)
-                                                    .color(GREEN)
+                                                    .color(crate::theme::text_ink(ui, GREEN))
                                                     .strong(),
                                             );
                                         } else if is_incoming {
@@ -782,7 +785,7 @@ impl Creblox {
                                                 RichText::new("Request Sent \u{2713}")
                                                     .size(11.5)
                                                     .strong()
-                                                    .color(GREEN),
+                                                    .color(crate::theme::text_ink(ui, GREEN)),
                                             )
                                             .fill(p.surface_bg)
                                             .stroke(egui::Stroke::new(1.0, p.friends_border))

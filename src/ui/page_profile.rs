@@ -343,7 +343,7 @@ impl Creblox {
                     .corner_radius(8)
                     .inner_margin(egui::Margin::symmetric(12, 6))
                     .show(ui, |ui| {
-                        ui.label(RichText::new("Friends").size(12.5).strong().color(GREEN));
+                        ui.label(RichText::new("Friends").size(12.5).strong().color(crate::theme::text_ink(ui, GREEN)));
                     });
             } else if is_sent {
                 egui::Frame::new()
@@ -495,7 +495,7 @@ impl Creblox {
                         self.profile_editing = false;
                     }
                     if let Some(e) = &self.profile_save_err {
-                        ui.label(RichText::new(e).size(12.0).color(RED));
+                        ui.label(RichText::new(e).size(12.0).color(crate::theme::text_ink(ui, RED)));
                     }
                 });
             });
@@ -537,7 +537,7 @@ impl Creblox {
                 };
                 if ui
                     .add(
-                        egui::Label::new(RichText::new(link_text).size(12.0).strong().color(BLUE))
+                        egui::Label::new(RichText::new(link_text).size(12.0).strong().color(crate::theme::text_ink(ui, BLUE)))
                             .sense(Sense::click()),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -609,7 +609,7 @@ impl Creblox {
                         ui.label(
                             RichText::new(format!("{} active", compact(game.playing)))
                                 .size(12.0)
-                                .color(GREEN),
+                                .color(crate::theme::text_ink(ui, GREEN)),
                         );
                     }
                 });
@@ -768,7 +768,7 @@ impl Creblox {
                                 );
                             });
                         } else {
-                            body_ui.label(RichText::new("Free").size(11.5).strong().color(GREEN));
+                            body_ui.label(RichText::new("Free").size(11.5).strong().color(crate::theme::text_ink(ui, GREEN)));
                         }
 
                         let resp = resp
@@ -816,7 +816,7 @@ impl Creblox {
                                         );
                                     });
                                 } else {
-                                    ui.label(RichText::new("Free").size(12.0).color(GREEN));
+                                    ui.label(RichText::new("Free").size(12.0).color(crate::theme::text_ink(ui, GREEN)));
                                 }
                             });
 
@@ -1062,7 +1062,7 @@ impl Creblox {
             let p = pal(ui);
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
-                ui.label(RichText::new(&err).size(14.0).color(RED));
+                ui.label(RichText::new(&err).size(14.0).color(crate::theme::text_ink(ui, RED)));
                 ui.add_space(10.0);
                 if ui
                     .button(RichText::new("Retry").size(13.0).color(p.text))
@@ -1131,7 +1131,7 @@ impl Creblox {
         } else if let Some(err) = &self.friend_err {
             ui.vertical_centered(|ui| {
                 ui.add_space(60.0);
-                ui.label(RichText::new(err).size(14.0).color(RED));
+                ui.label(RichText::new(err).size(14.0).color(crate::theme::text_ink(ui, RED)));
             });
         }
         if fp.is_some() {

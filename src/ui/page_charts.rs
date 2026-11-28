@@ -459,7 +459,7 @@ impl Creblox {
                 }
             }
             Some(Err(e)) => {
-                ui.colored_label(RED, e);
+                ui.colored_label(crate::theme::text_ink(ui, RED), e);
             }
             Some(Ok(_)) => {
                 if matched == 0 {

@@ -333,7 +333,10 @@ impl Creblox {
                                     .tint(if fav { RED } else { p.muted }),
                                     RichText::new(if fav { "Favorited" } else { "Favorite" })
                                         .size(12.0)
-                                        .color(if fav { RED } else { p.text }),
+                                        .color(crate::theme::text_ink(
+                                            ui,
+                                            if fav { RED } else { p.text },
+                                        )),
                                 )
                                 .fill(p.surface_bg)
                                 .stroke(egui::Stroke::new(
@@ -609,7 +612,7 @@ impl Creblox {
                             ui.label("Loading passes from Roblox...");
                         });
                     } else if let Some(err) = &self.game_passes_err {
-                        ui.colored_label(RED, format!("Could not load passes: {err}"));
+                        ui.colored_label(crate::theme::text_ink(ui, RED), format!("Could not load passes: {err}"));
                     } else if let Some(ex) = ex {
                         if ex.passes.is_empty() {
                             ui.label(
@@ -671,7 +674,14 @@ impl Creblox {
                                                     };
                                                     ui.label(
                                                         RichText::new(price_txt).size(12.5).color(
-                                                            if pass.is_owned { GREEN } else { p.muted },
+                                                            crate::theme::text_ink(
+                                                                ui,
+                                                                if pass.is_owned {
+                                                                    GREEN
+                                                                } else {
+                                                                    p.muted
+                                                                },
+                                                            ),
                                                         ),
                                                     );
                                                     ui.add_space(5.0);
@@ -1070,7 +1080,7 @@ impl Creblox {
                     ui.add_space(12.0);
 
                     if let Some(err) = &self.game_servers_err {
-                        ui.colored_label(RED, format!("Could not load servers: {err}"));
+                        ui.colored_label(crate::theme::text_ink(ui, RED), format!("Could not load servers: {err}"));
                     } else if let Some(ex) = ex {
                         if total_count == 0 && !self.game_servers_loading {
                             egui::Frame::new()
@@ -1218,7 +1228,9 @@ impl Creblox {
                                                                             ))
                                                                             .size(11.5)
                                                                             .strong()
-                                                                            .color(cap_col),
+                                                                            .color(crate::theme::text_ink(
+                                                                                ui, cap_col,
+                                                                            )),
                                                                         );
                                                                     });
                                                             },

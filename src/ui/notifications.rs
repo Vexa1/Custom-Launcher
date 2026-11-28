@@ -2,7 +2,7 @@ use crate::app::Creblox;
 use crate::auth::save_settings;
 use crate::roblox_process::enumerate_roblox_processes_cached;
 use crate::theme::{
-    BLUE, GREEN, ORANGE, Palette, RED, card_frame, is_dark_color, pal, theme_accent,
+    BLUE, GREEN, ON_ACCENT, ORANGE, Palette, RED, card_frame, is_dark_color, pal, theme_accent,
 };
 use crate::types::{Action, NotificationSource, Page, SocialTab, ToastAction, ToastKind};
 use crate::ui::widgets::thumb_styled;
@@ -456,7 +456,7 @@ impl Creblox {
                                 RichText::new(if silent { "Silent: On" } else { "Silent: Off" })
                                     .size(12.0)
                                     .strong()
-                                    .color(if silent { Color32::WHITE } else { p.text }),
+                                    .color(if silent { ON_ACCENT } else { p.text }),
                             )
                             .fill(if silent { ORANGE } else { p.surface_bg })
                             .stroke(egui::Stroke::new(
@@ -504,7 +504,7 @@ impl Creblox {
                                     RichText::new("Roblox API")
                                         .size(13.5)
                                         .strong()
-                                        .color(BLUE),
+                                        .color(crate::theme::text_ink(ui, BLUE)),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -571,7 +571,7 @@ impl Creblox {
                                     ))
                                     .size(13.5)
                                     .strong()
-                                    .color(GREEN),
+                                    .color(crate::theme::text_ink(ui, GREEN)),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),

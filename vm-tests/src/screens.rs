@@ -29,6 +29,12 @@ pub fn set_light(on: bool) {
     LIGHT.with(|c| c.set(on));
 }
 
+/// The app draws accent *text* through `theme::text_ink`; the fixtures do the same at the same
+/// places, so a picture shows the colour the page would really paint.
+fn ink(color: Color32) -> Color32 {
+    crate::theme::ink(color, !light())
+}
+
 fn palette() -> crate::theme::Palette {
     crate::theme::Palette::of(!light())
 }
@@ -212,7 +218,7 @@ fn rail(ui: &mut egui::Ui, probe: &mut Probe) {
                     "rail.logo",
                     "CREBLOX",
                     egui::FontId::proportional(15.0),
-                    GREEN,
+                    ink(GREEN),
                     CARD(),
                 );
                 ui.add_space(18.0);
@@ -300,7 +306,7 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
                             "verified",
                             Vec2::new(64.0, 20.0),
                             SURFACE(),
-                            BLUE,
+                            ink(BLUE),
                         );
                         ui.add_space(8.0);
                         probe.button(
@@ -309,7 +315,7 @@ pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
                             "In Game - Adopt Me!",
                             Vec2::new(148.0, 22.0),
                             SURFACE(),
-                            GREEN,
+                            ink(GREEN),
                         );
                         // The actions are part of the frame-1 shell: the user record the
                         // click carried already knows the place, so Join Game is live.
@@ -414,7 +420,7 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
                         TEXT(),
                         CARD(),
                     );
-                    body(ui, probe, "home.profile.status", "Playing Adopt Me!", GREEN);
+                    body(ui, probe, "home.profile.status", "Playing Adopt Me!", ink(GREEN));
                 });
                 ui.add_space(24.0);
                 for (id, value, label) in [
@@ -491,7 +497,7 @@ pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
                             probe,
                             format!("{id}.playing"),
                             &format!("{playing} playing"),
-                            GREEN,
+                            ink(GREEN),
                         );
                     });
                 }
@@ -881,7 +887,7 @@ pub fn game_details(ui: &mut egui::Ui, probe: &mut Probe) {
                         "game.server.ping",
                         *ping,
                         egui::FontId::proportional(13.0),
-                        if i == 0 { GREEN } else { MUTED() },
+                        ink(if i == 0 { GREEN } else { MUTED() }),
                         CARD(),
                     );
                     ui.add_space(24.0);
@@ -963,7 +969,7 @@ pub fn party(ui: &mut egui::Ui, probe: &mut Probe) {
                         "party.member.state",
                         state,
                         egui::FontId::proportional(13.0),
-                        color,
+                        ink(color),
                         CARD(),
                     );
                     ui.add_space(16.0);
@@ -1312,7 +1318,7 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
                 "overlay.brand",
                 "CREBLOX",
                 egui::FontId::proportional(12.0),
-                GREEN,
+                ink(GREEN),
                 CARD(),
             );
             ui.add_space(10.0);
@@ -1330,7 +1336,7 @@ pub fn overlay(ui: &mut egui::Ui, probe: &mut Probe) {
                 "overlay.ping",
                 "32 ms",
                 egui::FontId::monospace(13.0),
-                GREEN,
+                ink(GREEN),
                 CARD(),
             );
             ui.add_space(10.0);

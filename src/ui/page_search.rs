@@ -21,7 +21,7 @@ impl Creblox {
         }
         match &self.results {
             Some(Err(e)) => {
-                ui.colored_label(RED, e);
+                ui.colored_label(crate::theme::text_ink(ui, RED), e);
             }
             Some(Ok(v)) if v.is_empty() => {
                 ui.label("No games found.");

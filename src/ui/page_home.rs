@@ -140,7 +140,7 @@ impl Creblox {
                 });
             });
         if let Some(e) = &self.friends_err {
-            ui.colored_label(RED, format!("Could not load friends: {e}"));
+            ui.colored_label(crate::theme::text_ink(ui, RED), format!("Could not load friends: {e}"));
         }
 
         // Continue playing: always above the game sections so the last games you played
@@ -174,7 +174,7 @@ impl Creblox {
             }
             Some(Err(e)) => {
                 ui.add_space(20.0);
-                ui.colored_label(RED, format!("Could not reach Roblox: {e}"));
+                ui.colored_label(crate::theme::text_ink(ui, RED), format!("Could not reach Roblox: {e}"));
                 retry = ui.button("Retry").clicked();
             }
             Some(Ok(sorts)) => {

@@ -121,9 +121,6 @@ impl Probe {
     ) -> egui::Response {
         let id = id.into();
         let text = text.into();
-        // Accents are fills; their text form is the palette's ink, so a label reads on the
-        // light card too and the contrast below is the colour actually drawn.
-        let color = crate::theme::ink(color, !crate::screens::light());
         let measured = ui
             .ctx()
             .fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color))
@@ -146,7 +143,6 @@ impl Probe {
     ) -> egui::Response {
         let id = id.into();
         let font = egui::FontId::proportional(13.0);
-        let fg = crate::theme::ink(fg, !crate::screens::light());
         let measured = ui
             .ctx()
             .fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), fg))

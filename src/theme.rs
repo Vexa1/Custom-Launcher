@@ -458,6 +458,12 @@ pub fn ink(color: Color32, dark: bool) -> Color32 {
     }
 }
 
+/// The text form of an accent for the theme `ui` is currently drawing, which is what pages use
+/// in a label or a button caption. Fills keep the accent itself.
+pub fn text_ink(ui: &egui::Ui, color: Color32) -> Color32 {
+    ink(color, ui.visuals().dark_mode)
+}
+
 /// Ink for a warning line or title drawn on the current theme's card background.
 pub fn warning_ink(dark: bool) -> Color32 {
     ink(ORANGE, dark)

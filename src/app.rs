@@ -5173,7 +5173,7 @@ impl Creblox {
                             } else {
                                 "Detected Roblox share link".to_string()
                             };
-                            ui.label(RichText::new(summary).size(12.0).color(GREEN));
+                            ui.label(RichText::new(summary).size(12.0).color(crate::theme::text_ink(ui, GREEN)));
                         } else if !self.manual_game_input.trim().is_empty() {
                             ui.label(
                                 RichText::new(
@@ -5186,7 +5186,7 @@ impl Creblox {
 
                         if let Some(err) = &self.manual_game_err {
                             ui.add_space(6.0);
-                            ui.add(egui::Label::new(RichText::new(err).size(12.5).color(RED)).wrap());
+                            ui.add(egui::Label::new(RichText::new(err).size(12.5).color(crate::theme::text_ink(ui, RED))).wrap());
                         }
 
                         ui.add_space(14.0);
@@ -6475,7 +6475,7 @@ impl eframe::App for Creblox {
                                         egui::Align2::LEFT_CENTER,
                                         label,
                                         egui::FontId::proportional(12.5),
-                                        col.unwrap_or(p.text),
+                                        crate::theme::text_ink(ui, col.unwrap_or(p.text)),
                                     );
                                     r.clicked()
                                 };

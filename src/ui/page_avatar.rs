@@ -1,6 +1,6 @@
 use crate::app::Creblox;
 use crate::avatar_3d::render_avatar_viewport;
-use crate::theme::{GREEN, RED, accent_color, is_dark_color, pal};
+use crate::theme::{GREEN, ON_ACCENT, RED, accent_color, is_dark_color, pal};
 use crate::types::{
     Action, AvatarAsset, AvatarTab, BodyColorTarget, BodyPartFilter, OutfitFilter, OutfitItem,
 };
@@ -188,7 +188,7 @@ impl Creblox {
         let Some(avatar_url) = self.me.as_ref().map(|p| p.avatar.clone()) else {
             avatar_glass_frame(ui, 24).show(ui, |ui| {
                 if let Some(e) = &self.me_err {
-                    ui.colored_label(RED, format!("Could not load profile: {e}"));
+                    ui.colored_label(crate::theme::text_ink(ui, RED), format!("Could not load profile: {e}"));
                     ui.add_space(6.0);
                 }
                 ui.horizontal(|ui| {
@@ -260,7 +260,7 @@ impl Creblox {
                         avatar_glass_frame(ui, 12).show(ui, |ui| {
                             ui.set_width((right_w - 28.0).max(260.0));
                             ui.horizontal(|ui| {
-                                ui.colored_label(RED, format!("Avatar error: {e}"));
+                                ui.colored_label(crate::theme::text_ink(ui, RED), format!("Avatar error: {e}"));
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -495,7 +495,7 @@ impl Creblox {
                                             let btn = egui::Button::new(
                                                 RichText::new(text).size(12.5).strong().color(
                                                     if selected {
-                                                        Color32::WHITE
+                                                        ON_ACCENT
                                                     } else {
                                                         pal_colors.text
                                                     },
@@ -754,7 +754,7 @@ impl Creblox {
                                     AvatarTab::Outfits => {
                                         if let Some(err) = &self.avatar_outfits_err {
                                             ui.colored_label(
-                                                RED,
+                                                crate::theme::text_ink(ui, RED),
                                                 format!("Could not load outfits: {err}"),
                                             );
                                         } else if let Some(outfits) = &self.avatar_outfits {
@@ -1049,7 +1049,7 @@ impl Creblox {
                                                         RichText::new(target.label())
                                                             .size(12.0)
                                                             .color(if sel {
-                                                                Color32::WHITE
+                                                                ON_ACCENT
                                                             } else {
                                                                 pal_colors.text
                                                             }),
@@ -1137,7 +1137,7 @@ impl Creblox {
                                     tab => {
                                         if let Some(err) = &self.avatar_items_err {
                                             ui.colored_label(
-                                                RED,
+                                                crate::theme::text_ink(ui, RED),
                                                 format!("Could not load inventory: {err}"),
                                             );
                                         } else if let Some(list) = self.avatar_items.get(&tab) {
