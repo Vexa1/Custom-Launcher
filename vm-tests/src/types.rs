@@ -53,3 +53,59 @@ pub struct ServerItem {
     pub ping: Option<u64>,
     pub fps: Option<f64>,
 }
+
+/// Same shape as `src/types.rs`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct User {
+    pub id: u64,
+    pub name: String,
+    pub display: String,
+    pub headshot: String,
+    pub presence: u8,
+    pub location: String,
+    pub place_id: Option<u64>,
+    pub verified: bool,
+}
+
+/// Same shape as `src/types.rs`.
+#[derive(Clone, Debug, Default)]
+pub struct PlayerBadge {
+    pub id: u64,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    pub awarded_date: String,
+}
+
+/// Same shape as `src/types.rs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProfileSections {
+    pub info: bool,
+    pub friends: bool,
+    pub followers: bool,
+    pub following: bool,
+    pub avatar: bool,
+    pub wearing: bool,
+    pub badges: bool,
+    pub creations: bool,
+    pub favorites: bool,
+}
+
+/// Same shape as `src/types.rs`.
+#[derive(Clone, Debug, Default)]
+pub struct FriendProfile {
+    pub user: User,
+    pub description: String,
+    pub created: String,
+    pub verified: bool,
+    pub friends: u64,
+    pub followers: u64,
+    pub following: u64,
+    pub avatar: String,
+    pub playing_game: Option<Game>,
+    pub experiences: Vec<Game>,
+    pub favorites: Vec<Game>,
+    pub badges: Vec<PlayerBadge>,
+    pub currently_wearing: Vec<AvatarAsset>,
+    pub sections: ProfileSections,
+}

@@ -76,8 +76,9 @@ pub struct Creblox {
     /// feed never sorts or clones the catalogue again.
     pub feed_pool: Vec<Game>,
     pub feed_sig: u64,
-    /// Recently loaded profiles by user id, so going back to a profile is instant.
-    pub profile_cache: HashMap<u64, (FriendProfile, Instant)>,
+    /// Recently loaded profiles, bounded and least-recently-used, so going back to a
+    /// profile is instant and the shelf cannot grow without limit.
+    pub profile_cache: crate::profile_cache::ProfileCache,
     /// Set when a section button is clicked, consumed by the page scroll area.
     pub scroll_to_top: bool,
     /// Cursor, dedupe set and back-off for the charts feed's infinite scroll.
@@ -194,6 +195,14 @@ pub struct Creblox {
     pub friend_profile: Option<FriendProfile>,
     pub friend_loading: bool,
     pub friend_err: Option<String>,
+    /// The profile currently streaming in, section by section.
+    pub friend_stream: Option<crate::profile_cache::FriendStream>,
+    /// The friend circle under the pointer, and since when, so the prefetch waits for a
+    /// short dwell instead of firing on every mouse sweep.
+    pub hovered_friend: Option<u64>,
+    pub friend_hover_start: Option<Instant>,
+    /// Friends whose profile is already being fetched, so a hover never queues twice.
+    pub friend_prefetching: HashSet<u64>,
 
     pub avatar_state: Option<AvatarState>,
     pub avatar_palette: Vec<PaletteColor>,
@@ -424,7 +433,7 @@ impl Creblox {
             friends_sort: FriendsSort::RecentlyActive,
             feed_pool: Vec::new(),
             feed_sig: 0,
-            profile_cache: HashMap::new(),
+            profile_cache: crate::profile_cache::ProfileCache::new(),
             scroll_to_top: false,
             chart_feed: crate::chart_feed::ChartFeed::default(),
             chart_players_box: crate::chart_feed::FilterBox::default(),
@@ -522,6 +531,10 @@ impl Creblox {
             friend_profile: None,
             friend_loading: false,
             friend_err: None,
+            friend_stream: None,
+            hovered_friend: None,
+            friend_hover_start: None,
+            friend_prefetching: HashSet::new(),
             avatar_state: None,
             avatar_palette: Vec::new(),
             avatar_loading: false,
@@ -1304,18 +1317,145 @@ impl Creblox {
         let uid = me.user.id;
         let user = me.user.clone();
         let cookie = self.cookie.clone();
-        // A profile loaded less than a minute ago is painted without any network work.
-        if let Some((cached, at)) = self.profile_cache.get(&uid) {
-            if at.elapsed() < Duration::from_secs(60) {
-                self.my_profile = Some(cached.clone());
-                self.my_profile_err = None;
-                return;
-            }
+        // A profile inside the cache TTL is painted without any network work.
+        if self.profile_cache.get(uid).is_some() && !self.profile_cache.needs_refresh(uid) {
+            self.my_profile = self.profile_cache.get(uid);
+            self.my_profile_err = None;
+            return;
         }
         self.my_profile_loading = true;
         self.my_profile_err = None;
         let uid = user.id;
         self.spawn(move || Msg::MyProfile(uid, fetch_friend_profile(user, cookie)));
+    }
+
+    /// Opens a profile with a header that is already complete. The seed is the cached
+    /// profile when there is one, otherwise the user record the click carried (id, names,
+    /// headshot, presence and the place they are in), so the avatar, the name and the
+    /// buttons are there on frame 1 - no blank page, no spinner.
+    pub fn open_friend_profile(&mut self, user: User) {
+        let uid = user.id;
+        // The LRU hands out a copy and marks the entry used, so a reopen is instant.
+        self.friend_profile = match self.profile_cache.get(uid) {
+            Some(cached) => Some(cached),
+            None => Some(crate::profile_cache::seed(&user)),
+        };
+        self.friend_loading = false;
+        self.friend_err = None;
+        self.page = Page::Friend(user.clone());
+        // A stream for the profile we just left is dropped with its receiver; clear its
+        // prefetch mark too, or that friend could never be hovered again this session.
+        if let Some(previous) = self.friend_stream.take() {
+            self.friend_prefetching.remove(&previous.uid);
+        }
+        // A complete copy inside the TTL is served as-is; everything else streams, so a
+        // stale profile paints immediately and refreshes underneath.
+        if self.profile_cache.needs_refresh(uid) {
+            self.start_friend_stream(user);
+        }
+    }
+
+    /// Starts the parallel fetch. Each section is applied on the frame it lands, so the
+    /// page fills in while the slowest endpoint is still running.
+    fn start_friend_stream(&mut self, user: User) {
+        let uid = user.id;
+        let seed = self
+            .friend_profile
+            .as_ref()
+            .filter(|p| p.user.id == uid)
+            .cloned()
+            .unwrap_or_else(|| crate::profile_cache::seed(&user));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.friend_stream = Some(crate::profile_cache::FriendStream::new(uid, seed, rx));
+        self.friend_prefetching.insert(uid);
+        let cookie = self.cookie.clone();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            stream_friend_profile(user, cookie, |update| {
+                let _ = tx.send(update);
+                // Wake the UI so the section is painted the frame it arrives.
+                ctx.request_repaint();
+            });
+        });
+    }
+
+    /// Applies every section that arrived since the last frame. The receiver stays until
+    /// the loader reports `Done`; a finished, complete profile joins the shelf.
+    pub fn poll_friend_stream(&mut self) {
+        let Some(mut stream) = self.friend_stream.take() else {
+            return;
+        };
+        let (applied, finished) = stream.drain();
+        let on_page = matches!(&self.page, Page::Friend(u) if u.id == stream.uid);
+        if applied > 0 && on_page {
+            let mut ids: Vec<u64> = stream
+                .profile
+                .experiences
+                .iter()
+                .map(|g| g.universe_id)
+                .collect();
+            ids.extend(stream.profile.favorites.iter().map(|g| g.universe_id));
+            if let Some(g) = &stream.profile.playing_game {
+                ids.push(g.universe_id);
+            }
+            self.request_thumbs(ids);
+            self.friend_profile = Some(stream.profile.clone());
+        }
+        if on_page && self.friend_err.is_none() {
+            self.friend_err = stream.err.clone();
+        }
+        if finished {
+            self.friend_prefetching.remove(&stream.uid);
+            // Only a finished profile goes on the shelf: a half-filled one would be served
+            // back as if it were the whole thing.
+            self.profile_cache.insert(stream.profile);
+        } else {
+            // Keep draining while the rest of the sections are in flight.
+            self.ctx.request_repaint_after(Duration::from_millis(16));
+            self.friend_stream = Some(stream);
+        }
+    }
+
+    /// Resting on a friend's circle warms their profile after a short dwell. A sweep across
+    /// the strip never starts a request, and a profile already on the shelf is not asked for
+    /// again.
+    pub fn handle_friend_hover(&mut self, hovered: Option<u64>, ctx: &egui::Context) {
+        let now = Instant::now();
+        // While the page is moving, "hovered" means nothing: every bubble is under the
+        // pointer for a frame.
+        let hovered = if self.fast_scroll { None } else { hovered };
+        if hovered != self.hovered_friend {
+            self.hovered_friend = hovered;
+            self.friend_hover_start = hovered.map(|_| now);
+        }
+        let Some(uid) = self.hovered_friend else {
+            return;
+        };
+        if !self.profile_cache.needs_refresh(uid) || self.friend_prefetching.contains(&uid) {
+            return;
+        }
+        let dwelled = self
+            .friend_hover_start
+            .map(|t| now.duration_since(t) >= crate::profile_cache::HOVER_DWELL)
+            .unwrap_or(false);
+        if !dwelled {
+            ctx.request_repaint_after(Duration::from_millis(30));
+            return;
+        }
+        let Some(user) = self.friends.iter().find(|f| f.id == uid).cloned() else {
+            return;
+        };
+        self.prefetch_friend_profile(user);
+    }
+
+    /// Fetches a profile into the shelf without touching the page.
+    fn prefetch_friend_profile(&mut self, user: User) {
+        let uid = user.id;
+        if self.profile_cache.is_fresh(uid) || !self.friend_prefetching.insert(uid) {
+            return;
+        }
+        let cookie = self.cookie.clone();
+        self.spawn(move || Msg::FriendProfile(uid, fetch_friend_profile(user, cookie)));
     }
 
     pub fn load_avatar_tab(&mut self, tab: AvatarTab, append: bool) {
@@ -1476,6 +1616,11 @@ impl Creblox {
         self.friend_profile = None;
         self.friend_loading = false;
         self.friend_err = None;
+        self.friend_stream = None;
+        self.hovered_friend = None;
+        self.friend_hover_start = None;
+        self.friend_prefetching.clear();
+        self.profile_cache.clear();
         self.avatar_state = None;
         self.avatar_palette.clear();
         self.avatar_loading = false;
@@ -2150,7 +2295,7 @@ impl Creblox {
                                 ids.push(g.universe_id);
                             }
                             self.request_thumbs(ids);
-                            self.profile_cache.insert(uid, (fp.clone(), Instant::now()));
+                            self.profile_cache.insert(fp.clone());
                             self.my_profile = Some(fp);
                             self.my_profile_err = None;
                         }
@@ -2185,17 +2330,8 @@ impl Creblox {
                         Ok(fp) => {
                             // Cache even when another page is open, so a profile fetched
                             // from anywhere is fast the next time it is opened.
-                            self.profile_cache.insert(uid, (fp.clone(), Instant::now()));
-                            if self.profile_cache.len() > 24 {
-                                if let Some(oldest) = self
-                                    .profile_cache
-                                    .iter()
-                                    .min_by_key(|(_, (_, at))| *at)
-                                    .map(|(id, _)| *id)
-                                {
-                                    self.profile_cache.remove(&oldest);
-                                }
-                            }
+                            self.profile_cache.insert(fp.clone());
+                            self.friend_prefetching.remove(&uid);
                             if on_page {
                                 let mut ids: Vec<u64> =
                                     fp.experiences.iter().map(|g| g.universe_id).collect();
@@ -2779,8 +2915,8 @@ impl Creblox {
                             if matches!(self.page, Page::Profile) {
                                 // Show this account's cached profile straight away while
                                 // the fresh copy loads in the background.
-                                if let Some((cached, _)) = self.profile_cache.get(&profile_id) {
-                                    self.my_profile = Some(cached.clone());
+                                if let Some(cached) = self.profile_cache.get(profile_id) {
+                                    self.my_profile = Some(cached);
                                 }
                                 self.my_profile_loading = false;
                                 self.ensure_my_profile_loaded();
@@ -5927,7 +6063,16 @@ impl eframe::App for Creblox {
                 None
             }
         });
+        let hovered_friend = acts.iter().find_map(|a| {
+            if let Action::HoverFriend(uid) = a {
+                Some(*uid)
+            } else {
+                None
+            }
+        });
         self.handle_game_hover(hovered_game, ui.ctx());
+        self.handle_friend_hover(hovered_friend, ui.ctx());
+        self.poll_friend_stream();
 
         // Apply clicks after drawing
         let prev_page_disc = std::mem::discriminant(&self.page);
@@ -5937,7 +6082,7 @@ impl eframe::App for Creblox {
         };
         for a in acts {
             match a {
-                Action::HoverGame(_) => {}
+                Action::HoverGame(_) | Action::HoverFriend(_) => {}
                 Action::StartQuickLogin => self.begin_quick_login(),
                 Action::AddAccount => self.begin_quick_login(),
                 Action::SwitchAccount(uid) => self.switch_account(uid),
@@ -6019,9 +6164,9 @@ impl eframe::App for Creblox {
                 Action::RefreshMyProfile => {
                     self.my_profile = None;
                     self.my_profile_err = None;
-                    // "Refresh profile" must bypass the 60 s cache and hit the network.
+                    // "Refresh profile" must bypass the cache TTL and hit the network.
                     if let Some(me) = &self.me {
-                        self.profile_cache.remove(&me.user.id);
+                        self.profile_cache.remove(me.user.id);
                     }
                     self.ensure_my_profile_loaded();
                 }
@@ -6499,23 +6644,7 @@ impl eframe::App for Creblox {
                     if !matches!(self.page, Page::Friend(_)) {
                         self.back = self.page.clone();
                     }
-                    let uid = user.id;
-                    let cookie = self.cookie.clone();
-                    // Paint a profile we already have immediately. If it is under a minute
-                    // old, skip the network entirely: the page opens in a frame.
-                    let cached = self.profile_cache.get(&uid).cloned();
-                    let fresh = cached
-                        .as_ref()
-                        .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(60));
-                    self.friend_profile = cached.as_ref().map(|(p, _)| p.clone());
-                    self.friend_err = None;
-                    self.friend_loading = cached.is_none();
-                    self.page = Page::Friend(user.clone());
-                    if !fresh {
-                        self.spawn(move || {
-                            Msg::FriendProfile(uid, fetch_friend_profile(user, cookie))
-                        });
-                    }
+                    self.open_friend_profile(user);
                 }
                 Action::Play(g) => self.play(&g),
                 Action::InviteToParty(user) => self.party_invite_friend(&user),

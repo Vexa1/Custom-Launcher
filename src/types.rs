@@ -640,6 +640,22 @@ pub struct PlayerBadge {
     pub awarded_date: String,
 }
 
+/// Which sections of a [`FriendProfile`] have arrived from Roblox. A profile opened from
+/// memory is a seeded header with every flag false; the page draws a skeleton for any
+/// section that has not landed yet, instead of claiming the user has no badges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProfileSections {
+    pub info: bool,
+    pub friends: bool,
+    pub followers: bool,
+    pub following: bool,
+    pub avatar: bool,
+    pub wearing: bool,
+    pub badges: bool,
+    pub creations: bool,
+    pub favorites: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FriendProfile {
     pub user: User,
@@ -655,6 +671,8 @@ pub struct FriendProfile {
     pub favorites: Vec<Game>,
     pub badges: Vec<PlayerBadge>,
     pub currently_wearing: Vec<AvatarAsset>,
+    /// What has actually been fetched, so the page can skeleton the rest.
+    pub sections: ProfileSections,
 }
 
 #[derive(Clone, Copy)]
@@ -874,6 +892,8 @@ pub enum Action {
     /// The charts footer's "Retry" link after a failed or rate-limited page.
     ChartRetry,
     HoverGame(u64),
+    /// The pointer rests on a friend's circle: warm their profile before the click.
+    HoverFriend(u64),
     Open(Game),
     OpenFriend(User),
     /// Open the Player Inventory Viewer for this user (`user id`, display name).

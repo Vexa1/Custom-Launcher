@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::profile_cache::ProfileUpdate;
 use crate::types::{
     AvatarAsset, AvatarScales, AvatarState, AvatarTab, BodyColors, FriendProfile, Game, GameExtra,
     GamePassItem, Msg, OmniHome, OutfitItem, PaletteColor, PlayerBadge, Profile, ResolvedGameLink,
@@ -2465,68 +2466,81 @@ fn fetch_user_badges(user_id: u64) -> Vec<PlayerBadge> {
     badges
 }
 
-pub fn fetch_friend_profile(
-    mut user: User,
+/// Streams a profile section by section.
+///
+/// Every request starts at the same moment on its own thread and reports the instant it
+/// resolves, so the page fills in while the slowest endpoint is still running instead of
+/// waiting for the whole set. `on` is called from several threads at once, so it has to be
+/// cheap and thread safe (it is a channel send into the UI thread).
+pub fn stream_friend_profile(
+    user: User,
     cookie: Option<String>,
-) -> Result<FriendProfile, String> {
+    on: impl Fn(ProfileUpdate) + Send + Sync,
+) {
     let id = user.id;
-    let info_url = format!("https://users.roblox.com/v1/users/{id}");
     let cookie_ref = cookie.as_deref();
-    let place_id_opt = user.place_id;
-    let (
-        hd_url,
-        friends,
-        followers,
-        following,
-        avatar,
-        mut playing_game,
-        experiences,
-        favorites,
-        badges,
-        currently_wearing,
-        presence_user,
-        info_res,
-    ) = thread::scope(|s| {
-        // The user record, presence and every content request all start together; the
-        // page used to wait for the user record and three enrich calls before any of
-        // this ran. Total latency is now the slowest single request, not their sum.
-        let h_info = s.spawn(move || get_json(&info_url));
-        let mut presence_user = user.clone();
-        let presence_fallback = user.clone();
-        let h_presence = s.spawn(move || {
-            enrich_presence(&mut presence_user, cookie_ref);
-            presence_user
+    let place_id = user.place_id;
+    let on = &on;
+    thread::scope(|s| {
+        // Bio, join date, verified badge and the current names.
+        s.spawn(move || {
+            match get_json(&format!("https://users.roblox.com/v1/users/{id}")) {
+                Ok(info) => on(ProfileUpdate::Info {
+                    name: str_of(&info["name"]),
+                    display: str_of(&info["displayName"]),
+                    description: str_of(&info["description"]),
+                    created: str_of(&info["created"]).chars().take(10).collect(),
+                    verified: info["hasVerifiedBadge"].as_bool().unwrap_or(false),
+                }),
+                Err(e) => on(ProfileUpdate::Failed(format!("profile: {e}"))),
+            }
         });
-        let count_of = move |endpoint: &'static str| -> u64 {
-            get_json(&format!(
-                "https://friends.roblox.com/v1/users/{id}/{endpoint}/count"
+        // The three counters are separate endpoints and separate pills, so each lands on
+        // its own instead of the row waiting for the last one.
+        for endpoint in ["friends", "followers", "followings"] {
+            s.spawn(move || {
+                let count = get_json(&format!(
+                    "https://friends.roblox.com/v1/users/{id}/{endpoint}/count"
+                ))
+                .ok()
+                .and_then(|v| v["count"].as_u64());
+                let update = match count {
+                    None => ProfileUpdate::Failed(format!("{endpoint}: no count")),
+                    Some(n) if endpoint == "friends" => ProfileUpdate::Friends(n),
+                    Some(n) if endpoint == "followers" => ProfileUpdate::Followers(n),
+                    Some(n) => ProfileUpdate::Following(n),
+                };
+                on(update);
+            });
+        }
+        // 352x352 is the size the header circle actually draws at 2x; the bigger 720x720
+        // copy cost more to download than it ever showed.
+        s.spawn(move || {
+            let url = get_json(&format!(
+                "https://thumbnails.roblox.com/v1/users/avatar?userIds={id}&size=352x352&format=Png&isCircular=false"
             ))
             .ok()
-            .and_then(|v| v["count"].as_u64())
-            .unwrap_or(0)
-        };
-        let h_hd = s.spawn(move || {
-                get_json(&format!(
+            .map(|v| str_of(&v["data"][0]["imageUrl"]))
+            .unwrap_or_default();
+            on(ProfileUpdate::Avatar(url));
+        });
+        // Only when the seed has no headshot (a search result carries one, the user
+        // record from a server row may not).
+        if user.headshot.is_empty() {
+            s.spawn(move || {
+                let url = get_json(&format!(
                     "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={id}&size=420x420&format=Png&isCircular=false"
                 ))
                 .ok()
-                .map(|hd| str_of(&hd["data"][0]["imageUrl"]))
-                .unwrap_or_default()
-            });
-        let h_friends = s.spawn(move || count_of("friends"));
-        let h_followers = s.spawn(move || count_of("followers"));
-        let h_following = s.spawn(move || count_of("followings"));
-        let h_avatar = s.spawn(move || {
-                get_json(&format!(
-                    "https://thumbnails.roblox.com/v1/users/avatar?userIds={id}&size=720x720&format=Png&isCircular=false"
-                ))
-                .ok()
                 .map(|v| str_of(&v["data"][0]["imageUrl"]))
-                .unwrap_or_default()
+                .unwrap_or_default();
+                on(ProfileUpdate::Headshot(url));
             });
-        let h_playing = s
-            .spawn(move || place_id_opt.and_then(|pid| games_by_places(&[pid]).into_iter().next()));
-        let h_exp = s.spawn(move || {
+        }
+        s.spawn(move || on(ProfileUpdate::Wearing(fetch_user_currently_wearing(id, cookie_ref))));
+        s.spawn(move || on(ProfileUpdate::Badges(fetch_user_badges(id))));
+        s.spawn(move || on(ProfileUpdate::Favorites(fetch_profile_favorites(id, cookie_ref))));
+        s.spawn(move || {
             let exp_ids: Vec<u64> = get_json(&format!(
                 "https://games.roblox.com/v2/users/{id}/games?accessFilter=2&limit=12"
             ))
@@ -2540,70 +2554,53 @@ pub fn fetch_friend_profile(
                     .collect()
             })
             .unwrap_or_default();
-            if exp_ids.is_empty() {
+            let games = if exp_ids.is_empty() {
                 Vec::new()
             } else {
                 games_by_universe(&exp_ids)
+            };
+            on(ProfileUpdate::Creations(games));
+        });
+        // Presence is the one section that can reveal a new place, so it runs last and its
+        // game is resolved from the place it reports.
+        s.spawn(move || {
+            let mut presence_user = user.clone();
+            enrich_presence(&mut presence_user, cookie_ref);
+            on(ProfileUpdate::Presence {
+                presence: presence_user.presence,
+                location: presence_user.location.clone(),
+                place_id: presence_user.place_id,
+            });
+            let pid = presence_user.place_id.or(place_id);
+            if let Some(pid) = pid {
+                if let Some(game) = games_by_places(&[pid]).into_iter().next() {
+                    on(ProfileUpdate::Playing(Some(game)));
+                }
             }
         });
-        let h_favs = s.spawn(move || fetch_profile_favorites(id, cookie_ref));
-        let h_badges = s.spawn(move || fetch_user_badges(id));
-        let wearing = fetch_user_currently_wearing(id, cookie_ref);
-        (
-            h_hd.join().unwrap_or_default(),
-            h_friends.join().unwrap_or_default(),
-            h_followers.join().unwrap_or_default(),
-            h_following.join().unwrap_or_default(),
-            h_avatar.join().unwrap_or_default(),
-            h_playing.join().unwrap_or_default(),
-            h_exp.join().unwrap_or_default(),
-            h_favs.join().unwrap_or_default(),
-            h_badges.join().unwrap_or_default(),
-            wearing,
-            h_presence.join().unwrap_or(presence_fallback),
-            h_info
-                .join()
-                .unwrap_or_else(|_| Err("request thread failed".to_string())),
-        )
     });
-    let info = info_res?;
-    user = presence_user;
-    if let Some(n) = info["name"].as_str() {
-        user.name = n.to_string();
-    }
-    if let Some(d) = info["displayName"].as_str() {
-        user.display = d.to_string();
-    }
-    let description = str_of(&info["description"]);
-    let created = str_of(&info["created"]).chars().take(10).collect();
-    let verified = info["hasVerifiedBadge"].as_bool().unwrap_or(false);
-    user.verified = verified;
-    if !hd_url.is_empty() {
-        user.headshot = hd_url;
-    }
-    // Presence can reveal the place after the parallel block started; resolve it now
-    // instead of showing a profile with no "currently playing" card.
-    if playing_game.is_none() {
-        if let Some(pid) = user.place_id {
-            playing_game = games_by_places(&[pid]).into_iter().next();
-        }
-    }
+    on(ProfileUpdate::Done);
+}
 
-    Ok(FriendProfile {
-        user,
-        description,
-        created,
-        verified,
-        friends,
-        followers,
-        following,
-        avatar,
-        playing_game,
-        experiences,
-        favorites,
-        badges,
-        currently_wearing,
-    })
+/// The whole profile in one call, assembled from the same stream. Used where the result is
+/// cached rather than painted (prefetching, the signed-in account's own page).
+pub fn fetch_friend_profile(
+    user: User,
+    cookie: Option<String>,
+) -> Result<FriendProfile, String> {
+    let seed = crate::profile_cache::seed(&user);
+    let (tx, rx) = std::sync::mpsc::channel();
+    stream_friend_profile(user, cookie, |update| {
+        let _ = tx.send(update);
+    });
+    let mut stream = crate::profile_cache::FriendStream::new(seed.user.id, seed, rx);
+    stream.drain();
+    if !stream.profile.sections.info {
+        return Err(stream
+            .err
+            .unwrap_or_else(|| "Could not load this profile.".to_string()));
+    }
+    Ok(stream.profile)
 }
 
 pub fn fetch_robux_balance(user_id: u64, cookie: &str) -> Option<u64> {

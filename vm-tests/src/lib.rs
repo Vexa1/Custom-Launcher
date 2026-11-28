@@ -47,6 +47,9 @@ pub mod net_probe;
 #[path = "../../src/overlay_spec.rs"]
 pub mod overlay_spec;
 
+#[path = "../../src/profile_cache.rs"]
+pub mod profile_cache;
+
 #[path = "../../src/party.rs"]
 pub mod party;
 

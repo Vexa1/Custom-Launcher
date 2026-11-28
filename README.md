@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.27
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.28
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -580,6 +580,13 @@ src/
                      never re-renders the composite itself. Roblox's freshly baked avatar
                      is polled at 150/300/500 ms after an edit and swapped in when it
                      lands, so the click is instant *and* the result is the real model.
+  profile_cache.rs   Player Profiles without a loading screen: the optimistic seed
+                     (the user record the click already carried - names, headshot,
+                     presence, place), the section-by-section assembly as each of the
+                     nine parallel requests lands, and the 32-entry LRU shelf with a
+                     5-minute TTL that serves a revisit instantly and refreshes a stale
+                     one underneath. Plus the 120 ms hover dwell that warms a profile
+                     from the friends strip without a mouse sweep starting anything.
   telemetry.rs       RAM sampling, self-imposed RAM/CPU limits, the
                      window-visibility key used by the idle animation pacer.
   types.rs           Data model: Game, Profile, User, Friend, Settings (+ Default),

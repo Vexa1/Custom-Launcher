@@ -19,6 +19,34 @@ pub fn fast_scrolling(ui: &egui::Ui) -> bool {
         .unwrap_or(false)
 }
 
+/// A quiet placeholder for a value that has not arrived yet.
+///
+/// It pulses very slowly with the frame clock, so a profile that is still filling in reads
+/// as "on its way" rather than as an empty field, and it keeps asking for frames while it
+/// is on screen (nothing else on the page is animating at that point).
+pub fn skeleton(ui: &mut egui::Ui, size: Vec2, radius: u8) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    let p = pal(ui);
+    let t = ui.input(|i| i.time) as f32;
+    let pulse = 0.5 + 0.5 * (t * 2.0).sin();
+    let fill = p.profile_border.linear_multiply(0.45 + 0.3 * pulse);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(radius), fill);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(40));
+    resp
+}
+
+/// A skeleton row of cards, for a section whose items have not arrived yet.
+pub fn skeleton_cards(ui: &mut egui::Ui, count: usize, size: Vec2) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        for _ in 0..count {
+            skeleton(ui, size, 12);
+        }
+    });
+}
+
 pub fn avatar_glass_frame(ui: &egui::Ui, pad: i8) -> egui::Frame {
     card_frame(ui, pad)
 }

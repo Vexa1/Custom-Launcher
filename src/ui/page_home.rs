@@ -103,6 +103,11 @@ impl Creblox {
                             };
                             r = r.on_hover_text(tip);
                         }
+                        if r.hovered() {
+                            // One action per frame; the app debounces it before warming the
+                            // profile, so a sweep across the strip starts nothing.
+                            acts.push(Action::HoverFriend(f.id));
+                        }
                         if r.clicked() {
                             acts.push(Action::OpenFriend(f.clone()));
                         }

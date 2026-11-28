@@ -426,6 +426,9 @@ pub fn pal(ui: &egui::Ui) -> Palette {
 }
 
 pub const GREEN: Color32 = Color32::from_rgb(0, 176, 111);
+/// Ink for text on a filled accent (the green Join buttons). White on `GREEN` is 2.5:1,
+/// which is not readable; this is 7.3:1 on the same fill.
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x1A, 0x12);
 pub const BLUE: Color32 = Color32::from_rgb(0, 162, 255);
 pub const ORANGE: Color32 = Color32::from_rgb(246, 136, 2);
 pub const RED: Color32 = Color32::from_rgb(210, 50, 50);

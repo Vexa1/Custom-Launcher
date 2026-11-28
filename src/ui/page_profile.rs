@@ -1,7 +1,9 @@
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
 
 use crate::app::Creblox;
-use crate::theme::{BLUE, GREEN, ORANGE, RED, accent_color, card_frame_colored, compact, pal};
+use crate::theme::{
+    BLUE, GREEN, ON_ACCENT, ORANGE, RED, accent_color, card_frame_colored, compact, pal,
+};
 use crate::types::{Action, FriendProfile, Page, User};
 use crate::ui::widgets::*;
 
@@ -31,7 +33,7 @@ impl Creblox {
                 ui.add_space(18.0);
                 self.render_profile_badges_section(ui, profile, acts);
 
-                if !profile.experiences.is_empty() {
+                if profile.sections.creations && !profile.experiences.is_empty() {
                     ui.add_space(18.0);
                     let p = pal(ui);
                     ui.horizontal(|ui| {
@@ -127,7 +129,7 @@ impl Creblox {
                             ui.ctx().copy_text(profile.user.name.clone());
                             self.status = format!("Copied @{}!", profile.user.name);
                         }
-                        if !profile.created.is_empty() {
+                        if profile.sections.info && !profile.created.is_empty() {
                             ui.label(RichText::new("•").size(12.0).color(p.muted));
                             ui.label(
                                 RichText::new(format!("Joined {}", profile.created))
@@ -156,11 +158,17 @@ impl Creblox {
                     // Clean metric row
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        for (count, label) in [
-                            (profile.friends, "Friends"),
-                            (profile.followers, "Followers"),
-                            (profile.following, "Following"),
+                        for (count, label, loaded) in [
+                            (profile.friends, "Friends", profile.sections.friends),
+                            (profile.followers, "Followers", profile.sections.followers),
+                            (profile.following, "Following", profile.sections.following),
                         ] {
+                            if !loaded {
+                                // Same footprint as the pill it replaces, so the header does
+                                // not jump when the count lands.
+                                skeleton(ui, egui::vec2(76.0, 28.0), 10);
+                                continue;
+                            }
                             egui::Frame::new()
                                 .fill(p.surface_bg)
                                 .stroke(egui::Stroke::new(1.0, p.profile_border))
@@ -377,7 +385,7 @@ impl Creblox {
                     RichText::new("Join Game")
                         .size(12.5)
                         .strong()
-                        .color(Color32::WHITE),
+                        .color(ON_ACCENT),
                 )
                 .fill(GREEN)
                 .corner_radius(8)
@@ -491,6 +499,13 @@ impl Creblox {
                     }
                 });
             });
+            return;
+        }
+
+        if !profile.sections.info {
+            skeleton(ui, egui::vec2(ui.available_width().min(430.0), 12.0), 6);
+            ui.add_space(6.0);
+            skeleton(ui, egui::vec2(ui.available_width().min(260.0), 12.0), 6);
             return;
         }
 
@@ -608,7 +623,7 @@ impl Creblox {
                             RichText::new("Join")
                                 .size(13.5)
                                 .strong()
-                                .color(Color32::WHITE),
+                                .color(ON_ACCENT),
                         )
                         .fill(GREEN)
                         .corner_radius(10)
@@ -643,7 +658,7 @@ impl Creblox {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label(RichText::new("Currently Wearing").size(16.5).strong());
-            if !profile.currently_wearing.is_empty() {
+            if profile.sections.wearing && !profile.currently_wearing.is_empty() {
                 ui.label(
                     RichText::new(format!("{}", profile.currently_wearing.len()))
                         .size(12.5)
@@ -652,6 +667,11 @@ impl Creblox {
             }
         });
         ui.add_space(8.0);
+
+        if !profile.sections.wearing {
+            skeleton_cards(ui, 3, egui::vec2(150.0, 200.0));
+            return;
+        }
 
         if profile.currently_wearing.is_empty() {
             card_frame_colored(16, p.profile_card_bg, p.profile_border).show(ui, |ui| {
@@ -831,7 +851,15 @@ impl Creblox {
         acts: &mut Vec<Action>,
     ) {
         let p = pal(ui);
-        Self::render_profile_section_header(ui, "Favorites", profile.favorites.len());
+        Self::render_profile_section_header(
+            ui,
+            "Favorites",
+            if profile.sections.favorites {
+                profile.favorites.len()
+            } else {
+                0
+            },
+        );
 
         if profile.favorites.is_empty() {
             card_frame_colored(16, p.profile_card_bg, p.profile_border).show(ui, |ui| {
@@ -842,6 +870,11 @@ impl Creblox {
                         .color(p.muted),
                 );
             });
+            return;
+        }
+
+        if !profile.sections.favorites {
+            skeleton_cards(ui, 3, egui::vec2(220.0, 150.0));
             return;
         }
 
@@ -864,7 +897,20 @@ impl Creblox {
         acts: &mut Vec<Action>,
     ) {
         let p = pal(ui);
-        Self::render_profile_section_header(ui, "Badges", profile.badges.len());
+        Self::render_profile_section_header(
+            ui,
+            "Badges",
+            if profile.sections.badges {
+                profile.badges.len()
+            } else {
+                0
+            },
+        );
+
+        if !profile.sections.badges {
+            skeleton_cards(ui, 4, egui::vec2(134.0, 168.0));
+            return;
+        }
 
         if profile.badges.is_empty() {
             card_frame_colored(16, p.profile_card_bg, p.profile_border).show(ui, |ui| {
@@ -1090,6 +1136,16 @@ impl Creblox {
         }
         if fp.is_some() {
             self.friend_profile = fp;
+        }
+        // Sections that failed leave a skeleton behind; say so under the page instead of
+        // pretending the user has no badges.
+        if let Some(err) = self.friend_err.clone() {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(format!("Some of this profile could not be loaded: {err}"))
+                    .size(12.0)
+                    .color(pal(ui).muted),
+            );
         }
     }
 }

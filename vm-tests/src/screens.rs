@@ -33,6 +33,10 @@ pub const RED: Color32 = Color32::from_rgb(0xD2, 0x32, 0x32);
 pub const RAIL: Color32 = Color32::from_rgb(0x33, 0x38, 0x4A);
 
 const RADIUS: u8 = 8;
+/// `palette.profile_border` at the loading pulse: a section that has not arrived.
+pub const SKELETON: Color32 = Color32::from_rgb(0x26, 0x2B, 0x38);
+/// `theme::ON_ACCENT`: text on a filled green button (white is only 2.5:1 on it).
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x1A, 0x12);
 
 /// Every rendered screen, in the order the gallery is written.
 pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
@@ -47,6 +51,7 @@ pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
         ("inventory", inventory),
         ("inventory-private", inventory_private),
         ("sidebar", sidebar),
+        ("profile", profile),
     ]
 }
 
@@ -205,6 +210,133 @@ fn stat_chip(ui: &mut egui::Ui, probe: &mut Probe, id: &str, value: &str, label:
                 );
             });
         });
+}
+
+/// A placeholder bar, the same shape the profile page uses for a section that has not
+/// arrived: a rounded fill of the border tone, pulsing slightly in the real page.
+fn skeleton(ui: &mut egui::Ui, probe: &mut Probe, id: impl Into<String>, size: Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(8), SKELETON);
+    probe.widget(id, rect, false);
+}
+
+/// Player Profiles on frame 1: the header, the avatar and the buttons come from the user
+/// record the click carried, and only the sections that are still in flight are skeletons.
+pub fn profile(ui: &mut egui::Ui, probe: &mut Probe) {
+    shell(ui, probe, "profile", |ui, probe| {
+        heading(ui, probe, "profile.title", "Profile", 22.0);
+        ui.add_space(10.0);
+
+        card_min(ui, probe, "profile.header", 980.0, 0.0, |ui, probe| {
+            ui.horizontal_top(|ui| {
+                ui.add_space(4.0);
+                avatar(ui, probe, "profile.header.avatar", 148.0, SURFACE);
+                ui.add_space(18.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        heading(ui, probe, "profile.header.name", "Vexa", 24.0);
+                        ui.add_space(8.0);
+                        probe.button(
+                            ui,
+                            "profile.header.verified",
+                            "verified",
+                            Vec2::new(64.0, 20.0),
+                            SURFACE,
+                            BLUE,
+                        );
+                        ui.add_space(8.0);
+                        probe.button(
+                            ui,
+                            "profile.header.presence",
+                            "In Game - Adopt Me!",
+                            Vec2::new(148.0, 22.0),
+                            SURFACE,
+                            GREEN,
+                        );
+                        // The actions are part of the frame-1 shell: the user record the
+                        // click carried already knows the place, so Join Game is live.
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                probe.button(
+                                    ui,
+                                    "profile.action.join",
+                                    "Join Game",
+                                    Vec2::new(104.0, 30.0),
+                                    GREEN,
+                                    ON_ACCENT,
+                                );
+                                ui.add_space(6.0);
+                                probe.button(
+                                    ui,
+                                    "profile.action.add",
+                                    "Add Friend",
+                                    Vec2::new(96.0, 30.0),
+                                    SURFACE,
+                                    TEXT,
+                                );
+                                ui.add_space(6.0);
+                                probe.button(
+                                    ui,
+                                    "profile.action.more",
+                                    "...",
+                                    Vec2::new(32.0, 30.0),
+                                    SURFACE,
+                                    TEXT,
+                                );
+                            },
+                        );
+                    });
+                    ui.add_space(6.0);
+                    meta(ui, probe, "profile.header.handle", "@vexatheshadow  -  ID 169567434");
+                    ui.add_space(10.0);
+                    // Counters that have not answered yet keep the pill footprint.
+                    ui.horizontal(|ui| {
+                        for (id, w) in [
+                            ("profile.count.friends", 76.0),
+                            ("profile.count.followers", 76.0),
+                            ("profile.count.following", 76.0),
+                        ] {
+                            skeleton(ui, probe, id, Vec2::new(w, 28.0));
+                            ui.add_space(8.0);
+                        }
+                    });
+                    ui.add_space(12.0);
+                    // The bio request is still running: two placeholder lines, never
+                    // "this user has no bio".
+                    skeleton(ui, probe, "profile.bio.line1", Vec2::new(430.0, 12.0));
+                    ui.add_space(6.0);
+                    skeleton(ui, probe, "profile.bio.line2", Vec2::new(260.0, 12.0));
+                });
+            });
+        });
+
+        ui.add_space(16.0);
+        heading(ui, probe, "profile.section.wearing", "Currently Wearing", 16.5);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            for i in 0..3 {
+                skeleton(
+                    ui,
+                    probe,
+                    format!("profile.wearing.{i}"),
+                    Vec2::new(150.0, 200.0),
+                );
+                ui.add_space(12.0);
+            }
+        });
+
+        ui.add_space(18.0);
+        heading(ui, probe, "profile.section.badges", "Badges", 16.5);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            for i in 0..4 {
+                skeleton(ui, probe, format!("profile.badges.{i}"), Vec2::new(134.0, 168.0));
+                ui.add_space(12.0);
+            }
+        });
+    });
 }
 
 pub fn home(ui: &mut egui::Ui, probe: &mut Probe) {
