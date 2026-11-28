@@ -2918,7 +2918,7 @@ impl Creblox {
             ui.add_space(4.0);
             small_text(
                 ui,
-                "Downloads the latest release from GitHub inside the app. Installing only happens when you click Install & Restart."
+                "Downloads the latest release from GitHub inside the app. Installing happens when you click Install & Restart, or automatically when Automatic updates is on and no match is running."
                     .to_string(),
             );
             ui.add_space(6.0);
@@ -2935,6 +2935,34 @@ impl Creblox {
                     "Startup launcher update checks disabled — click Check for Updates anytime."
                         .to_string()
                 };
+            }
+            let prev_auto_update = self.settings.auto_update;
+            ui.checkbox(
+                &mut self.settings.auto_update,
+                "Automatic updates (check every 30 seconds, install and restart outside a match)",
+            );
+            if self.settings.auto_update != prev_auto_update {
+                save_settings(&self.settings);
+                self.auto_updater
+                    .set_enabled(self.settings.auto_update);
+                if self.settings.auto_update {
+                    self.auto_updater.retry();
+                    self.auto_update_failed_note = None;
+                    self.status =
+                        "Automatic updates on — checking and installing every release."
+                            .to_string();
+                } else {
+                    self.status = "Automatic updates off — checks stay manual.".to_string();
+                }
+            }
+            if let Some(failed) = self.auto_update_failed_note.clone() {
+                small_text(
+                    ui,
+                    format!(
+                        "Automatic install of {failed} failed; it will not retry all session. \
+                         Install & Restart retries now, and a newer release is tried automatically."
+                    ),
+                );
             }
             let prev_auto_download = self.settings.auto_download_updates;
             ui.checkbox(

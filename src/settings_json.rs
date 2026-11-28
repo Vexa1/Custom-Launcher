@@ -161,6 +161,7 @@ pub fn load_settings_from(dir: &Path) -> Settings {
         multi_instance: v["multi_instance"].as_bool().unwrap_or(def.multi_instance),
         notifications_silent: v["notifications_silent"].as_bool().unwrap_or(false),
         auto_check_updates: v["auto_check_updates"].as_bool().unwrap_or(true),
+        auto_update: v["auto_update"].as_bool().unwrap_or(false),
         auto_download_updates: v["auto_download_updates"].as_bool().unwrap_or(false),
         auto_refresh: v["auto_refresh"].as_bool().unwrap_or(true),
         overlay_enabled: v["overlay_enabled"]
@@ -439,6 +440,7 @@ pub fn save_settings_to(dir: &Path, s: &Settings) -> SaveOutcome {
         "multi_instance": s.multi_instance,
         "notifications_silent": s.notifications_silent,
         "auto_check_updates": s.auto_check_updates,
+        "auto_update": s.auto_update,
         "auto_download_updates": s.auto_download_updates,
         "auto_refresh": s.auto_refresh,
         "overlay_enabled": s.overlay_enabled,

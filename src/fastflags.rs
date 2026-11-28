@@ -446,6 +446,7 @@ pub fn export_effective_flags_json(cfg: &FastFlagsConfig, target_fps: Option<u32
     serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn sync_to_version_dir(
     version_dir: &Path,
     cfg: &FastFlagsConfig,

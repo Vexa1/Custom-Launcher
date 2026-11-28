@@ -111,6 +111,7 @@ pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
         ("settings", settings),
         ("settings-animations", settings_animations),
         ("settings-updates", settings_updates),
+        ("settings-auto-update", settings_auto_update),
         ("updater", updater),
         ("overlay", overlay),
         ("inventory", inventory),
@@ -1291,6 +1292,68 @@ pub fn settings_updates(ui: &mut egui::Ui, probe: &mut Probe) {
             ui.add_space(6.0);
             let lines: Vec<String> = LOG.iter().map(|line| line.to_string()).collect();
             crate::update_card::paint_log(ui, &lines);
+        });
+    });
+}
+
+/// The Settings page's Launcher Updates card with Automatic updates on.
+///
+/// Mirrors the shipped card's three checkboxes (the first is the new 30-second loop switch),
+/// so the rendered page shows the toggle's label and its position in the card.
+pub fn settings_auto_update(ui: &mut egui::Ui, probe: &mut Probe) {
+    shell(ui, probe, "settings", |ui, probe| {
+        heading(ui, probe, "settings.title", "Settings", 22.0);
+        ui.add_space(10.0);
+        card_min(ui, probe, "settings.auto.available", 940.0, 0.0, |ui, probe| {
+            heading(
+                ui,
+                probe,
+                "settings.auto.available.title",
+                "New version ready: v0.5.70",
+                14.0,
+            );
+            ui.add_space(6.0);
+            body(
+                ui,
+                probe,
+                "settings.auto.available.notes",
+                "Installs automatically when no Roblox match is running.",
+                MUTED(),
+            );
+        });
+        ui.add_space(14.0);
+        card_min(ui, probe, "settings.auto.card", 940.0, 0.0, |ui, probe| {
+            heading(
+                ui,
+                probe,
+                "settings.auto.title",
+                "Launcher Updates",
+                14.0,
+            );
+            ui.add_space(6.0);
+            body(
+                ui,
+                probe,
+                "settings.auto.description",
+                "Downloads releases inside the app. Installs manually, or automatically when no match is running.",
+                MUTED(),
+            );
+            ui.add_space(6.0);
+            let mut auto_update = true;
+            ui.checkbox(
+                &mut auto_update,
+                "Automatic updates (check every 30 seconds, install and restart outside a match)",
+            );
+            let mut on_startup = true;
+            ui.checkbox(
+                &mut on_startup,
+                "Check for launcher updates on startup",
+            );
+            let mut download = false;
+            ui.checkbox(
+                &mut download,
+                "Download updates automatically when available (install stays manual)",
+            );
         });
     });
 }

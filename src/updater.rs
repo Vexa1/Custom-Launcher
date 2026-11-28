@@ -18,6 +18,7 @@ use crate::theme::{apply_theme, install_fonts, theme_accent};
 
 pub const CREBLOX_REPO: &str = "Vexa1/Custom-Launcher";
 pub const CREBLOX_RELEASES_URL: &str = "https://github.com/Vexa1/Custom-Launcher/releases";
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Which archive this build may install is fixed at compile time, so a macOS binary has no code
@@ -327,9 +328,23 @@ pub fn parse_github_release_update(v: &Value, current_version: &str) -> Option<C
     })
 }
 
-pub fn check_creblox_update(token: Option<&str>) -> Result<Option<CrebloxRelease>, String> {
+/// The answer to one latest-release check. `not_modified` is GitHub's 304: the ETag still
+/// matches, so the release the launcher already knows about is still the latest one.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateCheck {
+    pub release: Option<CrebloxRelease>,
+    pub not_modified: bool,
+    pub etag: Option<String>,
+}
+
+/// Checks the latest release, sending `If-None-Match` when a previous ETag is known.
+/// A 304 is a successful, empty answer: near-zero bandwidth and no rate-limit spend.
+pub fn check_creblox_update(
+    token: Option<&str>,
+    etag: Option<&str>,
+) -> Result<UpdateCheck, String> {
     if CREBLOX_REPO.is_empty() {
-        return Ok(None);
+        return Ok(UpdateCheck::default());
     }
     let url = format!("https://api.github.com/repos/{CREBLOX_REPO}/releases/latest");
     let agent = ureq::AgentBuilder::new()
@@ -343,8 +358,18 @@ pub fn check_creblox_update(token: Option<&str>) -> Result<Option<CrebloxRelease
     if let Some(token) = token {
         req = req.set("Authorization", &format!("Bearer {token}"));
     }
+    if let Some(etag) = etag {
+        req = req.set("If-None-Match", etag);
+    }
     let resp = match req.call() {
         Ok(r) => r,
+        Err(ureq::Error::Status(304, _)) => {
+            return Ok(UpdateCheck {
+                release: None,
+                not_modified: true,
+                etag: etag.map(str::to_string),
+            });
+        }
         Err(ureq::Error::Status(404, _)) => {
             return Err(if token.is_none() {
                 "The update repository is private. Add a read-only GitHub token in Settings → Launcher Updates.".to_string()
@@ -367,12 +392,17 @@ pub fn check_creblox_update(token: Option<&str>) -> Result<Option<CrebloxRelease
         }
         Err(e) => return Err(format!("Could not reach update server: {e}")),
     };
+    let new_etag = resp
+        .header("etag")
+        .map(str::to_string)
+        .or_else(|| etag.map(str::to_string));
     let text = resp.into_string().map_err(|e| e.to_string())?;
     let json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(parse_github_release_update(
-        &json,
-        env!("CARGO_PKG_VERSION"),
-    ))
+    Ok(UpdateCheck {
+        release: parse_github_release_update(&json, env!("CARGO_PKG_VERSION")),
+        not_modified: false,
+        etag: new_etag,
+    })
 }
 
 pub fn parse_live_hotfix_str(text: &str) -> Result<LiveHotfix, String> {

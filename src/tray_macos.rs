@@ -1328,39 +1328,6 @@ pub fn should_start_in_tray(args: &[String], tray_enabled: bool) -> bool {
         })
 }
 
-pub fn build_startup_command(exe_path: &Path, start_minimized: bool) -> String {
-    if start_minimized {
-        format!("\"{}\" --tray", exe_path.display())
-    } else {
-        format!("\"{}\"", exe_path.display())
-    }
-}
-
-pub fn parse_startup_command(cmd: &str) -> Option<(String, bool)> {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let (exe, rest) = if let Some(after_quote) = trimmed.strip_prefix('"') {
-        let end = after_quote.find('"')?;
-        (&after_quote[..end], &after_quote[end + 1..])
-    } else {
-        match trimmed.find(char::is_whitespace) {
-            Some(idx) => (&trimmed[..idx], &trimmed[idx..]),
-            None => (trimmed, ""),
-        }
-    };
-    if exe.is_empty() {
-        return None;
-    }
-    let minimized = rest.split_whitespace().any(|flag| {
-        matches!(
-            flag.to_ascii_lowercase().as_str(),
-            "--tray" | "--minimized" | "--start-minimized"
-        )
-    });
-    Some((exe.to_string(), minimized))
-}
 
 fn launch_agent_path() -> Option<PathBuf> {
     Some(

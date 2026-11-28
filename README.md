@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.69
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.70
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -607,9 +607,11 @@ src/
                      window-follow logic, crosshair/panel painters).
   companion.rs       `--companion`: headless watcher that runs overlays and
                      reopens the launcher when the game ends.
-  updater.rs         Update check, release parsing, SHA-256 verification,
-                     download/install (patch & full), update window, hotfix.json,
-                     CLI helpers, macOS .app swap and Windows binary swap.
+  updater.rs         Update check (ETag/If-None-Match), release parsing, SHA-256
+                     verification, download/install (patch & full), update window,
+                     hotfix.json, CLI helpers, macOS .app swap and Windows binary swap.
+  auto_update.rs     The automatic-update scheduler: 30 s cadence, gameplay
+                     deferral and the failed-tag guard.
   tray.rs            Thin cross-platform facade over the tray implementations.
   tray_macos.rs      NSStatusItem, menu items, activation, single-instance lock,
                      login item management.
@@ -846,10 +848,13 @@ Updates are pulled from GitHub by hand — that is the supported path today.
 On a machine that has never run CREBLOX, use the *full build* archive and double-click
 **`Build CREBLOX.command`** instead.
 
-The in-app updater is **not** part of this flow. `src/updater.rs`, the update window and
-their call sites are dormant: leave them untouched while working on the app, and they will
-be deleted in a future release. Old `settings.json` files may still carry the update-token
-and `auto_check_updates` keys; they are accepted and ignored.
+The in-app updater is the primary path. Settings → Launcher Updates checks GitHub, and
+**Automatic updates** (`auto_update` in `settings.json`) checks every 30 seconds with an
+`If-None-Match` ETag, downloads and verifies the release, and rebuilds/restarts without a
+click once no Roblox match is running. It waits for the lobby when a match starts mid-update,
+keeps retrying after the restart it performs, and remembers a failed tag for the session so
+the 30-second loop cannot rebuild it forever; a newer tag is still tried. `src/updater.rs`
+and `src/auto_update.rs` hold the install flow and the scheduler rules.
 
 ## 4. Data and configuration paths (macOS)
 

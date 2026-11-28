@@ -862,7 +862,11 @@ pub enum Msg {
     WallpaperPicked(Option<String>),
     WallpaperLoaded(String, Result<egui::ColorImage, String>),
     UpdateCheckResult(bool, Result<Option<(String, String)>, String>),
-    AppUpdateCheckResult(bool, Result<Option<crate::updater::CrebloxRelease>, String>),
+    AppUpdateCheckResult(
+        bool,
+        bool,
+        Result<Option<crate::updater::CrebloxRelease>, String>,
+    ),
     AppUpdateDownloaded(String, Result<std::path::PathBuf, String>),
     AppInstallDone(String, Result<(), String>, Vec<String>),
     AppPatchDone(

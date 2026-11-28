@@ -1,0 +1,22 @@
+name: verify-macos
+
+# Apple's `ld` is the only linker that proves a macOS release links: `cargo check` on Linux
+# cannot see `_dispatch_get_main_queue`-style failures. This builds the shipping binary with
+# the same deployment target as `scripts/build-macos-app.sh`, on Apple's runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release with Apple's linker
+        run: cargo build --release --locked

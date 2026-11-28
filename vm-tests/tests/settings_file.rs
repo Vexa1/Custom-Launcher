@@ -60,6 +60,7 @@ fn every_shape() -> Settings {
     s.target_fps = Some(144);
     s.ram_limit_mb = Some(3072);
     s.cpu_limit_pct = Some(65);
+    s.auto_update = true;
     s.server_min_players = Some(2);
     s.server_max_players = Some(24);
     s.server_max_ping = Some(150);

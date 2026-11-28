@@ -53,6 +53,17 @@ cargo test --locked --manifest-path vm-tests/Cargo.toml --test overlay_ping_e2e
 echo "== vm-tests: UI screenshots rendered to vm-tests/artifacts/"
 cargo test --locked --manifest-path vm-tests/Cargo.toml --test shots
 
+# `dispatch_get_main_queue()` is a C macro in <dispatch/queue.h>, not an exported function.
+# Declaring it as `extern "C" { fn ... }` passes `cargo check` and fails Apple's `ld` with
+# "_dispatch_get_main_queue, referenced from ..."; the symbol to use is the queue object
+# `_dispatch_main_q`. 0.5.69 shipped that mistake, so refuse it before anything else.
+echo "== creblox: no dispatch_get_main_queue() function declaration"
+if grep -rn 'fn dispatch_get_main_queue' src/; then
+    echo "error: macOS dispatch_get_main_queue is a C macro, not a function symbol." >&2
+    echo "       Use the exported _dispatch_main_q queue object instead." >&2
+    exit 1
+fi
+
 # `--all-targets` is deliberate: the app binary, its test target and every extra binary are
 # checked for the release OS. A plain `cargo check` hid a macOS-only error behind
 # CREBLOX_SKIP_LINK_GATE once (the 0.5.63 build failure users hit while installing).

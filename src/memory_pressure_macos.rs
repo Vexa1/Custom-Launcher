@@ -35,7 +35,11 @@ unsafe extern "C" {
     );
     fn dispatch_source_get_data(source: *mut c_void) -> usize;
     fn dispatch_resume(object: *mut c_void);
-    fn dispatch_get_main_queue() -> *mut c_void;
+    // `dispatch_get_main_queue()` is a C macro in <dispatch/queue.h> that expands to
+    // `&_dispatch_main_q`; it is not an exported function. Declaring it as one compiles and
+    // passes `cargo check`, then fails at `ld` with "_dispatch_get_main_queue, referenced
+    // from ...". The queue object below is the real libSystem symbol.
+    static _dispatch_main_q: c_void;
 }
 
 const NORMAL: usize = 0x01;
@@ -71,7 +75,7 @@ pub fn start() {
             std::ptr::addr_of!(_dispatch_source_type_memorypressure),
             0,
             NORMAL | WARN | CRITICAL,
-            dispatch_get_main_queue(),
+            std::ptr::addr_of!(_dispatch_main_q) as *mut c_void,
         );
         if source.is_null() {
             crate::auth::log("memory: could not create the pressure source");

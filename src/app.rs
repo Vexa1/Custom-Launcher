@@ -2,7 +2,7 @@ use eframe::egui::{self, RichText, Sense};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -220,6 +220,14 @@ pub struct Creblox {
     /// Installer/compiler output kept after a failed install so the error row can expand it.
     pub app_update_error_log: Vec<String>,
     pub app_update_error_open: bool,
+    /// Automatic updates: the 30-second loop, gameplay deferral and failed-tag guard.
+    pub auto_updater: crate::auto_update::AutoUpdate,
+    /// This download was started by the automatic loop, so it installs itself when ready.
+    pub auto_update_download: bool,
+    /// ETag of the last latest-release answer; the checking thread updates it.
+    pub auto_update_etag: Arc<Mutex<Option<String>>>,
+    /// The latest tag the loop already tried and failed, so the card can say so.
+    pub auto_update_failed_note: Option<String>,
     pub update_token_input: String,
     pub update_token_saved: bool,
     pub app_patch_applied: Option<String>,
@@ -422,6 +430,7 @@ impl Creblox {
         let _ = sync_client_fastflags(&fastflags, settings.target_fps, &[]);
         install_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx, &settings);
+        let auto_update_enabled = settings.auto_update;
         let auto_close_flag = Arc::new(AtomicBool::new(settings.auto_close_roblox));
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let last_roblox_launch_ms = Arc::new(AtomicU64::new(0));
@@ -582,6 +591,10 @@ impl Creblox {
             app_update_error: None,
             app_update_error_log: Vec::new(),
             app_update_error_open: false,
+            auto_updater: crate::auto_update::AutoUpdate::new(auto_update_enabled),
+            auto_update_download: false,
+            auto_update_etag: Arc::new(Mutex::new(None)),
+            auto_update_failed_note: None,
             update_token_input: String::new(),
             update_token_saved: crate::updater::has_github_update_token(),
             app_patch_applied: None,
@@ -897,6 +910,9 @@ impl Creblox {
     }
 
     pub fn install_app_update(&mut self) {
+        // A press is always a deliberate retry, including after an automatic attempt failed.
+        self.auto_updater.clear_failure();
+        self.auto_update_failed_note = None;
         if self.app_update_downloading || self.app_update_installing {
             return;
         }
@@ -973,21 +989,111 @@ impl Creblox {
         }
     }
 
+    /// Any Roblox match in progress: the installer waits for the lobby.
+    pub fn in_active_game(&self) -> bool {
+        self.active_roblox_place_id.is_some()
+    }
+
+    /// The automatic-update loop, called once per frame.
+    ///
+    /// It starts a check when 30 seconds have passed, resumes a release that was deferred
+    /// during a match, and otherwise arms one repaint for the moment the next check is due.
+    /// Nothing here runs continuous work while the launcher is idle.
+    pub fn maybe_auto_update(&mut self, ctx: &egui::Context) {
+        if !self.settings.auto_update {
+            self.auto_updater.set_enabled(false);
+            return;
+        }
+        self.auto_updater.set_enabled(true);
+        let now = Instant::now();
+        if !self.in_active_game() {
+            if let Some(tag) = self.auto_updater.take_deferred() {
+                // Reuse the release that was seen during the match. Asking GitHub again would
+                // answer 304 with no payload, and the deferred install would be forgotten.
+                let release = self
+                    .app_update_available
+                    .clone()
+                    .filter(|r| r.tag_name == tag);
+                match release {
+                    Some(_) if self.app_update_zip.is_some() => {
+                        if !self.app_update_installing {
+                            self.install_app_update();
+                        }
+                    }
+                    Some(rel)
+                        if cfg!(target_os = "macos")
+                            && rel.zip_url.is_some()
+                            && !self.app_update_downloading =>
+                    {
+                        self.start_auto_update_download();
+                    }
+                    Some(_) => {}
+                    None if !self.app_update_checking && !self.app_update_downloading => {
+                        self.check_app_updates(false);
+                    }
+                    None => {}
+                }
+            }
+        }
+        if self.auto_updater.due(now)
+            && !self.app_update_checking
+            && !self.app_update_downloading
+            && !self.app_update_installing
+        {
+            self.check_app_updates(false);
+        }
+        if let Some(wait) = self.auto_updater.time_until_due(now) {
+            // One wake-up per check: an idle launcher still draws no settled frames.
+            ctx.request_repaint_after(wait.max(Duration::from_millis(250)));
+        }
+    }
+
     pub fn check_app_updates(&mut self, manual: bool) {
-        if self.app_update_checking || self.app_update_downloading {
+        if self.app_update_checking || self.app_update_downloading || self.app_update_installing {
             return;
         }
         self.app_update_checking = true;
+        self.auto_updater.begin_check(Instant::now());
         self.app_update_error = None;
         self.app_update_error_log.clear();
         self.app_update_error_open = false;
         if manual {
             self.app_update_status = Some("Checking GitHub releases...".to_string());
         }
+        // An automatic check sends the last ETag: an unchanged latest release answers 304,
+        // which costs no download and does not count against GitHub's rate limit.
+        let etag = if manual {
+            None
+        } else {
+            self.auto_update_etag
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+        };
+        let etag_slot = Arc::clone(&self.auto_update_etag);
         self.spawn(move || {
             let token = crate::updater::github_update_token();
-            Msg::AppUpdateCheckResult(manual, check_creblox_update(token.as_deref()))
+            match check_creblox_update(token.as_deref(), etag.as_deref()) {
+                Ok(check) => {
+                    if let Some(etag) = check.etag {
+                        if let Ok(mut slot) = etag_slot.lock() {
+                            *slot = Some(etag);
+                        }
+                    }
+                    Msg::AppUpdateCheckResult(manual, check.not_modified, Ok(check.release))
+                }
+                Err(e) => Msg::AppUpdateCheckResult(manual, false, Err(e)),
+            }
         });
+    }
+
+    /// Starts a download on behalf of the automatic loop, so its completion installs itself.
+    fn start_auto_update_download(&mut self) {
+        if self.app_update_downloading {
+            return;
+        }
+        self.auto_update_download = true;
+        self.start_app_update_download(false);
     }
 
     pub fn start_app_update_download(&mut self, force_restart: bool) {
@@ -4229,9 +4335,14 @@ impl Creblox {
                         }
                     }
                 },
-                Msg::AppUpdateCheckResult(manual, res) => {
+                Msg::AppUpdateCheckResult(manual, not_modified, res) => {
                     self.app_update_checking = false;
-                    match res {
+                    self.auto_updater.finish_check();
+                    if not_modified {
+                        // GitHub confirmed the ETag: the release the card already shows is
+                        // still the latest one. Never clear a deferred install here.
+                    } else {
+                        match res {
                         Ok(Some(release)) => {
                             let ver = release.version.clone();
                             let key = format!("creblox:{}", release.tag_name);
@@ -4240,7 +4351,34 @@ impl Creblox {
                             let cached_zip =
                                 crate::updater::downloaded_update_path(&release.version);
                             self.app_update_zip = cached_zip.is_file().then_some(cached_zip);
-                            if self.settings.auto_download_updates
+                            // Automatic updates: install at once when the player is in the
+                            // lobby, or remember the tag and install when the match ends.
+                            let decision = if self.settings.auto_update {
+                                self.auto_updater.on_release(
+                                    &release.tag_name,
+                                    self.in_active_game(),
+                                )
+                            } else {
+                                crate::auto_update::Decision::Skip
+                            };
+                            if decision == crate::auto_update::Decision::Defer {
+                                self.app_update_status = Some(format!(
+                                    "v{ver} will install when your match ends."
+                                ));
+                            }
+                            if decision == crate::auto_update::Decision::Install
+                                && !self.in_active_game()
+                            {
+                                if self.app_update_zip.is_some() {
+                                    self.install_app_update();
+                                } else if cfg!(target_os = "macos")
+                                    && release.zip_url.is_some()
+                                {
+                                    self.start_auto_update_download();
+                                }
+                            }
+                            if decision != crate::auto_update::Decision::Defer
+                                && self.settings.auto_download_updates
                                 && cfg!(target_os = "macos")
                                 && release.zip_url.is_some()
                                 && self.app_update_zip.is_none()
@@ -4303,6 +4441,7 @@ impl Creblox {
                                 self.status = format!("Update check failed: {e}");
                             }
                         }
+                        }
                     }
                 }
                 Msg::AppUpdateDownloaded(ver, res) => {
@@ -4310,6 +4449,8 @@ impl Creblox {
                     self.app_update_progress = None;
                     match res {
                         Ok(path) => {
+                            let auto = self.auto_update_download;
+                            self.auto_update_download = false;
                             if matches!(&self.app_update_available, Some(r) if r.version == ver) {
                                 self.app_update_zip = Some(path);
                                 self.app_update_status =
@@ -4317,8 +4458,34 @@ impl Creblox {
                                 self.status =
                                     format!("v{ver} downloaded — click Install & Restart.");
                             }
+                            if auto {
+                                if self.in_active_game() {
+                                    let tag = self
+                                        .app_update_available
+                                        .as_ref()
+                                        .map(|r| r.tag_name.clone());
+                                    if let Some(tag) = tag {
+                                        self.auto_updater.defer(&tag);
+                                    }
+                                    self.app_update_status = Some(format!(
+                                        "v{ver} downloaded — installs when your match ends."
+                                    ));
+                                } else {
+                                    self.install_app_update();
+                                }
+                            }
                         }
                         Err(e) => {
+                            if self.auto_update_download {
+                                self.auto_update_download = false;
+                                let tag = self
+                                    .app_update_available
+                                    .as_ref()
+                                    .map(|r| r.tag_name.clone())
+                                    .unwrap_or_else(|| ver.clone());
+                                self.auto_updater.on_failure(&tag);
+                                self.auto_update_failed_note = Some(tag);
+                            }
                             self.app_update_error = Some(e.clone());
                             self.app_update_status = None;
                             self.status = format!("Update download failed: {e}");
@@ -4335,6 +4502,17 @@ impl Creblox {
                         self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     Err(e) => {
+                        // The automatic loop must not rebuild the same tag every 30 seconds.
+                        // A newer tag is a different tag and is still tried normally.
+                        if self.settings.auto_update {
+                            let tag = self
+                                .app_update_available
+                                .as_ref()
+                                .map(|r| r.tag_name.clone())
+                                .unwrap_or_else(|| ver.clone());
+                            self.auto_updater.on_failure(&tag);
+                            self.auto_update_failed_note = Some(tag);
+                        }
                         // Drop the progress state so the card returns to the release with its
                         // error and an Install button, rather than a bar that never finishes.
                         self.app_update_installing = false;
@@ -6058,6 +6236,7 @@ impl eframe::App for Creblox {
         if self.poll() {
             ui.ctx().request_repaint();
         }
+        self.maybe_auto_update(ui.ctx());
         // How hard is the page being flung? Measured before anything is drawn, then
         // published for the card code, which has no `&mut Creblox` but must skip hover
         // animation, tooltips and preview lookups while cards race past the pointer.

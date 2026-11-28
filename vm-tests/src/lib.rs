@@ -83,6 +83,9 @@ pub mod profile_cache;
 #[path = "../../src/memory_pressure.rs"]
 pub mod memory_pressure;
 
+#[path = "../../src/auto_update.rs"]
+pub mod auto_update;
+
 #[path = "../../src/party_hud.rs"]
 pub mod party_hud;
 

@@ -52,6 +52,9 @@ pub struct Settings {
     pub multi_instance: bool,
     pub notifications_silent: bool,
     pub auto_check_updates: bool,
+    /// Check every 30 seconds, then download, install and restart without a click when no
+    /// Roblox match is running. Persisted, so the loop resumes after the restart it performs.
+    pub auto_update: bool,
     /// Download an available update automatically; installing still needs a click.
     pub auto_download_updates: bool,
     /// Silently re-fetch game lists, player counts and friends activity in the background.
@@ -178,6 +181,7 @@ impl Default for Settings {
             multi_instance: false,
             notifications_silent: false,
             auto_check_updates: true,
+            auto_update: false,
             auto_download_updates: false,
             auto_refresh: true,
             overlay_enabled: true,

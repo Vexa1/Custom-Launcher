@@ -3,6 +3,7 @@
 
 mod api;
 mod app;
+mod auto_update;
 mod auth;
 mod avatar_anim;
 /// egui from the one place this crate gets it, so shared modules can name its types
