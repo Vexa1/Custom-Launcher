@@ -65,6 +65,9 @@ pub mod profile_cache;
 #[path = "../../src/ram_budget.rs"]
 pub mod ram_budget;
 
+#[path = "../../src/refresh_policy.rs"]
+pub mod refresh_policy;
+
 #[path = "../../src/party.rs"]
 pub mod party;
 
