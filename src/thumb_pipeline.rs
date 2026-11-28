@@ -15,7 +15,7 @@
 //!
 //! Everything is in RAM. No path in this module can write to disk.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 /// Ids per `thumbnails.roblox.com` call. The endpoints accept 100 universe or asset ids and
 /// one call is one round trip, so a grid row of cards costs a fraction of a request.
@@ -43,6 +43,77 @@ pub const WIDE_TARGET: [u32; 2] = [256, 144];
 
 /// The size an icon is decoded to; icon chips are drawn at 16-40 px.
 pub const ICON_TARGET: [u32; 2] = [64, 64];
+
+/// Decoded gallery pictures kept alive. A gallery picture is a full hero image (960x540 RGBA
+/// is ~2 MB), so it gets its own small budget instead of sharing the cards' one.
+pub const GALLERY_TEXTURE_CAP: usize = 8;
+
+/// The two texture budgets share one map but never each other's evictions.
+///
+/// Card thumbnails and Game Details gallery pictures are both `TextureHandle`s in
+/// `Creblox::thumb_tex`. They used to share one insertion queue, so opening a few game pages
+/// pushed card thumbnails out of the cache and every row then re-downloaded. Gallery pictures
+/// are an order of magnitude bigger, so they get their own queue and their own, smaller budget.
+#[derive(Debug, Default, Clone)]
+pub struct TextureBudget {
+    cards: VecDeque<String>,
+    gallery: VecDeque<String>,
+}
+
+impl TextureBudget {
+    /// Records an uploaded card thumbnail.
+    pub fn insert_card(&mut self, url: &str) {
+        Self::insert(&mut self.cards, url);
+    }
+
+    /// Records an uploaded gallery picture.
+    pub fn insert_gallery(&mut self, url: &str) {
+        Self::insert(&mut self.gallery, url);
+    }
+
+    fn insert(lane: &mut VecDeque<String>, url: &str) {
+        if lane.iter().any(|seen| seen == url) {
+            return;
+        }
+        lane.push_back(url.to_string());
+    }
+
+    pub fn clear(&mut self) {
+        self.cards.clear();
+        self.gallery.clear();
+    }
+
+    /// The URLs to drop now, oldest first: over-budget card thumbnails, then over-budget
+    /// gallery pictures. A gallery picture is never returned while its own lane is inside its
+    /// budget, so opening game pages cannot push card thumbnails out of the cache.
+    pub fn evictions(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while self.cards.len() > TEXTURE_CAP {
+            if let Some(old) = self.cards.pop_front() {
+                out.push(old);
+            }
+        }
+        while self.gallery.len() > GALLERY_TEXTURE_CAP {
+            if let Some(old) = self.gallery.pop_front() {
+                out.push(old);
+            }
+        }
+        out
+    }
+}
+
+/// The one gallery picture the hero is showing, wrapped into `media`.
+///
+/// Only this URL is asked for: pre-loading a whole gallery costs a download for every picture
+/// the user may never open, and each one takes budget the cards need.
+pub fn shown_media(media: &[String], index: usize) -> Option<&String> {
+    if media.is_empty() {
+        return None;
+    }
+    media
+        .get(index % media.len())
+        .filter(|url| !url.trim().is_empty())
+}
 
 /// The pixel budget of a Game Details gallery picture. The hero is at most ~580 px wide, so
 /// this covers a 2x display; the picture keeps its own aspect inside these bounds.

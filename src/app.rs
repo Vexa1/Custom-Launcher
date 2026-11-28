@@ -90,9 +90,13 @@ pub struct Creblox {
     pub thumb_owned_dirty: bool,
     /// Decoded, card-sized pixels waiting for a frame slot to be uploaded.
     pub thumb_pixels: std::collections::VecDeque<(String, egui::ColorImage)>,
-    /// Uploaded textures by image URL, oldest first so the cap can drop one.
+    /// Uploaded textures by image URL.
     pub thumb_tex: HashMap<String, egui::TextureHandle>,
-    pub thumb_tex_order: std::collections::VecDeque<String>,
+    /// Which lane each uploaded texture came from, so gallery pictures can never evict a card
+    /// thumbnail when their own budget overflows.
+    pub thumb_budget: crate::thumb_pipeline::TextureBudget,
+    /// Image URLs that are Game Details gallery pictures rather than card thumbnails.
+    pub thumb_gallery: HashSet<String>,
     /// Set when a texture is uploaded or dropped, so the cards' map is republished.
     pub thumb_tex_dirty: bool,
     /// One thumbnail batch in flight; the next is taken when this one answers.
@@ -468,7 +472,8 @@ impl Creblox {
             thumb_owned_dirty: false,
             thumb_pixels: std::collections::VecDeque::new(),
             thumb_tex: HashMap::new(),
-            thumb_tex_order: std::collections::VecDeque::new(),
+            thumb_budget: crate::thumb_pipeline::TextureBudget::default(),
+            thumb_gallery: HashSet::new(),
             thumb_tex_dirty: false,
             thumb_in_flight: false,
             thumb_downloading: HashSet::new(),
@@ -1916,21 +1921,35 @@ impl Creblox {
                 image,
                 egui::TextureOptions::LINEAR,
             );
+            // Gallery pictures go in their own lane, so an overflowing gallery budget can
+            // never push a card thumbnail out of the cache.
+            if self.thumb_gallery.contains(&url) {
+                self.thumb_budget.insert_gallery(&url);
+            } else {
+                self.thumb_budget.insert_card(&url);
+            }
             self.thumb_tex.insert(url.clone(), tex);
-            self.thumb_tex_order.push_back(url);
             self.thumb_tex_dirty = true;
             uploaded += 1;
         }
-        while self.thumb_tex_order.len() > crate::thumb_pipeline::TEXTURE_CAP {
-            let Some(old) = self.thumb_tex_order.pop_front() else {
-                break;
-            };
-            // The texture is gone, so the card needs to be allowed to download it again
-            // if the user scrolls back to it.
+        let mut evicted_shown = false;
+        for old in self.thumb_budget.evictions() {
+            if self.thumb_gallery.remove(&old)
+                && self.shown_gallery_url().as_deref() == Some(old.as_str())
+            {
+                // The picture the hero is showing never stays dropped: ask for it again
+                // instead of leaving the page on a placeholder.
+                evicted_shown = true;
+            }
+            // The texture is gone, so the card (or the hero) needs to be allowed to download
+            // it again if it comes back on screen.
             self.thumb_tex.remove(&old);
             self.thumb_owned.remove(&old);
             self.thumb_tex_dirty = true;
             self.thumb_owned_dirty = true;
+        }
+        if evicted_shown {
+            self.request_shown_gallery_thumb();
         }
         if !self.thumb_pixels.is_empty() {
             // Keep uploading while there is work: the grid fills in over the next frames
@@ -2020,7 +2039,13 @@ impl Creblox {
     fn request_gallery_thumbs(&mut self, media: &[String]) {
         let mut urls: Vec<String> = Vec::new();
         for url in media {
-            if !url.is_empty() && self.thumb_owned.insert(url.clone()) {
+            if url.trim().is_empty() {
+                continue;
+            }
+            // Remembered before the texture exists: the upload pump needs to know which lane
+            // a picture belongs to.
+            self.thumb_gallery.insert(url.clone());
+            if self.thumb_owned.insert(url.clone()) {
                 urls.push(url.clone());
             }
         }
@@ -2040,6 +2065,22 @@ impl Creblox {
         self.spawn(move || Msg::ThumbPixels(crate::api::download_gallery_images(urls)));
     }
 
+    /// The gallery picture the hero is showing, if any.
+    fn shown_gallery_url(&self) -> Option<String> {
+        let media = self.game_extra.as_ref()?.media.as_slice();
+        crate::thumb_pipeline::shown_media(media, self.game_media_idx).cloned()
+    }
+
+    /// Asks for the one gallery picture the hero is showing and nothing else.
+    ///
+    /// The rest of the gallery is fetched as the user steps to it (`GameMediaStep`/
+    /// `GameMediaSelect`), so opening a game costs one picture, not the whole gallery.
+    fn request_shown_gallery_thumb(&mut self) {
+        if let Some(url) = self.shown_gallery_url() {
+            self.request_gallery_thumbs(std::slice::from_ref(&url));
+        }
+    }
+
     /// Republishes the texture map straight away instead of waiting for the frame's upload
     /// pump, so a URL that just gained a replacement alias paints its old image on this very
     /// frame rather than showing a placeholder for one.
@@ -2052,8 +2093,9 @@ impl Creblox {
     /// Drops every decoded and uploaded thumbnail. Nothing here is on disk, so this is the
     /// whole cache.
     pub fn reset_thumb_pipeline(&mut self) {
-        self.thumb_tex_order.clear();
+        self.thumb_budget.clear();
         self.thumb_tex.clear();
+        self.thumb_gallery.clear();
         self.thumb_aliases.clear();
         self.thumb_tex_dirty = true;
         self.thumb_pixels.clear();
@@ -2299,10 +2341,10 @@ impl Creblox {
                         self.republish_thumbs_now();
                     }
                     if matches!(&self.page, Page::Game(cur) if cur.universe_id == uid) {
-                        // The gallery goes through the same texture pool as the cards, which
-                        // is what makes the swap above possible at all.
-                        self.request_gallery_thumbs(&ex.media);
                         self.game_extra = Some(*ex);
+                        // Only the picture the hero is showing is fetched; the rest wait until
+                        // the user steps to them.
+                        self.request_shown_gallery_thumb();
                     }
                 }
                 Msg::GameVideoIdResolved(uid, vid_opt) => {
@@ -4237,8 +4279,8 @@ impl Creblox {
             self.game_video_ids.insert(uid, ex.preview_video_id.clone());
             // Painting the cached gallery from our own textures means a later revalidation
             // can swap its pictures without going through egui's placeholder.
-            self.request_gallery_thumbs(&ex.media);
             self.game_extra = Some(ex.clone());
+            self.request_shown_gallery_thumb();
         }
         self.page = Page::Game(g);
         self.spawn(move || Msg::Details(games_by_universe(&[uid]).into_iter().next()));
@@ -6832,10 +6874,12 @@ impl eframe::App for Creblox {
                         let n = len as isize;
                         self.game_media_idx = ((self.game_media_idx as isize + delta as isize)
                             .rem_euclid(n)) as usize;
+                        self.request_shown_gallery_thumb();
                     }
                 }
                 Action::GameMediaSelect(idx) => {
                     self.game_media_idx = idx;
+                    self.request_shown_gallery_thumb();
                 }
                 Action::JoinServer(pid, job_id) => {
                     self.status = "Getting launch ticket for server...".to_string();
