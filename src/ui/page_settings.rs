@@ -362,7 +362,11 @@ impl Creblox {
                         .ram_limit_mb
                         .map(|mb| format!("{mb} MB"))
                         .unwrap_or_else(|| "Auto".to_string());
-                    ui.label(RichText::new(cur_txt).strong().color(accent));
+                    ui.label(
+                        RichText::new(cur_txt)
+                            .strong()
+                            .color(crate::theme::text_ink(ui, accent)),
+                    );
                     if let Some(used_mb) = crate::telemetry::current_process_ram_mb() {
                         ui.label(
                             RichText::new(format!("(currently {used_mb:.0} MB)"))
@@ -424,7 +428,7 @@ impl Creblox {
                             crate::ram_budget::TOTAL_CAP_BYTES / (1024 * 1024)
                         ))
                         .strong()
-                        .color(accent),
+                        .color(crate::theme::text_ink(ui, accent)),
                     );
                     let note = if crate::window_lifecycle::hidden_to_tray() {
                         "tucked into the tray, caches flushed".to_string()
@@ -458,7 +462,11 @@ impl Creblox {
                         .cpu_limit_pct
                         .map(|pct| format!("{pct}%"))
                         .unwrap_or_else(|| "Unlimited".to_string());
-                    ui.label(RichText::new(cur_txt).strong().color(accent));
+                    ui.label(
+                        RichText::new(cur_txt)
+                            .strong()
+                            .color(crate::theme::text_ink(ui, accent)),
+                    );
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);

@@ -252,7 +252,7 @@ impl Creblox {
                                             13.5,
                                             egui::FontFamily::Name("Bold".into()),
                                         ),
-                                        kind_color,
+                                        crate::theme::text_ink(ui, kind_color),
                                     );
                                 }
 
@@ -721,7 +721,7 @@ fn render_history_row(
                             RichText::new(item.source.label())
                                 .size(10.5)
                                 .strong()
-                                .color(src_col),
+                                .color(crate::theme::text_ink(ui, src_col)),
                         );
                         ui.label(RichText::new("·").size(10.5).color(p.muted));
                         ui.label(RichText::new(&item.title).size(13.0).strong().color(p.text));

@@ -37,6 +37,16 @@ fn lighten(c: Color32, amount: f32) -> Color32 {
 }
 
 /// Tactile Rec Room-style chunky 3D button with a darker bottom lip that compresses on click.
+/// The caption colour for a filled button: white on a dark fill, the dark accent ink on a bright
+/// one, the same choice the toast buttons make.
+fn on_fill(fill: Color32) -> Color32 {
+    if crate::theme::is_dark_color([fill.r(), fill.g(), fill.b()]) {
+        Color32::WHITE
+    } else {
+        crate::theme::ON_ACCENT
+    }
+}
+
 fn rr_button(
     ui: &mut egui::Ui,
     label: &str,
@@ -422,7 +432,7 @@ impl Creblox {
                                     ui,
                                     copy_label,
                                     if is_copied { GREEN } else { p.surface_bg },
-                                    if is_copied { Color32::WHITE } else { p.text },
+                                    if is_copied { on_fill(GREEN) } else { p.text },
                                     egui::vec2(124.0, 34.0),
                                     12.5,
                                 )
@@ -476,7 +486,7 @@ impl Creblox {
                                     ui,
                                     "New QR & Code",
                                     RR_ORANGE,
-                                    Color32::WHITE,
+                                    on_fill(RR_ORANGE),
                                     egui::vec2(w, 40.0),
                                     13.5,
                                 )
@@ -502,7 +512,7 @@ impl Creblox {
                             ui,
                             "Sign in with Quick Login",
                             RR_ORANGE,
-                            Color32::WHITE,
+                            on_fill(RR_ORANGE),
                             egui::vec2(250.0, 46.0),
                             15.0,
                         )

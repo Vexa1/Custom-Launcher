@@ -454,8 +454,40 @@ pub fn ink(color: Color32, dark: bool) -> Color32 {
     } else if color == RED {
         RED_INK
     } else {
-        color
+        // A custom accent, or any other colour a page picked: keep its hue and darken it just
+        // enough to read on the light card.
+        darken_for_light(color)
     }
+}
+
+/// WCAG contrast ratio between two colours, 1:1 (identical) to 21:1 (black on white).
+pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let la = relative_luminance([a.r(), a.g(), a.b()]);
+    let lb = relative_luminance([b.r(), b.g(), b.b()]);
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Contrast of a colour against a white card, the ratio the light palette's text must clear.
+pub fn contrast_on_white(color: Color32) -> f32 {
+    contrast_ratio(color, Color32::WHITE)
+}
+
+/// `color` blended towards black until it clears 4.5:1 on white, so an accent that is not one of
+/// the four named ones still reads as text in the light theme.
+fn darken_for_light(color: Color32) -> Color32 {
+    let mut out = color;
+    for _ in 0..24 {
+        if contrast_on_white(out) >= 4.5 {
+            break;
+        }
+        let next = out.gamma_multiply(0.86);
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    out
 }
 
 /// The text form of an accent for the theme `ui` is currently drawing, which is what pages use

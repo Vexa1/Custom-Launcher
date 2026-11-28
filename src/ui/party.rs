@@ -49,7 +49,11 @@ impl Creblox {
             }
         });
         if let Some(err) = self.party_error.clone() {
-            ui.label(RichText::new(err).size(11.5).color(crate::theme::RED));
+            ui.label(
+                RichText::new(err)
+                    .size(11.5)
+                    .color(crate::theme::text_ink(ui, crate::theme::RED)),
+            );
         } else {
             ui.label(
                 RichText::new(
@@ -164,7 +168,11 @@ impl Creblox {
         self.party_slot_row(ui, is_host, muted);
 
         if let Some(err) = self.party_error.clone() {
-            ui.label(RichText::new(err).size(11.5).color(crate::theme::RED));
+            ui.label(
+                RichText::new(err)
+                    .size(11.5)
+                    .color(crate::theme::text_ink(ui, crate::theme::RED)),
+            );
         }
 
         if let Some(id) = kick {
