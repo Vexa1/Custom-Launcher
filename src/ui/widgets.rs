@@ -19,6 +19,50 @@ pub fn fast_scrolling(ui: &egui::Ui) -> bool {
         .unwrap_or(false)
 }
 
+/// Where the downloaded thumbnail textures live between the app and the cards.
+///
+/// The app uploads decoded pixels a few per frame and publishes the whole map here once it
+/// has changed; a card looks its image URL up and paints that texture. Keying by URL (not
+/// by universe id) means one entry serves both the wide cover and the icon of a card.
+pub type ThumbTextures = std::sync::Arc<std::collections::HashMap<String, egui::TextureHandle>>;
+
+fn thumb_tex_id() -> egui::Id {
+    egui::Id::NULL.with("creblox-thumb-textures")
+}
+
+fn thumb_owned_id() -> egui::Id {
+    egui::Id::NULL.with("creblox-thumb-owned")
+}
+
+pub fn publish_thumb_textures(ctx: &egui::Context, textures: ThumbTextures) {
+    ctx.data_mut(|d| d.insert_temp(thumb_tex_id(), textures));
+}
+
+pub fn thumb_texture(ctx: &egui::Context, url: &str) -> Option<egui::TextureHandle> {
+    ctx.data(|d| {
+        d.get_temp::<ThumbTextures>(thumb_tex_id())
+            .and_then(|map| map.get(url).cloned())
+    })
+}
+
+/// Publishes the set of image URLs the launcher downloads itself.
+///
+/// A URL in this set is never handed back to egui's image loader: the card shows its
+/// placeholder until our texture arrives, so nothing is fetched twice.
+pub fn publish_thumb_owned(
+    ctx: &egui::Context,
+    owned: std::sync::Arc<std::collections::HashSet<String>>,
+) {
+    ctx.data_mut(|d| d.insert_temp(thumb_owned_id(), owned));
+}
+
+fn thumb_owned(ctx: &egui::Context, url: &str) -> bool {
+    ctx.data(|d| {
+        d.get_temp::<std::sync::Arc<std::collections::HashSet<String>>>(thumb_owned_id())
+            .is_some_and(|set| set.contains(url))
+    })
+}
+
 /// A quiet placeholder for a value that has not arrived yet.
 ///
 /// It pulses very slowly with the frame clock, so a profile that is still filling in reads
@@ -97,9 +141,23 @@ pub fn thumb_styled_with_video(
             );
         } else {
             if let Some(u) = url.filter(|u| !u.is_empty()) {
-                egui::Image::new(u.as_str())
-                    .corner_radius(radius)
-                    .paint_at(ui, rect);
+                match thumb_texture(ui.ctx(), u) {
+                    // Downloaded, decoded and uploaded by our own worker pool.
+                    Some(tex) => {
+                        egui::Image::new(&tex)
+                            .corner_radius(radius)
+                            .paint_at(ui, rect);
+                    }
+                    // Ours, on its way: keep the placeholder. Falling through to egui's
+                    // loader here would download the same image a second time.
+                    None if thumb_owned(ui.ctx(), u) => {}
+                    // Not ours (a page that still uses the URL path): let egui load it.
+                    None => {
+                        egui::Image::new(u.as_str())
+                            .corner_radius(radius)
+                            .paint_at(ui, rect);
+                    }
+                }
             }
             if is_video_loading {
                 let badge_w = 48.0;
@@ -575,6 +633,14 @@ pub fn wide_grid_with_width(
         if !visible.contains(&idx) {
             ui.add_space(row_h);
             continue;
+        }
+        // A row inside the viewport is what the user is looking at; the rows either side
+        // are the lookahead band. Both are reported, and the queue serves the first lane
+        // first.
+        let row_top = ui.cursor().top();
+        let on_screen = row_top < clip.bottom() && row_top + row_h > clip.top();
+        for g in row {
+            acts.push(Action::ThumbNeeded(g.universe_id, on_screen));
         }
         // horizontal_top (Align::Min) keeps every card aligned cleanly along its top edge
         let r = ui.horizontal_top(|ui| {

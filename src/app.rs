@@ -79,6 +79,24 @@ pub struct Creblox {
     /// Recently loaded profiles, bounded and least-recently-used, so going back to a
     /// profile is instant and the shelf cannot grow without limit.
     pub profile_cache: crate::profile_cache::ProfileCache,
+    /// Thumbnails waiting to be asked for: on-screen cards first, newest first.
+    pub thumb_queue: crate::thumb_pipeline::ThumbQueue,
+    /// Image URLs the launcher downloads itself. Cards show a placeholder for these instead
+    /// of handing them back to egui's loader, so nothing is fetched twice.
+    pub thumb_owned: HashSet<String>,
+    pub thumb_owned_dirty: bool,
+    /// Decoded, card-sized pixels waiting for a frame slot to be uploaded.
+    pub thumb_pixels: std::collections::VecDeque<(String, egui::ColorImage)>,
+    /// Uploaded textures by image URL, oldest first so the cap can drop one.
+    pub thumb_tex: HashMap<String, egui::TextureHandle>,
+    pub thumb_tex_order: std::collections::VecDeque<String>,
+    /// Set when a texture is uploaded or dropped, so the cards' map is republished.
+    pub thumb_tex_dirty: bool,
+    /// One thumbnail batch in flight; the next is taken when this one answers.
+    pub thumb_in_flight: bool,
+    /// Image URLs in the current download batch, so a failure can be forgotten (and asked
+    /// for again) instead of leaving a card on its placeholder forever.
+    pub thumb_downloading: HashSet<String>,
     /// Set when a section button is clicked, consumed by the page scroll area.
     pub scroll_to_top: bool,
     /// Cursor, dedupe set and back-off for the charts feed's infinite scroll.
@@ -434,6 +452,15 @@ impl Creblox {
             feed_pool: Vec::new(),
             feed_sig: 0,
             profile_cache: crate::profile_cache::ProfileCache::new(),
+            thumb_queue: crate::thumb_pipeline::ThumbQueue::new(),
+            thumb_owned: HashSet::new(),
+            thumb_owned_dirty: false,
+            thumb_pixels: std::collections::VecDeque::new(),
+            thumb_tex: HashMap::new(),
+            thumb_tex_order: std::collections::VecDeque::new(),
+            thumb_tex_dirty: false,
+            thumb_in_flight: false,
+            thumb_downloading: HashSet::new(),
             scroll_to_top: false,
             chart_feed: crate::chart_feed::ChartFeed::default(),
             chart_players_box: crate::chart_feed::FilterBox::default(),
@@ -1621,6 +1648,7 @@ impl Creblox {
         self.friend_hover_start = None;
         self.friend_prefetching.clear();
         self.profile_cache.clear();
+        self.reset_thumb_pipeline();
         self.avatar_state = None;
         self.avatar_palette.clear();
         self.avatar_loading = false;
@@ -1803,6 +1831,172 @@ impl Creblox {
         if !new.is_empty() {
             self.spawn(move || fetch_thumbs(new));
         }
+    }
+
+    /// Records the cards that want a thumbnail this frame.
+    ///
+    /// `visible` are the cards inside the viewport, `lookahead` the two rows either side.
+    /// Everything not in this frame's set is dropped from the queue first, so an id the
+    /// user has already scrolled past never becomes a request.
+    pub fn queue_thumbs(&mut self, visible: Vec<u64>, lookahead: Vec<u64>) {
+        if visible.is_empty() && lookahead.is_empty() {
+            // No grid on screen (a modal, the settings page): nothing is alive, so drop the
+            // queue rather than serving cards that are gone.
+            if !self.thumb_queue.is_empty() && self.thumb_pixels.is_empty() {
+                self.thumb_queue.clear();
+            }
+            return;
+        }
+        // Cards whose image is already resolved and held in RAM have nothing to ask for.
+        let settled = |id: u64, app: &Self| {
+            app.wide.get(&id).is_some_and(|url| {
+                app.thumb_tex.contains_key(url) || app.thumb_owned.contains(url)
+            })
+        };
+        let visible: Vec<u64> = visible.into_iter().filter(|id| !settled(*id, self)).collect();
+        let lookahead: Vec<u64> = lookahead
+            .into_iter()
+            .filter(|id| !settled(*id, self))
+            .collect();
+        let alive: HashSet<u64> = visible.iter().chain(lookahead.iter()).copied().collect();
+        self.thumb_queue.prune(&alive);
+        // Visible first and last-in-first-served: the row that just scrolled into view is
+        // the next one asked for.
+        self.thumb_queue.push_visible(visible);
+        self.thumb_queue.push_lookahead(lookahead);
+    }
+
+    /// Uploads a few ready textures, takes the next batch, and publishes the owned set.
+    /// Called once per frame after drawing.
+    pub fn pump_thumbs(&mut self) {
+        use crate::thumb_pipeline::UPLOADS_PER_FRAME;
+        use crate::ui::widgets;
+
+        // 1. A handful of uploads per frame: a whole batch at once is a visible hitch.
+        let mut uploaded = 0;
+        while uploaded < UPLOADS_PER_FRAME {
+            let Some((url, image)) = self.thumb_pixels.pop_front() else {
+                break;
+            };
+            if self.thumb_tex.contains_key(&url) {
+                continue;
+            }
+            let tex = self.ctx.load_texture(
+                format!("creblox-thumb:{url}"),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.thumb_tex.insert(url.clone(), tex);
+            self.thumb_tex_order.push_back(url);
+            self.thumb_tex_dirty = true;
+            uploaded += 1;
+        }
+        while self.thumb_tex_order.len() > crate::thumb_pipeline::TEXTURE_CAP {
+            let Some(old) = self.thumb_tex_order.pop_front() else {
+                break;
+            };
+            // The texture is gone, so the card needs to be allowed to download it again
+            // if the user scrolls back to it.
+            self.thumb_tex.remove(&old);
+            self.thumb_owned.remove(&old);
+            self.thumb_tex_dirty = true;
+            self.thumb_owned_dirty = true;
+        }
+        if !self.thumb_pixels.is_empty() {
+            // Keep uploading while there is work: the grid fills in over the next frames
+            // instead of waiting for the next input event.
+            self.ctx.request_repaint();
+        }
+
+        // 2. One batch at a time, pruned to what is still on screen. Ids already resolved
+        // (or asked for a moment ago) are dropped rather than re-requested: the queue is
+        // refilled every frame by cards that are simply still on screen.
+        if !self.thumb_in_flight {
+            let now = Instant::now();
+            let mut batch: Vec<u64> = Vec::new();
+            while batch.len() < crate::thumb_pipeline::MAX_BATCH {
+                let take = crate::thumb_pipeline::MAX_BATCH - batch.len();
+                let popped = self.thumb_queue.pop_batch(take);
+                if popped.is_empty() {
+                    break;
+                }
+                for id in popped {
+                    let settled = self.wide.get(&id).is_some_and(|url| {
+                        self.thumb_tex.contains_key(url) || self.thumb_owned.contains(url)
+                    });
+                    let recent = self
+                        .requested
+                        .get(&id)
+                        .is_some_and(|t| now.saturating_duration_since(*t) < Duration::from_secs(5));
+                    if settled || recent {
+                        continue;
+                    }
+                    self.requested.insert(id, now);
+                    batch.push(id);
+                }
+            }
+            if !batch.is_empty() {
+                self.thumb_in_flight = true;
+                self.spawn(move || fetch_thumbs(batch));
+            }
+        }
+
+        // 3. Publish the textures the cards may paint, and the URLs they must not hand back
+        // to egui's loader (which would download the same image again).
+        if std::mem::take(&mut self.thumb_tex_dirty) {
+            widgets::publish_thumb_textures(
+                &self.ctx,
+                std::sync::Arc::new(self.thumb_tex.clone()),
+            );
+        }
+        if std::mem::take(&mut self.thumb_owned_dirty) {
+            widgets::publish_thumb_owned(&self.ctx, std::sync::Arc::new(self.thumb_owned.clone()));
+        }
+    }
+
+    /// Hands every resolved thumbnail URL that we do not already have to the download pool.
+    fn enqueue_thumb_downloads(&mut self) {
+        use crate::thumb_pipeline::{ICON_TARGET, WIDE_TARGET};
+        let mut jobs: Vec<(String, [u32; 2])> = Vec::new();
+        for url in self.wide.values() {
+            if !url.is_empty() && self.thumb_owned.insert(url.clone()) {
+                jobs.push((url.clone(), WIDE_TARGET));
+            }
+        }
+        for url in self.icon.values() {
+            if !url.is_empty() && self.thumb_owned.insert(url.clone()) {
+                jobs.push((url.clone(), ICON_TARGET));
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        for (url, _) in &jobs {
+            self.thumb_downloading.insert(url.clone());
+        }
+        self.thumb_owned_dirty = true;
+        // Published now, not at the end of the frame: the card drawing this URL must not
+        // hand it back to egui's loader in the meantime.
+        crate::ui::widgets::publish_thumb_owned(
+            &self.ctx,
+            std::sync::Arc::new(self.thumb_owned.clone()),
+        );
+        self.spawn(move || Msg::ThumbPixels(crate::api::download_thumbnails(jobs)));
+    }
+
+    /// Drops every decoded and uploaded thumbnail. Nothing here is on disk, so this is the
+    /// whole cache.
+    pub fn reset_thumb_pipeline(&mut self) {
+        self.thumb_tex_order.clear();
+        self.thumb_tex.clear();
+        self.thumb_tex_dirty = true;
+        self.thumb_pixels.clear();
+        self.thumb_owned.clear();
+        self.thumb_owned_dirty = true;
+        self.thumb_queue.clear();
+        self.thumb_in_flight = false;
+        self.thumb_downloading.clear();
+        crate::ui::widgets::publish_thumb_owned(&self.ctx, std::sync::Arc::new(HashSet::new()));
     }
 
     pub fn start_search(&mut self) {
@@ -2277,7 +2471,28 @@ impl Creblox {
                         }
                         self.icon.insert(uid, url);
                     }
+                    self.enqueue_thumb_downloads();
+                    self.thumb_in_flight = false;
                     self.sync_discord_presence();
+                }
+                Msg::ThumbPixels(batch) => {
+                    // Anything that did not come back failed to download or decode: forget
+                    // that we own it, so the card can ask for it again (and keep its
+                    // placeholder in the meantime) instead of waiting forever.
+                    let got: HashSet<&str> =
+                        batch.iter().map(|(url, _)| url.as_str()).collect();
+                    for url in std::mem::take(&mut self.thumb_downloading) {
+                        if !got.contains(url.as_str()) {
+                            self.thumb_owned.remove(&url);
+                            self.thumb_owned_dirty = true;
+                        }
+                    }
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    // Pixels wait for a frame slot; `pump_thumbs` uploads a few per frame.
+                    self.thumb_pixels.extend(batch);
+                    self.ctx.request_repaint();
                 }
                 Msg::MyProfile(uid, r) => {
                     // A reply from the account you just switched away from must never paint
@@ -4680,6 +4895,7 @@ impl Creblox {
             self.decoded_videos.clear();
             self.video_lru.clear();
             self.requested.clear();
+            self.reset_thumb_pipeline();
             self.last_ram_trim_check = Some(Instant::now());
             let _ = crate::telemetry::trim_process_memory();
             if let Some(mb) = crate::telemetry::current_process_ram_mb() {
@@ -6063,6 +6279,18 @@ impl eframe::App for Creblox {
                 None
             }
         });
+        let mut thumb_visible: Vec<u64> = Vec::new();
+        let mut thumb_lookahead: Vec<u64> = Vec::new();
+        for a in &acts {
+            if let Action::ThumbNeeded(id, on_screen) = a {
+                if *on_screen {
+                    thumb_visible.push(*id);
+                } else {
+                    thumb_lookahead.push(*id);
+                }
+            }
+        }
+        self.queue_thumbs(thumb_visible, thumb_lookahead);
         let hovered_friend = acts.iter().find_map(|a| {
             if let Action::HoverFriend(uid) = a {
                 Some(*uid)
@@ -6073,6 +6301,7 @@ impl eframe::App for Creblox {
         self.handle_game_hover(hovered_game, ui.ctx());
         self.handle_friend_hover(hovered_friend, ui.ctx());
         self.poll_friend_stream();
+        self.pump_thumbs();
 
         // Apply clicks after drawing
         let prev_page_disc = std::mem::discriminant(&self.page);
@@ -6082,7 +6311,7 @@ impl eframe::App for Creblox {
         };
         for a in acts {
             match a {
-                Action::HoverGame(_) | Action::HoverFriend(_) => {}
+                Action::HoverGame(_) | Action::HoverFriend(_) | Action::ThumbNeeded(..) => {}
                 Action::StartQuickLogin => self.begin_quick_login(),
                 Action::AddAccount => self.begin_quick_login(),
                 Action::SwitchAccount(uid) => self.switch_account(uid),

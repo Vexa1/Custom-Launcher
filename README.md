@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.28
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.29
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -587,6 +587,13 @@ src/
                      5-minute TTL that serves a revisit instantly and refreshes a stale
                      one underneath. Plus the 120 ms hover dwell that warms a profile
                      from the friends strip without a mouse sweep starting anything.
+  thumb_pipeline.rs  Which thumbnail is fetched first. Two LIFO lanes - cards inside the
+                     viewport, then the two lookahead rows built above and below it - and
+                     pruning against the frame's visible set, so an id the user scrolled
+                     past is cancelled before its request is sent. Also the shared batch
+                     size (100 ids per `thumbnails.roblox.com` call), the download pool
+                     width, the per-frame upload budget and the decode targets. Everything
+                     here is in RAM: no thumbnail ever touches the disk.
   telemetry.rs       RAM sampling, self-imposed RAM/CPU limits, the
                      window-visibility key used by the idle animation pacer.
   types.rs           Data model: Game, Profile, User, Friend, Settings (+ Default),

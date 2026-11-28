@@ -137,7 +137,7 @@ pub fn fetch_inventory_thumbnails(
 
     let mut urls: Vec<(u64, String)> = Vec::new();
     for (kind, ids) in by_kind {
-        for chunk in ids.chunks(50) {
+        for chunk in ids.chunks(crate::thumb_pipeline::MAX_BATCH) {
             let Some(url) = thumbnail_batch_url(kind, chunk) else {
                 continue;
             };
@@ -172,13 +172,13 @@ pub fn fetch_inventory_thumbnails(
         ))
     };
 
-    // Eight at a time: a page of thumbnails is a dozen small PNGs, and they are independent.
+    // The same pool as the game covers: independent images, one connection each.
     let mut out: Vec<(u64, egui::ColorImage)> = Vec::new();
     std::thread::scope(|s| {
         let mut handles = Vec::new();
         for (id, url) in urls {
             handles.push(s.spawn(move || (id, download(&url))));
-            if handles.len() >= 8 {
+            if handles.len() >= crate::thumb_pipeline::WORKERS {
                 for handle in handles.drain(..) {
                     if let Ok((id, Some(image))) = handle.join() {
                         out.push((id, image));
@@ -766,7 +766,7 @@ pub fn games_by_universe(ids: &[u64]) -> Vec<Game> {
         let jobs: Vec<_> = unique
             .chunks(50)
             .map(|chunk| {
-                let list = join(chunk);
+                let list = join(&chunk);
                 let list2 = list.clone();
                 let games = s.spawn(move || {
                     get_json(&format!(
@@ -1766,22 +1766,26 @@ pub fn favorite_game_api(universe_id: u64, is_fav: bool, cookie: &str) -> Result
 pub fn fetch_thumbs(ids: Vec<u64>) -> Msg {
     let mut wide = HashMap::new();
     let mut icon = HashMap::new();
-    // Wide thumbnails and icons for every chunk of 50 ids, all requested at once.
+    // Wide thumbnails and icons for every chunk of MAX_BATCH ids, all requested at once.
+    // 100 ids per call is the endpoint's limit: a scroll that reveals a full grid costs a
+    // couple of requests, not one per card.
     let results: Vec<(Option<Value>, Option<Value>)> = thread::scope(|s| {
-        let jobs: Vec<_> = ids
-            .chunks(50)
+        let jobs: Vec<_> = crate::thumb_pipeline::chunks(&ids, crate::thumb_pipeline::MAX_BATCH)
+            .into_iter()
             .map(|chunk| {
-                let list = join(chunk);
+                let list = join(&chunk);
                 let list2 = list.clone();
                 let w = s.spawn(move || {
                     get_json(&format!(
-                        "https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={list}&countPerUniverse=1&defaults=true&size=480x270&format=Jpeg&isCircular=false"
+                        "https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={list}&countPerUniverse=1&defaults=true&size={}&format=Png&isCircular=false",
+                        crate::thumb_pipeline::WIDE_REQUEST
                     ))
                     .ok()
                 });
                 let i = s.spawn(move || {
                     get_json(&format!(
-                        "https://thumbnails.roblox.com/v1/games/icons?universeIds={list2}&returnPolicy=PlaceHolder&size=256x256&format=Png&isCircular=false"
+                        "https://thumbnails.roblox.com/v1/games/icons?universeIds={list2}&returnPolicy=PlaceHolder&size={}&format=Png&isCircular=false",
+                        crate::thumb_pipeline::ICON_REQUEST
                     ))
                     .ok()
                 });
@@ -1812,6 +1816,67 @@ pub fn fetch_thumbs(ids: Vec<u64>) -> Msg {
         }
     }
     Msg::Thumbs { wide, icon }
+}
+
+/// Downloads and decodes a batch of already-resolved thumbnail URLs.
+///
+/// Called on a worker thread. It fans out over [`crate::thumb_pipeline::WORKERS`] scoped
+/// threads that all share [`agent`], so the connection to `tr.rbxcdn.com` is reused (TLS
+/// handshake once per connection, not once per image). Each image is decoded *and* cropped
+/// to the card's exact pixel size here, so the UI thread only ever uploads ready RGBA - it
+/// never decodes, and nothing is written to disk.
+pub fn download_thumbnails(items: Vec<(String, [u32; 2])>) -> Vec<(String, egui::ColorImage)> {
+    use std::io::Read;
+
+    let download = |url: &str, target: [u32; 2]| -> Option<egui::ColorImage> {
+        let mut bytes = Vec::new();
+        agent()
+            .get(url)
+            .set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+            .call()
+            .ok()?
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let image = image::load_from_memory(&bytes).ok()?;
+        // Crop to the card's aspect and downscale once, on the worker: the texture the UI
+        // uploads is exactly the size it is drawn at, never the download size.
+        let rgba = image
+            .resize_to_fill(
+                target[0].max(1),
+                target[1].max(1),
+                image::imageops::FilterType::Triangle,
+            )
+            .to_rgba8();
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_flat_samples().as_slice(),
+        ))
+    };
+
+    let mut out: Vec<(String, egui::ColorImage)> = Vec::new();
+    std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for (url, target) in items {
+            handles.push(s.spawn(move || {
+                let image = download(&url, target);
+                (url, image)
+            }));
+            if handles.len() >= crate::thumb_pipeline::WORKERS {
+                for handle in handles.drain(..) {
+                    if let Ok((url, Some(image))) = handle.join() {
+                        out.push((url, image));
+                    }
+                }
+            }
+        }
+        for handle in handles.drain(..) {
+            if let Ok((url, Some(image))) = handle.join() {
+                out.push((url, image));
+            }
+        }
+    });
+    out
 }
 
 pub fn enrich_users(users: &mut [User], cookie: Option<&str>) {

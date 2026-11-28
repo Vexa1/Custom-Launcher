@@ -894,6 +894,9 @@ pub enum Action {
     HoverGame(u64),
     /// The pointer rests on a friend's circle: warm their profile before the click.
     HoverFriend(u64),
+    /// This card needs its thumbnail. `true` while it is inside the viewport, `false` while
+    /// it is only in the lookahead band; the app queues on-screen cards ahead of the rest.
+    ThumbNeeded(u64, bool),
     Open(Game),
     OpenFriend(User),
     /// Open the Player Inventory Viewer for this user (`user id`, display name).
@@ -969,6 +972,9 @@ pub enum Msg {
         icon: HashMap<u64, String>,
     },
     MyProfile(u64, Result<FriendProfile, String>),
+    /// Decoded, card-sized thumbnails from the download pool: `(imageUrl, pixels)`. Pixels
+    /// are uploaded a few per frame, never all at once.
+    ThumbPixels(Vec<(String, egui::ColorImage)>),
     BioSaved(Result<String, String>),
     FriendProfile(u64, Result<FriendProfile, String>),
     FriendSearchResult(bool, Result<UserSearchPage, String>),

@@ -25,7 +25,9 @@ use crate::types::Action;
 /// Thumbnails per metadata request and image batch. The grid only asks for the cards the
 /// viewport actually shows, so one `thumbnails/v1` call covers a screenful regardless of how
 /// far the inventory was scrolled.
-pub const THUMBS_PER_BATCH: usize = 24;
+/// Ids per inventory thumbnail batch: the same 100 the metadata endpoints accept, so a
+/// full grid page costs one call per kind instead of one per card.
+pub const THUMBS_PER_BATCH: usize = crate::thumb_pipeline::MAX_BATCH;
 /// Decoded thumbnails kept alive. Beyond this the oldest texture is dropped; scrolling back
 /// re-fetches, which is cheaper than an unbounded texture atlas on a RAM-budgeted launcher.
 pub const THUMB_TEXTURE_CAP: usize = 320;

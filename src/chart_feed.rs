@@ -223,8 +223,11 @@ pub fn visible_rows(
         return rows..rows;
     }
     let visible = ((clip_bottom - clip_top).max(0.0) / step).ceil() as usize;
-    let last = (first + visible + 2).min(rows);
-    first..last
+    // Rows just above the viewport are built too: a flick up has to find its cards, not an
+    // empty band that fills in a frame later.
+    let start = first.saturating_sub(crate::thumb_pipeline::LOOKAHEAD_ROWS);
+    let last = (first + visible + crate::thumb_pipeline::LOOKAHEAD_ROWS).min(rows);
+    start..last
 }
 
 /// The feed's cursor and its safety rules.

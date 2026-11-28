@@ -36,6 +36,7 @@ mod server_hop;
 #[allow(dead_code)]
 mod telemetry;
 mod theme;
+mod thumb_pipeline;
 mod tray;
 mod types;
 mod ui;

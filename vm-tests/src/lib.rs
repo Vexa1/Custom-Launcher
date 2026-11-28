@@ -35,6 +35,9 @@ pub mod avatar_sync;
 #[path = "../../src/chart_feed.rs"]
 pub mod chart_feed;
 
+#[path = "../../src/thumb_pipeline.rs"]
+pub mod thumb_pipeline;
+
 #[path = "../../src/game_log.rs"]
 pub mod game_log;
 
