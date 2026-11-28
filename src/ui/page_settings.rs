@@ -1381,7 +1381,14 @@ impl Creblox {
                         .changed();
                     small_text(
                         ui,
-                        if self.settings.overlay_image_w > 0 && self.settings.overlay_image_h > 0 {
+                        if (crate::overlay_spec::SavedImageBox {
+                            x: self.settings.overlay_image_x,
+                            y: self.settings.overlay_image_y,
+                            w: self.settings.overlay_image_w,
+                            h: self.settings.overlay_image_h,
+                        })
+                        .is_saved()
+                        {
                             format!(
                                 "Saved from the HUD editor: {} x {} at {}, {}. Use Edit HUD positions… to move it again, or Reset there to go back to the corner.",
                                 self.settings.overlay_image_w,

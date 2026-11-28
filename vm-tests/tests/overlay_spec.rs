@@ -498,3 +498,138 @@ fn shift_locks_the_aspect_ratio_while_resizing() {
     let free = start.resized(3, 80.0, 0.0, view, false);
     assert_eq!((free.w, free.h), (400, 128));
 }
+
+// ---------------------------------------------------------------------------------------
+// settings.json: the custom image's saved box, its 0.5.51 migration and its round trip.
+// ---------------------------------------------------------------------------------------
+
+use creblox_vm_tests::overlay_spec::SavedImageBox;
+
+#[test]
+fn a_051_settings_file_migrates_its_saved_box_out_of_the_offsets() {
+    // Exactly what 0.5.51 wrote after dragging the picture to 412,236 and resizing it to
+    // 320x128: a saved box, and the position in the offset sliders.
+    let v = serde_json::json!({
+        "overlay_image_enabled": true,
+        "overlay_image_path": "/tmp/logo.png",
+        "overlay_image_corner": 0,
+        "overlay_image_size": 25,
+        "overlay_image_opacity": 0.9,
+        "overlay_image_offset_x": 412,
+        "overlay_image_offset_y": 236,
+        "overlay_image_w": 320,
+        "overlay_image_h": 128,
+    });
+    let box_ = SavedImageBox::from_settings(&v);
+    assert_eq!(
+        box_,
+        SavedImageBox {
+            x: 412,
+            y: 236,
+            w: 320,
+            h: 128
+        }
+    );
+    assert!(box_.is_saved(), "a migrated box is a saved box");
+}
+
+#[test]
+fn a_saved_box_round_trips_through_settings_json_without_touching_the_sliders() {
+    let saved = SavedImageBox {
+        x: 412,
+        y: 236,
+        w: 320,
+        h: 128,
+    };
+    // The file starts with the corner, the height slider and offsets that disagree with the
+    // box - the state 0.5.52 has to keep intact.
+    let mut file = serde_json::json!({
+        "overlay_image_corner": 1,
+        "overlay_image_size": 40,
+        "overlay_image_offset_x": 30,
+        "overlay_image_offset_y": -20,
+    });
+    saved.insert_into(file.as_object_mut().expect("settings object"));
+
+    let text = serde_json::to_string_pretty(&file).expect("settings.json is text");
+    let back: serde_json::Value = serde_json::from_str(&text).expect("settings.json parses");
+    assert_eq!(
+        SavedImageBox::from_settings(&back),
+        saved,
+        "the box survives being written and read"
+    );
+    // The sliders and the corner come back exactly as they went in.
+    assert_eq!(back["overlay_image_offset_x"], 30);
+    assert_eq!(back["overlay_image_offset_y"], -20);
+    assert_eq!(back["overlay_image_size"], 40);
+    assert_eq!(back["overlay_image_corner"], 1);
+    // Writing the same box twice is idempotent, and the write is the four keys only.
+    saved.insert_into(back.clone().as_object_mut().unwrap());
+    assert_eq!(back.as_object().unwrap().get("overlay_image_w"), Some(&serde_json::json!(320)));
+}
+
+#[test]
+fn an_image_without_a_saved_box_keeps_its_corner_and_offsets() {
+    let v = serde_json::json!({
+        "overlay_image_offset_x": 30,
+        "overlay_image_offset_y": -20,
+        "overlay_image_w": 0,
+        "overlay_image_h": 0,
+    });
+    let box_ = SavedImageBox::from_settings(&v);
+    assert_eq!(
+        box_,
+        SavedImageBox {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0
+        },
+        "without a box the offsets stay the sliders' own values, not a position"
+    );
+    assert!(!box_.is_saved(), "no box means the sliders still place the picture");
+
+    // A hand-edited 3x3 box is not a box, and its neighbours are not a saved position either.
+    let tiny = serde_json::json!({
+        "overlay_image_offset_x": 412,
+        "overlay_image_offset_y": 236,
+        "overlay_image_w": 3,
+        "overlay_image_h": 3,
+    });
+    let tiny_box = SavedImageBox::from_settings(&tiny);
+    assert_eq!((tiny_box.w, tiny_box.h), (0, 0));
+    assert!(!tiny_box.is_saved());
+
+    // A missing key is no box at all.
+    assert_eq!(
+        SavedImageBox::from_settings(&serde_json::json!({})),
+        SavedImageBox::default()
+    );
+}
+
+#[test]
+fn the_panels_file_image_object_uses_the_short_keys() {
+    // What the overlay window reads from overlay-panels-<id>.json: `x`/`y` beside `w`/`h`,
+    // with offsets that must be ignored while a box exists.
+    let image = serde_json::json!({
+        "path": "/tmp/logo.png",
+        "corner": 0,
+        "size": 25,
+        "opacity": 0.9,
+        "offset_x": 30,
+        "offset_y": -20,
+        "x": 412,
+        "y": 236,
+        "w": 320,
+        "h": 128,
+    });
+    assert_eq!(
+        SavedImageBox::from_panels_image(&image),
+        SavedImageBox {
+            x: 412,
+            y: 236,
+            w: 320,
+            h: 128
+        }
+    );
+}

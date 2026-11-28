@@ -1118,41 +1118,24 @@ impl OverlayWindowApp {
         self.image = spec
             .get("image")
             .filter(|i| i.is_object())
-            .map(|i| OverlayImage {
-                path: i["path"].as_str().unwrap_or_default().to_string(),
-                corner: i["corner"].as_u64().unwrap_or(0).min(3) as u8,
-                size_pct: i["size"].as_u64().unwrap_or(25).clamp(1, 100) as u8,
-                opacity: i["opacity"].as_f64().unwrap_or(0.9).clamp(0.05, 1.0) as f32,
-                offset_x: i["offset_x"].as_f64().unwrap_or(0.0) as f32,
-                offset_y: i["offset_y"].as_f64().unwrap_or(0.0) as f32,
-                x: i["x"].as_f64().unwrap_or_else(|| {
-                    // A spec written by 0.5.51 carries the saved position in the offsets.
-                    let saved =
-                        i["w"].as_u64().unwrap_or(0) >= crate::overlay_spec::ImageBox::MIN as u64;
-                    if saved {
-                        i["offset_x"].as_f64().unwrap_or(0.0)
-                    } else {
-                        0.0
-                    }
-                }) as f32,
-                y: i["y"].as_f64().unwrap_or_else(|| {
-                    let saved =
-                        i["h"].as_u64().unwrap_or(0) >= crate::overlay_spec::ImageBox::MIN as u64;
-                    if saved {
-                        i["offset_y"].as_f64().unwrap_or(0.0)
-                    } else {
-                        0.0
-                    }
-                }) as f32,
-                w: i["w"].as_u64().unwrap_or(0).min(8000) as u16,
-                h: i["h"].as_u64().unwrap_or(0).min(8000) as u16,
-                rect: None,
-                saved: (
-                    i["x"].as_f64().unwrap_or(0.0) as f32,
-                    i["y"].as_f64().unwrap_or(0.0) as f32,
-                    i["w"].as_u64().unwrap_or(0).min(8000) as u16,
-                    i["h"].as_u64().unwrap_or(0).min(8000) as u16,
-                ),
+            .map(|i| {
+                // The box's four fields, including the 0.5.51 file that kept its position in
+                // the offsets - one reader for the launcher's file and this one.
+                let saved = crate::overlay_spec::SavedImageBox::from_panels_image(i);
+                OverlayImage {
+                    path: i["path"].as_str().unwrap_or_default().to_string(),
+                    corner: i["corner"].as_u64().unwrap_or(0).min(3) as u8,
+                    size_pct: i["size"].as_u64().unwrap_or(25).clamp(1, 100) as u8,
+                    opacity: i["opacity"].as_f64().unwrap_or(0.9).clamp(0.05, 1.0) as f32,
+                    offset_x: i["offset_x"].as_f64().unwrap_or(0.0) as f32,
+                    offset_y: i["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                    x: saved.x as f32,
+                    y: saved.y as f32,
+                    w: saved.w,
+                    h: saved.h,
+                    rect: None,
+                    saved: (saved.x as f32, saved.y as f32, saved.w, saved.h),
+                }
             });
         self.crosshair = spec
             .get("crosshair")

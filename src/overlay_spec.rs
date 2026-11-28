@@ -571,6 +571,89 @@ impl ImageBox {
     }
 }
 
+/// The custom image's saved box as it appears in `settings.json`.
+///
+/// Both sides of the file go through this type: the loader reads it (including the 0.5.51 file
+/// that kept the position in the offset sliders) and the saver writes it, so the migration and
+/// the round trip are the same code the tests exercise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct SavedImageBox {
+    pub x: i16,
+    pub y: i16,
+    /// `0` means no saved box: the picture follows its corner, height and offsets.
+    pub w: u16,
+    pub h: u16,
+}
+
+impl SavedImageBox {
+    /// Reads the four fields out of a settings object.
+    pub fn from_settings(v: &Value) -> Self {
+        Self::read(
+            v,
+            ("overlay_image_x", "overlay_image_y"),
+            ("overlay_image_offset_x", "overlay_image_offset_y"),
+            ("overlay_image_w", "overlay_image_h"),
+        )
+    }
+
+    /// Reads the same box out of `overlay-panels-<id>.json`'s `image` object, which uses the
+    /// short keys.
+    pub fn from_panels_image(v: &Value) -> Self {
+        Self::read(
+            v,
+            ("x", "y"),
+            ("offset_x", "offset_y"),
+            ("w", "h"),
+        )
+    }
+
+    fn read(
+        v: &Value,
+        pos: (&str, &str),
+        legacy: (&str, &str),
+        dims: (&str, &str),
+    ) -> Self {
+        let dim = |key: &str| {
+            v[key]
+                .as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .filter(|n| *n >= ImageBox::MIN as u16)
+                .unwrap_or(0)
+        };
+        let (w, h) = (dim(dims.0), dim(dims.1));
+        let has_box = w > 0 && h > 0;
+        // The box's own position, or - for a file written by 0.5.51, which had no position
+        // fields - the offsets it stored the dragged position in. Without a box the offsets
+        // are the corner sliders' values and are not the picture's position.
+        let axis = |pos: &str, legacy: &str| -> i16 {
+            let stored = v[pos]
+                .as_i64()
+                .or_else(|| has_box.then(|| v[legacy].as_i64()).flatten());
+            stored.unwrap_or(0).clamp(0, 8000) as i16
+        };
+        Self {
+            x: axis(pos.0, legacy.0),
+            y: axis(pos.1, legacy.1),
+            w,
+            h,
+        }
+    }
+
+    /// True when the editor has frozen a box, i.e. the corner and height sliders no longer apply.
+    pub fn is_saved(&self) -> bool {
+        self.w >= ImageBox::MIN as u16 && self.h >= ImageBox::MIN as u16
+    }
+
+    /// The four `settings.json` keys.
+    pub fn insert_into(&self, out: &mut serde_json::Map<String, Value>) {
+        out.insert("overlay_image_x".to_string(), json!(self.x));
+        out.insert("overlay_image_y".to_string(), json!(self.y));
+        out.insert("overlay_image_w".to_string(), json!(self.w));
+        out.insert("overlay_image_h".to_string(), json!(self.h));
+    }
+
+}
+
 /// The whole file the overlay window reads.
 pub fn spec_json(opacity: f32, game_active: bool, edit: bool, panels: Vec<Value>) -> Value {
     json!({
