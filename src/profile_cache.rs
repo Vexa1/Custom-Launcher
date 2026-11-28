@@ -181,6 +181,51 @@ pub fn apply(profile: &mut FriendProfile, update: ProfileUpdate) {
 
 /// A profile that is still streaming in. The seed is already drawable; `profile` becomes
 /// more complete as `rx` delivers sections.
+impl crate::types::Game {
+    /// Heap bytes this game holds: its own struct plus the strings it owns.
+    pub fn tracked_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.name.len()
+            + self.creator.len()
+            + self.description.len()
+            + self.players_text.len()
+            + self.rating_text.len()
+    }
+}
+
+impl crate::types::FriendProfile {
+    /// Heap bytes this profile holds: its own struct, its strings, and the games, badges and
+    /// avatar assets it carries. The RAM budget charges the profile shelf with this instead of
+    /// a flat per-entry guess.
+    pub fn tracked_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.user.name.len()
+            + self.user.display.len()
+            + self.user.headshot.len()
+            + self.user.location.len()
+            + self.description.len()
+            + self.created.len()
+            + self.avatar.len()
+            + self
+                .playing_game
+                .as_ref()
+                .map(|game| game.tracked_bytes())
+                .unwrap_or(0)
+            + self
+                .experiences
+                .iter()
+                .map(|game| game.tracked_bytes())
+                .sum::<usize>()
+            + self
+                .favorites
+                .iter()
+                .map(|game| game.tracked_bytes())
+                .sum::<usize>()
+            + std::mem::size_of::<crate::types::PlayerBadge>() * self.badges.len()
+            + std::mem::size_of::<crate::types::AvatarAsset>() * self.currently_wearing.len()
+    }
+}
+
 pub struct FriendStream {
     pub uid: u64,
     pub rx: Receiver<ProfileUpdate>,
@@ -344,6 +389,17 @@ impl ProfileCache {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Bytes the shelf holds: every cached profile's tracked heap plus its LRU entry.
+    ///
+    /// This is what the RAM budget charges the profile cache with, so a full shelf (32
+    /// profiles with their game lists) counts against the same ceiling as the images.
+    pub fn bytes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| entry.profile.tracked_bytes() + std::mem::size_of::<Entry>())
+            .sum()
     }
 
 }

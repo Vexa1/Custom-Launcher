@@ -30,7 +30,7 @@ pub struct Usage {
     pub video_frames: usize,
     /// The 3D avatar's meshes and textures.
     pub avatar_scene: usize,
-    /// The profile shelf's cloned profiles.
+    /// The profile shelf: each cached profile's real heap bytes plus its LRU entry.
     pub profile: usize,
 }
 

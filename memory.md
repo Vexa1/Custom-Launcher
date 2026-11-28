@@ -328,10 +328,14 @@ How the parser reads it (`src/updater.rs`, platform rules in `src/release_links.
 - `release_links::pick_zip_url` (the notes fallback): first `https://` token whose path ends in
   `.zip`, trailing `) ] } > . , ; \` " '` stripped. It **prefers a filename containing `update`**
   (and not `full`), otherwise the first zip found. Notes may use bare URLs or Markdown links.
-- `release_links::zip_checksum`: an asset zip is verified only against a 64-hex token near its own
-  URL (the same line, else the text after it) and stays unverified when the notes do not print its
-  hash; a body link may print its hash anywhere. This is why every download's hash must sit on its
-  own line.
+- `release_links::zip_checksum`: an asset zip is verified only against a 64-hex token in the
+  bullet that names its file, else near its URL (the same line, else the text after it), and stays
+  unverified when the notes do not print its hash; a body link may print its hash anywhere.
+  Pairing by file name is what makes a wrapped link safe: the notes may print the checksum before
+  the URL or after it on one line, and the archive never borrows the next download's hash (which
+  is exactly what made 0.5.39 update zip fail verification: hash above the link, and the
+  link-relative search took the full build's hash). Prefer `— <url> — SHA-256 <hash>` on one line
+  for older installs, whose parser only looks after the URL.
 - `parse_github_release_update`: drafts ignored; tag must be semver-newer than the running
   version; body is the notes; `assets` are scanned for a hotfix JSON, the platform zip above and,
   on Windows only, a `.exe` fallback.

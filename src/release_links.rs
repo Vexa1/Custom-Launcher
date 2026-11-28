@@ -11,16 +11,76 @@ pub fn find_sha256(text: &str) -> Option<String> {
         .map(|token| token.to_ascii_lowercase())
 }
 
-/// The SHA-256 printed for the archive at `url`: a token on the same line, otherwise the first
-/// one after the link.
+/// The SHA-256 printed for the archive at `url`.
 ///
-/// A release lists several downloads, so this never looks at the text before the URL and never
-/// falls back to a body-wide search: a release-asset zip must be verified against its own
-/// checksum, or not at all.
+/// The notes print a download's file name, its size and its checksum in one bullet, and where
+/// the link wraps onto the next line the checksum ends up above it. Anchoring on the link alone
+/// therefore paired the update zip with the *next* archive's checksum, and every update failed
+/// verification. So the archive's file name is tried first, then the link's own line, then the
+/// lines around it - never a body-wide search, because a release lists several downloads and
+/// only this one's checksum may be used.
 pub fn find_sha256_near(text: &str, url: &str) -> Option<String> {
-    let tail = text.get(text.find(url)? + url.len()..)?;
-    let line = tail.split('\n').next().unwrap_or(tail);
-    find_sha256(line).or_else(|| find_sha256(tail))
+    let file = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    if !file.is_empty() {
+        if let Some(sum) = bullet_sha256(text, file) {
+            return Some(sum);
+        }
+    }
+    let start = text.find(url)?;
+    let line_start = text[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    // The link's own line plus the two after it: a checksum printed under the link still
+    // belongs to it, and the window is too small to reach another download's bullet.
+    let mut end = start;
+    for _ in 0..3 {
+        match text[end..].find('\n') {
+            Some(i) => end += i + 1,
+            None => {
+                end = text.len();
+                break;
+            }
+        }
+    }
+    find_sha256(&text[line_start..end])
+}
+
+/// The checksum in the bullet that names `file`: its line, the line above it when the checksum
+/// was printed first, and at most three lines after it. Stops at a blank line or a new bullet.
+fn bullet_sha256(text: &str, file: &str) -> Option<String> {
+    for (at, _) in text.match_indices(file) {
+        // The line that names the archive starts its bullet, so it holds the size and, in the
+        // notes we write, the checksum: no line above it is ever read, because that is another
+        // download's link and checksum.
+        let start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let mut end = at;
+        let mut lines = 0;
+        while lines < 4 {
+            match text[end..].find('\n') {
+                Some(i) => {
+                    let line = &text[end..end + i];
+                    if lines > 0 && (line.trim().is_empty() || line.trim_start().starts_with("- "))
+                    {
+                        break;
+                    }
+                    end += i + 1;
+                    lines += 1;
+                }
+                None => {
+                    end = text.len();
+                    break;
+                }
+            }
+        }
+        if let Some(sum) = find_sha256(&text[start..end]) {
+            return Some(sum);
+        }
+    }
+    None
 }
 
 /// The checksum the updater should verify the zip at `zip_url` against.

@@ -128,6 +128,20 @@ const THEME_PACKS: [ThemePack; 6] = [
     },
 ];
 
+/// Bytes as a short human string for the cache readout: `912 B`, `41.2 KB`, `17.3 MB`.
+fn cache_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let b = bytes as f64;
+    if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 impl Creblox {
     pub fn page_settings(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
         let p = pal(ui);
@@ -373,6 +387,36 @@ impl Creblox {
                     if ui.button("Trim RAM Now").clicked() {
                         trim_now = true;
                     }
+                });
+
+                // The launcher's own caches, in the same bytes the budget trims. Tucking the
+                // window into the tray flushes them, so this is where that can be confirmed.
+                ui.add_space(6.0);
+                let usage = self.ram_usage();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Image caches:");
+                    ui.label(
+                        RichText::new(format!(
+                            "{} / {} MB",
+                            cache_size(usage.total()),
+                            crate::ram_budget::TOTAL_CAP_BYTES / (1024 * 1024)
+                        ))
+                        .strong()
+                        .color(accent),
+                    );
+                    let note = if crate::window_lifecycle::hidden_to_tray() {
+                        "tucked into the tray, caches flushed".to_string()
+                    } else {
+                        format!(
+                            "{} textures · {} waiting · {} video · {} avatar · {} profiles",
+                            cache_size(usage.thumbnail_textures),
+                            cache_size(usage.pending_images),
+                            cache_size(usage.video_frames),
+                            cache_size(usage.avatar_scene),
+                            cache_size(usage.profile),
+                        )
+                    };
+                    ui.label(RichText::new(note).size(12.0).color(p.muted));
                 });
 
                 ui.add_space(8.0);

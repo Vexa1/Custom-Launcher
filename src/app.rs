@@ -2080,7 +2080,7 @@ impl Creblox {
     }
 
     /// Every rebuildable image cache, in bytes.
-    fn ram_usage(&self) -> crate::ram_budget::Usage {
+    pub fn ram_usage(&self) -> crate::ram_budget::Usage {
         let thumbnail_textures = self.thumb_bytes.values().copied().sum();
         let pending_images = self
             .thumb_pixels
@@ -2107,7 +2107,7 @@ impl Creblox {
             pending_images,
             video_frames,
             avatar_scene,
-            profile: 0,
+            profile: self.profile_cache.bytes(),
         }
     }
 

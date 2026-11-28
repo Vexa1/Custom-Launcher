@@ -1061,6 +1061,22 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     });
                     ui.add_space(8.0);
                 }
+                // Mirrors the Settings readout of the tracked image caches, so its type sizes
+                // and wrapping are laid out here even though the real page needs macOS.
+                body(
+                    ui,
+                    probe,
+                    "settings.cache.total",
+                    "Image caches: 0 B / 192 MB",
+                    TEXT,
+                );
+                ui.add_space(2.0);
+                meta(
+                    ui,
+                    probe,
+                    "settings.cache.parts",
+                    "0 B textures · 0 B waiting · 0 B video · 0 B avatar · 0 B profiles",
+                );
             });
         });
         ui.add_space(14.0);
