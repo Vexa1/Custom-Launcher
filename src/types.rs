@@ -108,6 +108,10 @@ pub struct Settings {
     pub overlay_image_opacity: f32,
     pub overlay_image_offset_x: i16,
     pub overlay_image_offset_y: i16,
+    /// The box the HUD editor saved. `0` means "use the corner, height and offsets above",
+    /// so a picture that was never dragged keeps following its size slider.
+    pub overlay_image_w: u16,
+    pub overlay_image_h: u16,
     /// Draw a crosshair in the middle of the Roblox window.
     pub crosshair_enabled: bool,
     /// 0 dot, 1 cross, 2 circle, 3 cross + dot.
@@ -210,6 +214,8 @@ impl Default for Settings {
             overlay_image_opacity: 0.9,
             overlay_image_offset_x: 0,
             overlay_image_offset_y: 0,
+            overlay_image_w: 0,
+            overlay_image_h: 0,
             crosshair_enabled: false,
             crosshair_style: 3,
             crosshair_size: 18,

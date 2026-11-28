@@ -99,6 +99,9 @@ pub struct ImageOverlayCfg {
     pub opacity: f32,
     pub offset_x: i16,
     pub offset_y: i16,
+    /// The editor's saved box, `0` when the picture still follows `size_pct`.
+    pub w: u16,
+    pub h: u16,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -198,6 +201,8 @@ impl OverlayConfig {
                 opacity: s.overlay_image_opacity.clamp(0.1, 1.0),
                 offset_x: s.overlay_image_offset_x,
                 offset_y: s.overlay_image_offset_y,
+                w: s.overlay_image_w,
+                h: s.overlay_image_h,
             })
         } else {
             None
@@ -708,6 +713,8 @@ pub struct PositionResult {
     pub confirmed: bool,
     /// Every panel's final position, ready to be stored in `settings.json`.
     pub panels: Vec<overlay_spec::PanelOffset>,
+    /// The custom image's final box, when the editor had one on screen.
+    pub image: Option<overlay_spec::ImageBox>,
 }
 
 /// Reads and removes the editor's answer. `None` while the user is still dragging.
@@ -724,6 +731,12 @@ pub fn take_position_result() -> Option<PositionResult> {
             v["offset_x"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
             v["offset_y"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
         ),
+        image: v["image"].as_object().map(|img| overlay_spec::ImageBox {
+            x: img["x"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+            y: img["y"].as_i64().unwrap_or(0).clamp(-8000, 8000) as i16,
+            w: img["w"].as_i64().unwrap_or(0).clamp(0, 8000) as i16,
+            h: img["h"].as_i64().unwrap_or(0).clamp(0, 8000) as i16,
+        }),
     })
 }
 
@@ -1647,6 +1660,8 @@ fn build_spec(g: &Shared) -> Value {
             "opacity": img.opacity,
             "offset_x": img.offset_x,
             "offset_y": img.offset_y,
+            "w": img.w,
+            "h": img.h,
         });
     }
     overlay_spec::set_crosshair(

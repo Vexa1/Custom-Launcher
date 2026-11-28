@@ -39,6 +39,46 @@ fn outline() -> Color32 {
     Color32::from_rgba_unmultiplied(255, 255, 255, 150)
 }
 
+/// The stand-in picture's pixel size, used for the default (percentage) sizing.
+const FIXTURE_IMAGE: (f32, f32) = (160.0, 64.0);
+
+/// A deterministic stand-in for a user's PNG: a dark plate with an accent diagonal and a
+/// lighter band, so a screenshot shows the picture's real rect and its edges are visible.
+/// The stand-in picture, drawn with plain shapes: the software rasterizer used by these
+/// screenshots does not sample the launcher's own textures, and what the artifact has to show
+/// is the picture's rect and its selection frame, not its pixels.
+fn paint_fixture(painter: &egui::Painter, rect: Rect) {
+    painter.rect_filled(rect, CornerRadius::same(3), Color32::from_rgb(0x1B, 0x22, 0x33));
+    let bars: i32 = 4;
+    for i in 0..bars {
+        let t = i as f32 / bars as f32;
+        let bar = Rect::from_min_size(
+            Pos2::new(rect.left() + 10.0, rect.top() + 12.0 + t * (rect.height() - 30.0)),
+            Vec2::new((rect.width() - 20.0) * (0.35 + 0.6 * t), 8.0),
+        );
+        painter.rect_filled(
+            bar,
+            CornerRadius::same(2),
+            Color32::from_rgb(
+                (0x40 + 40 * i) as u8,
+                (0x5C + 30 * i) as u8,
+                (0x9A + 20 * i) as u8,
+            ),
+        );
+    }
+    let band = Rect::from_min_size(
+        Pos2::new(rect.left() + 10.0, rect.bottom() - 18.0),
+        Vec2::new(rect.width() - 20.0, 8.0),
+    );
+    painter.rect_filled(band, CornerRadius::same(2), Color32::from_rgb(0xE8, 0x98, 0x4B));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(3),
+        Stroke::new(1.0, Color32::from_rgb(0x39, 0x43, 0x59)),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// A dashed rectangle, exactly the pattern the shipping editor paints.
 fn dashed_rect(painter: &egui::Painter, frame: Rect, color: Color32, px: f32) {
     let dash = 6.0;
@@ -170,6 +210,88 @@ fn draw_impl(
         );
     }
     probe.widget("hud.game", area, false);
+
+    // The custom image, placed by the same `ImageBox` arithmetic the shipping window uses.
+    let mut image_placed: Option<(crate::overlay_spec::ImageBox, Rect)> = None;
+    let ppx = 1.0 / painter.ctx().pixels_per_point().max(0.5);
+    if let Some(img) = spec["image"].as_object().filter(|i| !i.is_empty()) {
+        let saved = (
+            img["w"].as_u64().unwrap_or(0) as u16,
+            img["h"].as_u64().unwrap_or(0) as u16,
+        );
+        let min = crate::overlay_spec::ImageBox::MIN as u16;
+        let view = (area.width(), area.height());
+        let box_ = if saved.0 >= min && saved.1 >= min {
+            crate::overlay_spec::ImageBox {
+                x: img["offset_x"].as_f64().unwrap_or(0.0) as i16,
+                y: img["offset_y"].as_f64().unwrap_or(0.0) as i16,
+                w: saved.0 as i16,
+                h: saved.1 as i16,
+            }
+        } else {
+            let size = crate::overlay_spec::ImageBox::size(
+                (FIXTURE_IMAGE.0, FIXTURE_IMAGE.1),
+                img["size"].as_u64().unwrap_or(25) as u8,
+                view.1,
+                (0, 0),
+            );
+            crate::overlay_spec::ImageBox::placed(
+                img["corner"].as_u64().unwrap_or(0) as u8,
+                size,
+                view,
+                (
+                    img["offset_x"].as_f64().unwrap_or(0.0) as f32,
+                    img["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                ),
+            )
+        }
+        .clamped(view);
+        let rect = Rect::from_min_size(
+            Pos2::new(area.left() + box_.x as f32, area.top() + box_.y as f32),
+            Vec2::new(box_.w as f32, box_.h as f32),
+        );
+        paint_fixture(&painter, rect);
+        probe.widget("hud.image", rect, false);
+        if let Some(active) = edit {
+            let is_active = active == "image";
+            dashed_rect(
+                &painter,
+                rect.expand(4.0),
+                if is_active { ACCENT } else { outline() },
+                ppx,
+            );
+            if is_active {
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(4),
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            for (i, corner) in [
+                rect.left_top(),
+                rect.right_top(),
+                rect.left_bottom(),
+                rect.right_bottom(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let target = Rect::from_center_size(corner, Vec2::new(24.0, 24.0));
+                probe.widget(format!("hud.image.handle.{i}"), target, true);
+                let square = Rect::from_center_size(corner, Vec2::new(8.0, 8.0));
+                painter.rect_filled(square, CornerRadius::same(1), ACCENT);
+                painter.rect_stroke(
+                    square,
+                    CornerRadius::same(1),
+                    Stroke::new(ppx, Color32::from_rgb(12, 14, 20)),
+                    egui::StrokeKind::Outside,
+                );
+                probe.widget(format!("hud.image.grip.{i}"), square, false);
+            }
+        }
+        image_placed = Some((box_, rect));
+    }
 
     let opacity = spec["opacity"].as_f64().unwrap_or(0.9).clamp(0.2, 1.0) as f32;
     let ppp = painter.ctx().pixels_per_point().max(0.5);
@@ -523,24 +645,33 @@ fn draw_impl(
     let Some(active) = edit else {
         return;
     };
-    let Some((_, panel_rect)) = placed.iter().find(|(id, _)| id == active) else {
-        return;
+    let (panel_rect, readout) = if active == "image" {
+        let Some((box_, rect)) = image_placed else {
+            return;
+        };
+        (
+            rect,
+            format!("image  {}, {}   {} × {}", box_.x, box_.y, box_.w, box_.h),
+        )
+    } else {
+        let Some((_, rect)) = placed.iter().find(|(id, _)| id == active) else {
+            return;
+        };
+        let offset_x = panels
+            .iter()
+            .find(|p| p["id"].as_str() == Some(active))
+            .and_then(|p| p["offset_x"].as_i64())
+            .unwrap_or(0);
+        let offset_y = panels
+            .iter()
+            .find(|p| p["id"].as_str() == Some(active))
+            .and_then(|p| p["offset_y"].as_i64())
+            .unwrap_or(0);
+        (*rect, format!("{active}  {offset_x}, {offset_y}"))
     };
-    let panel_rect = *panel_rect;
-    let offset_x = panels
-        .iter()
-        .find(|p| p["id"].as_str() == Some(active))
-        .and_then(|p| p["offset_x"].as_i64())
-        .unwrap_or(0);
-    let offset_y = panels
-        .iter()
-        .find(|p| p["id"].as_str() == Some(active))
-        .and_then(|p| p["offset_y"].as_i64())
-        .unwrap_or(0);
 
     // The same measured bar as `overlay_window::paint_edit`: every part starts where the one
     // before it ends, so the hint can never land on the Reset pill.
-    let readout = format!("{active}  {offset_x}, {offset_y}");
     let readout_g = painter.layout_no_wrap(readout.clone(), FontId::monospace(11.5), VALUE);
     let pad = 10.0;
     let gap = 10.0;
@@ -561,11 +692,12 @@ fn draw_impl(
         hint_g = painter.layout_no_wrap(hint.to_string(), label_font.clone(), LABEL);
     }
     let bar_w = (fixed + hint_g.size().x).min(room);
-    let below = panel_rect.max.y + 12.0;
+    // The handles are 24 px targets around the corners, so the bar clears them by 16 px.
+    let below = panel_rect.max.y + 16.0;
     let bar_y = if below + bar_h <= area.max.y - 8.0 {
         below
     } else {
-        (panel_rect.min.y - 12.0 - bar_h).max(area.min.y + 8.0)
+        (panel_rect.min.y - 16.0 - bar_h).max(area.min.y + 8.0)
     };
     let bar_x = panel_rect.min.x.clamp(
         area.min.x + 8.0,

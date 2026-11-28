@@ -4061,20 +4061,7 @@ impl Creblox {
                             // The overlay process owns the pointer and the launcher owns
                             // settings.json, so the answer comes back as one small file
                             // (polled below) instead of two processes writing one config.
-                            if !self.overlay_editing {
-                                self.overlay_editing = true;
-                                self.status =
-                                    "Drag the HUD, then Confirm (⏎) — Esc cancels".to_string();
-                                self.maybe_show_game_overlay();
-                                self.game_overlay.set_edit(true);
-                                if !self.game_overlay.is_running() {
-                                    // Never leave the menu in "Editing…" with nothing on
-                                    // screen to edit: that would look like a hang.
-                                    self.overlay_editing = false;
-                                    self.status = "Could not open the HUD editor".to_string();
-                                }
-                                self.sync_tray_state();
-                            }
+                            self.start_overlay_edit();
                         }
                         TrayEvent::CopyJobId => {
                             if let Some(info) = self.server_info.clone() {
@@ -5737,6 +5724,29 @@ impl Creblox {
         crate::game_overlay::set_party_tiles(tiles);
     }
 
+    /// Opens the on-screen HUD editor.
+    ///
+    /// The tray item and the Settings button both call this, so both enter the editor the same
+    /// way: every card, the crosshair and the custom image start where they are drawn right
+    /// now (the overlay reads the saved offsets from the panels file) instead of snapping to
+    /// a default until the user presses Reset.
+    pub fn start_overlay_edit(&mut self) {
+        if self.overlay_editing {
+            return;
+        }
+        self.overlay_editing = true;
+        self.status = "Drag the HUD, then Confirm (⏎) — Esc cancels".to_string();
+        self.maybe_show_game_overlay();
+        self.game_overlay.set_edit(true);
+        if !self.game_overlay.is_running() {
+            // Never leave the menu in "Editing…" with nothing on screen to edit: that would
+            // look like a hang.
+            self.overlay_editing = false;
+            self.status = "Could not open the HUD editor".to_string();
+        }
+        self.sync_tray_state();
+    }
+
     /// After leaving a game, put CREBLOX in front (instead of Roblox's own home screen).
     /// Starts (or refreshes) the in-game overlays for the server we are connected to.
     pub fn maybe_show_game_overlay(&mut self) {
@@ -6124,6 +6134,14 @@ impl eframe::App for Creblox {
                     self.overlay_editing = false;
                     if result.confirmed {
                         self.settings.overlay_panels = result.panels;
+                        // The picture's box, when the editor moved or resized it. It is drawn
+                        // from these exact points during live gameplay.
+                        if let Some(img) = result.image {
+                            self.settings.overlay_image_offset_x = img.x;
+                            self.settings.overlay_image_offset_y = img.y;
+                            self.settings.overlay_image_w = img.w.max(0) as u16;
+                            self.settings.overlay_image_h = img.h.max(0) as u16;
+                        }
                         save_settings(&self.settings);
                         self.status = format!(
                             "HUD positions saved ({} panels)",

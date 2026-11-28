@@ -1286,6 +1286,22 @@ impl Creblox {
             ui.separator();
             ui.add_space(8.0);
 
+            // One entry point for the on-screen editor: it starts from the positions the HUD
+            // is using right now, and the custom image can be moved and resized there too.
+            ui.horizontal(|ui| {
+                if ui.button("Edit HUD positions…").clicked() {
+                    self.start_overlay_edit();
+                }
+                small_text(
+                    ui,
+                    "Drag every card, the crosshair and the picture itself (corner handles resize)."
+                        .to_string(),
+                );
+            });
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
             // Custom image overlay: any picture on top of the game, in a corner of choice.
             changed |= ui
                 .checkbox(
@@ -1365,8 +1381,18 @@ impl Creblox {
                         .changed();
                     small_text(
                         ui,
-                        "The picture keeps its aspect ratio and is scaled by height. Use the offsets to fine-tune the corner placement."
-                            .to_string(),
+                        if self.settings.overlay_image_w > 0 && self.settings.overlay_image_h > 0 {
+                            format!(
+                                "Saved from the HUD editor: {} x {} at {}, {}. Use Edit HUD positions… to move it again, or Reset there to go back to the corner.",
+                                self.settings.overlay_image_w,
+                                self.settings.overlay_image_h,
+                                self.settings.overlay_image_offset_x,
+                                self.settings.overlay_image_offset_y
+                            )
+                        } else {
+                            "The picture keeps its aspect ratio and is scaled by height. Use the offsets to fine-tune the corner placement, or drag it in Edit HUD positions…."
+                                .to_string()
+                        },
                     );
                 });
             });

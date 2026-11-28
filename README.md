@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.50
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.51
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -680,7 +680,7 @@ to reach CREBLOX without leaving the session.
 | Close Roblox | `TrayState.roblox_running` | Calls `kill_all_roblox_processes` (`roblox_process.rs:932`) — the same function Settings uses — **on a worker thread**, reporting the count back through `Msg::RobloxKilled`, so a tray click cannot stall the window while the kills run. Disabled when no player process is alive. macOS menu only; Windows keeps the action in Settings. |
 | Server region / Stats / Crosshair | `settings.overlay_enabled`, `overlay_stats_enabled`, `crosshair_enabled` | Checkmarks mirror Settings; a click writes `settings.json` and re-applies the overlay config. |
 | Discord Rich Presence | `settings.discord_rpc_enabled` | Checkmark plus an immediate presence refresh. |
-| Edit Overlay Position… | — | Opens the on-screen HUD editor: every card has its own dashed box and drags on its own; Confirm (Enter) saves them all, Esc reverts, Reset restores the corner slots. Disabled while the editor is open, and when every overlay is off. |
+| Edit Overlay Position… | — | Opens the on-screen HUD editor, from the tray or from Settings → Overlay HUD: every card starts exactly where it is on screen and gets its own dashed box, so each one drags on its own. The custom image is draggable too and resizes from four corner handles (Shift keeps its aspect ratio, 24 pt minimum, never off-screen). The bar shows the active element's live `(x, y)` and `W × H`. Confirm (Enter) saves every position and the picture's box to `settings.json`, Esc reverts, Reset restores the corner slots and the picture's height percentage. Disabled while the editor is open, and when every overlay is off. |
 | Dock icon (click) | — | Reopens a window you hid yourself (Hide to Menu Bar, `Cmd+H`). While CREBLOX is tucked in the menu bar for a game there is no Dock icon and no automatic restore: **Open CREBLOX** is the way back. See [Window lifecycle](#window-lifecycle). |
 | Quit CREBLOX | — | Drops the status item, stops the instance listener and the overlay helper. |
 

@@ -426,3 +426,75 @@ fn every_tray_toggle_rewrites_the_panels_spec() {
     let crosshair_back = all_on.flipped(TrayToggle::Crosshair).flipped(TrayToggle::Crosshair);
     assert_eq!(spec_for(crosshair_back, crosshair_back.crosshair), before);
 }
+
+// ---------------------------------------------------------------------------------------
+// The custom image's box: the geometry the editor drags and settings.json stores.
+// ---------------------------------------------------------------------------------------
+
+use creblox_vm_tests::overlay_spec::ImageBox;
+
+#[test]
+fn a_new_image_sits_in_its_corner_at_the_size_slider_height() {
+    // 160x64 picture, 25% of an 800 pt view = 200 pt tall, 500 wide at its own aspect ratio,
+    // in the top-right slot with a 16 pt gap.
+    let size = ImageBox::size((160.0, 64.0), 25, 800.0, (0, 0));
+    assert_eq!(size, (500.0, 200.0));
+    let top_right = ImageBox::placed(1, size, (1280.0, 800.0), (0.0, 0.0));
+    assert_eq!((top_right.x, top_right.y), (764, 16));
+    let bottom_left = ImageBox::placed(2, size, (1280.0, 800.0), (0.0, 0.0));
+    assert_eq!((bottom_left.x, bottom_left.y), (16, 584));
+    // The offsets are the fine-tune sliders, so they shift the corner slot.
+    let nudged = ImageBox::placed(1, size, (1280.0, 800.0), (-30.0, 12.0));
+    assert_eq!((nudged.x, nudged.y), (734, 28));
+}
+
+#[test]
+fn a_saved_box_wins_over_the_percentage() {
+    let size = ImageBox::size((160.0, 64.0), 25, 800.0, (320, 128));
+    assert_eq!(size, (320.0, 128.0));
+    // A box below the minimum is ignored, so a hand-edited settings file cannot make the
+    // picture impossible to grab.
+    let tiny = ImageBox::size((160.0, 64.0), 25, 800.0, (3, 3));
+    assert_eq!(tiny, (500.0, 200.0));
+}
+
+#[test]
+fn dragging_the_picture_keeps_it_inside_the_game_view() {
+    let view = (1280.0, 800.0);
+    let start = ImageBox { x: 400, y: 300, w: 320, h: 128 };
+    let moved = start.moved(100.0, 60.0, view);
+    assert_eq!((moved.x, moved.y), (500, 360));
+    let pinned = start.moved(-9000.0, 9000.0, view);
+    assert_eq!(pinned.x, 0);
+    assert_eq!(pinned.y, view.1 as i16 - pinned.h);
+}
+
+#[test]
+fn a_corner_handle_resizes_from_the_opposite_corner_and_never_below_24() {
+    let view = (1280.0, 800.0);
+    let start = ImageBox { x: 400, y: 300, w: 320, h: 128 };
+    // Bottom-right grows: the top-left stays put.
+    let grown = start.resized(3, 80.0, 40.0, view, false);
+    assert_eq!((grown.x, grown.y, grown.w, grown.h), (400, 300, 400, 168));
+    // Top-left shrinks from its own corner: the bottom-right stays put.
+    let shrunk = start.resized(0, 60.0, 20.0, view, false);
+    assert_eq!((shrunk.x, shrunk.y), (460, 320));
+    assert_eq!((shrunk.w, shrunk.h), (260, 108));
+    // Dragged far past the opposite corner, the box stops at the minimum size instead of
+    // flipping inside out.
+    let squashed = start.resized(0, 5000.0, 5000.0, view, false);
+    assert_eq!((squashed.w, squashed.h), (ImageBox::MIN, ImageBox::MIN));
+    assert_eq!((squashed.x, squashed.y), (400 + 320 - ImageBox::MIN, 300 + 128 - ImageBox::MIN));
+}
+
+#[test]
+fn shift_locks_the_aspect_ratio_while_resizing() {
+    let view = (1280.0, 800.0);
+    let start = ImageBox { x: 400, y: 300, w: 320, h: 128 };
+    let locked = start.resized(3, 80.0, 0.0, view, true);
+    // 2.5:1 stays 2.5:1: width grows by 80, height follows to 160.
+    assert_eq!((locked.w, locked.h), (400, 160));
+    // An unconstrained drag of the same corner would have stretched it instead.
+    let free = start.resized(3, 80.0, 0.0, view, false);
+    assert_eq!((free.w, free.h), (400, 128));
+}

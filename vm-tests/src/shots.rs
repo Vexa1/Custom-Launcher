@@ -212,8 +212,13 @@ impl Probe {
                 }
                 // A label inside its button, or a card inside the page, is nesting, not a
                 // collision: only partially overlapping boxes are illegal.
+                //
+                // A control anchored to its parent's edge - the editor's corner handles sit
+                // half on the picture - is nesting by id even though it straddles the border.
                 let nested = a.rect.expand(0.5).contains_rect(b.rect)
-                    || b.rect.expand(0.5).contains_rect(a.rect);
+                    || b.rect.expand(0.5).contains_rect(a.rect)
+                    || b.id.starts_with(&format!("{}.", a.id))
+                    || a.id.starts_with(&format!("{}.", b.id));
                 if nested {
                     continue;
                 }

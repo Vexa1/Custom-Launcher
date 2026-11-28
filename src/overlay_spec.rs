@@ -448,6 +448,129 @@ pub fn apply_panel_offsets(panels: &mut [Value], offsets: &[PanelOffset]) {
     }
 }
 
+/// The custom image's box on screen, in points from the game window's top-left corner.
+///
+/// The editor owns this arithmetic so the drag a user performs in the overlay and the position
+/// the launcher stores can never disagree: one formula, run in `vm-tests` too. Corners are
+/// `0` top-left, `1` top-right, `2` bottom-left, `3` bottom-right, the same order the settings
+/// page lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ImageBox {
+    pub x: i16,
+    pub y: i16,
+    pub w: i16,
+    pub h: i16,
+}
+
+impl ImageBox {
+    /// Never smaller than this: a 4 px image is impossible to grab again.
+    pub const MIN: i16 = 24;
+    /// The gap between the image and the window edge in its default corner slot.
+    pub const MARGIN: f32 = 16.0;
+
+    /// The size to draw: the saved box when it has one, otherwise the height percentage kept
+    /// at the picture's own aspect ratio.
+    pub fn size(texture: (f32, f32), pct: u8, view_h: f32, saved: (u16, u16)) -> (f32, f32) {
+        if saved.0 >= Self::MIN as u16 && saved.1 >= Self::MIN as u16 {
+            return (saved.0 as f32, saved.1 as f32);
+        }
+        let (tw, th) = texture;
+        if tw <= 0.0 || th <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let target_h = (view_h * (pct as f32 / 100.0)).clamp(8.0, view_h.max(8.0));
+        (tw * (target_h / th), target_h)
+    }
+
+    /// Where the image sits before anyone drags it: its corner slot plus the saved offsets.
+    pub fn placed(
+        corner: u8,
+        size: (f32, f32),
+        view: (f32, f32),
+        offset: (f32, f32),
+    ) -> Self {
+        let base_x = if corner % 2 == 1 {
+            view.0 - size.0 - Self::MARGIN
+        } else {
+            Self::MARGIN
+        };
+        let base_y = if corner < 2 {
+            Self::MARGIN
+        } else {
+            view.1 - size.1 - Self::MARGIN
+        };
+        Self {
+            x: (base_x + offset.0).round() as i16,
+            y: (base_y + offset.1).round() as i16,
+            w: size.0.round().max(Self::MIN as f32) as i16,
+            h: size.1.round().max(Self::MIN as f32) as i16,
+        }
+        .clamped(view)
+    }
+
+    /// Keeps the whole box inside the view, shrinking only when it is larger than the view.
+    pub fn clamped(self, view: (f32, f32)) -> Self {
+        let mut w = self.w.max(Self::MIN);
+        let mut h = self.h.max(Self::MIN);
+        w = w.min((view.0 as i16).max(Self::MIN));
+        h = h.min((view.1 as i16).max(Self::MIN));
+        let x = self.x.clamp(0, (view.0 as i16 - w).max(0));
+        let y = self.y.clamp(0, (view.1 as i16 - h).max(0));
+        Self { x, y, w, h }
+    }
+
+    /// Drags the whole box, keeping it fully on screen.
+    pub fn moved(self, dx: f32, dy: f32, view: (f32, f32)) -> Self {
+        Self {
+            x: self.x.saturating_add(dx.round() as i16),
+            y: self.y.saturating_add(dy.round() as i16),
+            ..self
+        }
+        .clamped(view)
+    }
+
+    /// Drags one corner. The opposite corner stays put, the box never goes below
+    /// [`ImageBox::MIN`] and `lock` keeps the aspect ratio it started with by deriving the
+    /// height from the width.
+    pub fn resized(self, corner: u8, dx: f32, dy: f32, view: (f32, f32), lock: bool) -> Self {
+        let (mut x, mut y, mut w, mut h) = (self.x, self.y, self.w, self.h);
+        let (dx, dy) = (dx.round() as i16, dy.round() as i16);
+        if corner == 0 || corner == 2 {
+            x = x.saturating_add(dx);
+            w = w.saturating_sub(dx);
+        } else {
+            w = w.saturating_add(dx);
+        }
+        if corner < 2 {
+            y = y.saturating_add(dy);
+            h = h.saturating_sub(dy);
+        } else {
+            h = h.saturating_add(dy);
+        }
+        if lock && self.h > 0 {
+            let aspect = self.w as f32 / self.h as f32;
+            h = (w as f32 / aspect).round() as i16;
+            if corner < 2 {
+                y = self.y + self.h - h;
+            }
+        }
+        // Below the minimum, keep the fixed edge and grow back from it.
+        if w < Self::MIN {
+            if corner == 0 || corner == 2 {
+                x = self.x + self.w - Self::MIN;
+            }
+            w = Self::MIN;
+        }
+        if h < Self::MIN {
+            if corner < 2 {
+                y = self.y + self.h - Self::MIN;
+            }
+            h = Self::MIN;
+        }
+        Self { x, y, w, h }.clamped(view)
+    }
+}
+
 /// The whole file the overlay window reads.
 pub fn spec_json(opacity: f32, game_active: bool, edit: bool, panels: Vec<Value>) -> Value {
     json!({

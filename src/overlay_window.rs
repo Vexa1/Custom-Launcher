@@ -644,6 +644,9 @@ struct RowLayout {
 }
 
 struct PanelLayout {
+    /// The panel's id from the spec (`server`, `stats`, `party`, ...), so the editor can line
+    /// a card up with where it was before the spec changed.
+    id: String,
     rect: Rect,
     title: Option<(Pos2, Arc<egui::Galley>)>,
     rows: Vec<RowLayout>,
@@ -741,7 +744,7 @@ struct Crosshair {
     image: String,
 }
 
-/// A picture drawn in one corner of the game window.
+/// A picture drawn in one corner of the game window - or exactly where the editor put it.
 #[derive(Clone)]
 struct OverlayImage {
     path: String,
@@ -750,6 +753,15 @@ struct OverlayImage {
     opacity: f32,
     offset_x: f32,
     offset_y: f32,
+    /// The editor's saved box in points from the game area's top-left, `0` until the picture
+    /// has been dragged or resized once. With a box set, `offset_x`/`offset_y` are that
+    /// absolute position; without one they are the corner slot's fine-tune offsets.
+    w: u16,
+    h: u16,
+    /// Where it was drawn this frame (game-window coordinates).
+    rect: Option<Rect>,
+    /// What Reset and Esc go back to.
+    saved: (f32, f32, u16, u16),
 }
 
 /// Turns this helper into a background (accessory) app *before* any window exists, so
@@ -896,6 +908,20 @@ struct OverlayWindowApp {
     edit_done: bool,
     /// The panel being dragged right now, by id (`None` when nothing is moving).
     dragging: Option<String>,
+    /// This process just entered edit mode: the next editor frame re-anchors every card to
+    /// where it was drawn before the spec switched to the editor's preview.
+    edit_entered: bool,
+    /// Where each card was drawn during live gameplay, by id. The editor starts from these
+    /// instead of from the corner stack it would compute for its own spec.
+    live_rects: Vec<(String, Rect)>,
+    /// Where the custom image was drawn this frame, and which grip is being dragged:
+    /// `0..=3` a corner, `4` the whole picture, `None` nothing.
+    image_rect: Option<Rect>,
+    image_grip: Option<u8>,
+    /// The image's box and the game area it was fitted into, in points from that area's
+    /// top-left - the coordinates the editor and settings.json use.
+    image_box: Option<crate::overlay_spec::ImageBox>,
+    image_view: (f32, f32),
     /// The panel under the pointer, by id: it gets the accent outline.
     hovering: Option<String>,
     /// The window accepts mouse input (edit mode only).
@@ -943,6 +969,12 @@ impl OverlayWindowApp {
             edit: false,
             edit_done: false,
             dragging: None,
+            edit_entered: false,
+            live_rects: Vec::new(),
+            image_rect: None,
+            image_grip: None,
+            image_box: None,
+            image_view: (0.0, 0.0),
             hovering: None,
             interactive: false,
             layout: Vec::new(),
@@ -1007,8 +1039,11 @@ impl OverlayWindowApp {
             self.edit = false;
             self.edit_done = false;
         } else if !self.edit && !self.edit_done {
-            // Entered from the tray: every card starts where it was last saved.
+            // Entered from the tray or Settings: every card starts exactly where it is on
+            // screen right now, not where the editor's own layout would put it.
             self.edit = true;
+            self.edit_entered = true;
+            self.image_grip = None;
         }
         self.panels = spec["panels"]
             .as_array()
@@ -1088,6 +1123,15 @@ impl OverlayWindowApp {
                 opacity: i["opacity"].as_f64().unwrap_or(0.9).clamp(0.05, 1.0) as f32,
                 offset_x: i["offset_x"].as_f64().unwrap_or(0.0) as f32,
                 offset_y: i["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                w: i["w"].as_u64().unwrap_or(0).min(8000) as u16,
+                h: i["h"].as_u64().unwrap_or(0).min(8000) as u16,
+                rect: None,
+                saved: (
+                    i["offset_x"].as_f64().unwrap_or(0.0) as f32,
+                    i["offset_y"].as_f64().unwrap_or(0.0) as f32,
+                    i["w"].as_u64().unwrap_or(0).min(8000) as u16,
+                    i["h"].as_u64().unwrap_or(0).min(8000) as u16,
+                ),
             });
         self.crosshair = spec
             .get("crosshair")
@@ -1302,12 +1346,18 @@ impl OverlayWindowApp {
         self.relayout(painter, title_bar);
 
         // Image overlay first: it is a background decoration, the text panels go on top.
-        // Borrowed, never cloned: the old version cloned the path string every frame.
-        let image = self.image.as_ref().filter(|img| !img.path.is_empty());
-        if let Some(img) = image {
-            let tex = texture_for(ui.ctx(), &mut self.image_tex, &img.path, "overlay-image");
-            if let Some(tex) = tex {
-                paint_overlay_image(painter, area, title_bar, img, &tex);
+        self.image_rect = None;
+        self.image_box = None;
+        if let Some(img) = self.image.as_mut().filter(|img| !img.path.is_empty()) {
+            let path = img.path.clone();
+            if let Some(tex) = texture_for(ui.ctx(), &mut self.image_tex, &path, "overlay-image") {
+                let view = (area.width().max(1.0), (area.height() - title_bar).max(1.0));
+                let (box_, rect) = image_rect(area, title_bar, img, tex.size_vec2(), view);
+                img.rect = Some(rect);
+                self.image_rect = Some(rect);
+                self.image_box = Some(box_);
+                self.image_view = view;
+                paint_image_rect(painter, rect, img.opacity, &tex);
             }
         }
 
@@ -1584,6 +1634,7 @@ impl OverlayWindowApp {
                     });
                 }
                 self.layout.push(PanelLayout {
+                    id: panel.id.clone(),
                     rect,
                     title,
                     rows: Vec::new(),
@@ -1696,12 +1747,22 @@ impl OverlayWindowApp {
                 }
             }
             self.layout.push(PanelLayout {
+                id: panel.id.clone(),
                 rect,
                 title,
                 rows: out_rows,
                 rules,
                 tiles: Vec::new(),
             });
+        }
+        if !self.edit {
+            // The live layout, kept for the moment the user opens the editor: it is the only
+            // place the pre-edit positions still exist once the spec switches to its preview.
+            self.live_rects = self
+                .layout
+                .iter()
+                .map(|l| (l.id.clone(), l.rect))
+                .collect();
         }
     }
 
@@ -1805,8 +1866,32 @@ impl OverlayWindowApp {
     /// the pointer or being dragged, its live `(x, y)` in the readout, and Reset / Confirm.
     /// Also the only place that moves a panel.
     fn paint_edit(&mut self, ui: &egui::Ui) {
-        if self.layout.is_empty() {
+        if self.layout.is_empty() && self.image_rect.is_none() {
             return;
+        }
+        // The spec the launcher writes for the editor can differ from the live one (a preview
+        // card, a panel the game hid). Re-anchor every card once, to where it was drawn before,
+        // so opening the editor never moves anything under the pointer.
+        if self.edit_entered {
+            self.edit_entered = false;
+            let mut moved = false;
+            for (i, layout) in self.layout.iter().enumerate() {
+                let Some((_, live)) = self.live_rects.iter().find(|(id, _)| *id == layout.id)
+                else {
+                    continue;
+                };
+                let shift = live.min - layout.rect.min;
+                if shift.length() > 0.01 {
+                    if let Some(panel) = self.panels.get_mut(i) {
+                        panel.offset += shift;
+                        moved = true;
+                    }
+                }
+            }
+            if moved {
+                self.spec_gen = self.spec_gen.wrapping_add(1);
+                ui.ctx().request_repaint();
+            }
         }
         let ppp = ui.ctx().pixels_per_point().max(0.5);
         let px = 1.0 / ppp;
@@ -1865,6 +1950,85 @@ impl OverlayWindowApp {
             self.spec_gen = self.spec_gen.wrapping_add(1);
             ui.ctx().request_repaint();
         }
+
+        // The custom image: drag anywhere inside it to move it, or grab one of the four
+        // corner handles to resize. Shift keeps the aspect ratio while resizing.
+        let mut image_active = false;
+        if let (Some(rect), Some(box_), true) =
+            (self.image_rect, self.image_box, self.image.is_some())
+        {
+            let view = self.image_view;
+            let hit = rect.translate(-self.shift);
+            let grip = 8.0;
+            let corners = [
+                hit.left_top(),
+                hit.right_top(),
+                hit.left_bottom(),
+                hit.right_bottom(),
+            ];
+            let hold_shift = ui.input(|i| i.modifiers.shift);
+            let mut corner_hit = None;
+            for (i, corner) in corners.iter().enumerate() {
+                // A 24 px target around an 8 px square: still easy to grab on a Retina
+                // display, and the smallest hit target this app allows anywhere else.
+                let _ = grip;
+                let target = Rect::from_center_size(*corner, vec2(24.0, 24.0));
+                let response = ui.interact(
+                    target,
+                    ui.scope_id().with(("creblox-hud-image-corner", i)),
+                    egui::Sense::drag(),
+                );
+                if response.hovered() || response.dragged() {
+                    corner_hit = Some(i as u8);
+                    image_active = true;
+                    self.image_grip = Some(i as u8);
+                    ui.ctx().set_cursor_icon(if i == 0 || i == 3 {
+                        egui::CursorIcon::ResizeNwSe
+                    } else {
+                        egui::CursorIcon::ResizeNeSw
+                    });
+                }
+                if response.dragged() {
+                    let delta = response.drag_delta();
+                    let next = box_.resized(i as u8, delta.x, delta.y, view, hold_shift);
+                    if let Some(img) = self.image.as_mut() {
+                        apply_image_box(img, next);
+                    }
+                    self.dragging = Some("image".to_string());
+                    self.spec_gen = self.spec_gen.wrapping_add(1);
+                    ui.ctx().request_repaint();
+                }
+            }
+            if corner_hit.is_none() {
+                let body = ui.interact(
+                    hit,
+                    ui.scope_id().with("creblox-hud-image-body"),
+                    egui::Sense::drag(),
+                );
+                if body.hovered() || body.dragged() {
+                    image_active = true;
+                    self.image_grip = Some(4);
+                }
+                if body.dragged() {
+                    let delta = body.drag_delta();
+                    let next = box_.moved(delta.x, delta.y, view);
+                    if let Some(img) = self.image.as_mut() {
+                        apply_image_box(img, next);
+                    }
+                    self.dragging = Some("image".to_string());
+                    self.spec_gen = self.spec_gen.wrapping_add(1);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        if image_active {
+            self.hovering = Some("image".to_string());
+            if self.dragging.is_none() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        } else if self.image_grip.is_some() && self.dragging.is_none() {
+            self.image_grip = None;
+        }
         match (&self.dragging, &self.hovering) {
             (Some(_), _) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing),
             (None, Some(_)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
@@ -1873,6 +2037,11 @@ impl OverlayWindowApp {
 
         let active = self.dragging.clone().or_else(|| self.hovering.clone());
         let mut active_rect = view;
+        if active.as_deref() == Some("image") {
+            if let Some(rect) = self.image_rect {
+                active_rect = rect.translate(-self.shift);
+            }
+        }
         for (i, id, _) in &hits {
             let Some(panel) = self.layout.get(*i) else {
                 continue;
@@ -1894,6 +2063,45 @@ impl OverlayWindowApp {
                     rect,
                     CornerRadius::same(8),
                     Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
+            }
+        }
+
+        // The image's selection frame: a dashed box, an accent border when it is active and
+        // four 8x8 px accent squares the user can grab.
+        if let Some(rect) = self.image_rect {
+            let hit = rect.translate(-self.shift);
+            let image_is_active = active.as_deref() == Some("image");
+            self.paint_dashed(
+                painter,
+                hit.expand(4.0),
+                if image_is_active { accent } else { outline },
+                px,
+            );
+            if image_is_active {
+                painter.rect_stroke(
+                    hit,
+                    CornerRadius::same(4),
+                    Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            for corner in [
+                hit.left_top(),
+                hit.right_top(),
+                hit.left_bottom(),
+                hit.right_bottom(),
+            ] {
+                let square = Rect::from_center_size(
+                    pos2(snap_px(corner.x, ppp), snap_px(corner.y, ppp)),
+                    vec2(8.0, 8.0),
+                );
+                painter.rect_filled(square, CornerRadius::same(1), accent);
+                painter.rect_stroke(
+                    square,
+                    CornerRadius::same(1),
+                    Stroke::new(px, Color32::from_rgb(12, 14, 20)),
                     egui::StrokeKind::Outside,
                 );
             }
@@ -1931,7 +2139,17 @@ impl OverlayWindowApp {
             .as_ref()
             .and_then(|id| self.panels.iter().find(|p| &p.id == id))
             .or_else(|| self.panels.first());
-        let (readout, readout_w) = match shown {
+        let (readout, readout_w) = if active.as_deref() == Some("image") {
+            match self.image_box {
+                Some(b) => {
+                    let text = format!("image  {}, {}   {} × {}", b.x, b.y, b.w, b.h);
+                    let galley = painter.layout_no_wrap(text, FontId::monospace(11.5), text_color);
+                    (galley.text().to_string(), galley.size().x)
+                }
+                None => (String::new(), 0.0),
+            }
+        } else {
+            match shown {
             Some(p) => {
                 let text = format!(
                     "{}  {}, {}",
@@ -1944,6 +2162,7 @@ impl OverlayWindowApp {
                 (galley.text().to_string(), galley.size().x)
             }
             None => (String::new(), 0.0),
+            }
         };
 
         // The bar is as wide as its parts, and each part starts where the measured one before
@@ -1979,11 +2198,13 @@ impl OverlayWindowApp {
                 .x;
         }
         let bar_w = (fixed + hint_w).min(room);
-        let below = active_rect.max.y + 12.0;
+        // Clear of the active element's own corner handles (24 px targets, 12 px each side),
+        // so the bar can never sit on one.
+        let below = active_rect.max.y + 16.0;
         let bar_y = if below + bar_h <= view.max.y - 8.0 {
             below
         } else {
-            (active_rect.min.y - 12.0 - bar_h).max(view.min.y + 8.0)
+            (active_rect.min.y - 16.0 - bar_h).max(view.min.y + 8.0)
         };
         let bar_x = active_rect.min.x.clamp(
             view.min.x + 8.0,
@@ -2066,10 +2287,18 @@ impl OverlayWindowApp {
             )
         });
         if reset_clicked {
-            // Reset is the default layout: every card back in its own corner slot.
+            // Reset is the default layout: every card back in its own corner slot and the
+            // picture back to its corner, height percentage and offsets.
             for panel in &mut self.panels {
                 panel.offset = egui::Vec2::ZERO;
             }
+            if let Some(img) = self.image.as_mut() {
+                img.offset_x = 0.0;
+                img.offset_y = 0.0;
+                img.w = 0;
+                img.h = 0;
+            }
+            self.image_grip = None;
             self.spec_gen = self.spec_gen.wrapping_add(1);
         }
         if confirm_clicked || enter {
@@ -2117,11 +2346,21 @@ impl OverlayWindowApp {
             for panel in &mut self.panels {
                 panel.saved = panel.offset;
             }
+            if let Some(img) = self.image.as_mut() {
+                img.saved = (img.offset_x, img.offset_y, img.w, img.h);
+            }
         } else {
             for panel in &mut self.panels {
                 panel.offset = panel.saved;
             }
+            if let Some(img) = self.image.as_mut() {
+                img.offset_x = img.saved.0;
+                img.offset_y = img.saved.1;
+                img.w = img.saved.2;
+                img.h = img.saved.3;
+            }
         }
+        self.image_grip = None;
         self.spec_gen = self.spec_gen.wrapping_add(1);
         self.write_result(confirmed);
         self.edit = false;
@@ -2150,9 +2389,18 @@ impl OverlayWindowApp {
                 })
             })
             .collect();
+        // Only an image the user actually moved or resized is frozen into a box; one that was
+        // left alone keeps following its corner and height slider.
+        let image = match &self.image {
+            Some(img) if img.w > 0 => self.image_box.map(|b| {
+                serde_json::json!({ "x": b.x, "y": b.y, "w": b.w.max(0), "h": b.h.max(0) })
+            }),
+            _ => None,
+        };
         let body = serde_json::json!({
             "state": if confirmed { "confirmed" } else { "cancelled" },
-            "panels": panels
+            "panels": panels,
+            "image": image
         })
         .to_string();
         let tmp = path.with_extension("json.tmp");
@@ -2191,41 +2439,64 @@ fn texture_for(
     Some(tex)
 }
 
-/// Draws the custom image in its corner, scaled by height and never stretched.
-fn paint_overlay_image(
-    painter: &egui::Painter,
+/// Where the custom image goes: the editor's saved box when there is one, otherwise its
+/// corner slot and height percentage, kept at the picture's own aspect ratio.
+///
+/// Returns the box in game-area coordinates (what the editor and settings use) and the same
+/// box in window coordinates (what gets painted).
+fn image_rect(
     area: Rect,
     title_bar: f32,
     img: &OverlayImage,
-    tex: &egui::TextureHandle,
-) {
-    let image_size = tex.size_vec2();
-    if image_size.x <= 0.0 || image_size.y <= 0.0 {
+    tex: egui::Vec2,
+    view: (f32, f32),
+) -> (crate::overlay_spec::ImageBox, Rect) {
+    let min = crate::overlay_spec::ImageBox::MIN as u16;
+    let box_ = if img.w >= min && img.h >= min {
+        crate::overlay_spec::ImageBox {
+            x: img.offset_x.round() as i16,
+            y: img.offset_y.round() as i16,
+            w: img.w as i16,
+            h: img.h as i16,
+        }
+    } else {
+        let size = crate::overlay_spec::ImageBox::size((tex.x, tex.y), img.size_pct, view.1, (0, 0));
+        crate::overlay_spec::ImageBox::placed(
+            img.corner,
+            size,
+            view,
+            (img.offset_x, img.offset_y),
+        )
+    }
+    .clamped(view);
+    let rect = Rect::from_min_size(
+        pos2(area.left() + box_.x as f32, area.top() + title_bar + box_.y as f32),
+        vec2(box_.w as f32, box_.h as f32),
+    );
+    (box_, rect)
+}
+
+/// Paints the image into a rect the editor chose (never stretched beyond it: the texture keeps
+/// its own aspect ratio inside the box, centred).
+fn paint_image_rect(painter: &egui::Painter, rect: Rect, opacity: f32, tex: &egui::TextureHandle) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
-    let view_h = (area.height() - title_bar).max(1.0);
-    let target_h = (view_h * (img.size_pct as f32 / 100.0)).clamp(8.0, view_h);
-    let scale = target_h / image_size.y;
-    let size = vec2(image_size.x * scale, target_h);
-    let margin = 16.0;
-    let x = if img.corner % 2 == 1 {
-        area.right() - size.x - margin
-    } else {
-        area.left() + margin
-    };
-    let y = if img.corner < 2 {
-        area.top() + title_bar + margin
-    } else {
-        area.bottom() - size.y - margin
-    };
-    let rect = Rect::from_min_size(pos2(x + img.offset_x, y + img.offset_y), size);
-    let alpha = (img.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
     painter.image(
         tex.id(),
         rect,
         Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
         Color32::from_white_alpha(alpha),
     );
+}
+
+/// Writes an edited image box back onto the live picture and marks the layout stale.
+fn apply_image_box(img: &mut OverlayImage, box_: crate::overlay_spec::ImageBox) {
+    img.offset_x = box_.x as f32;
+    img.offset_y = box_.y as f32;
+    img.w = box_.w.max(0) as u16;
+    img.h = box_.h.max(0) as u16;
 }
 
 /// Draws a PNG crosshair centred on the aim point, fitted into `ch.size` without stretching.

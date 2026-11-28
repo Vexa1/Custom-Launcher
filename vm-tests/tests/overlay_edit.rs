@@ -284,3 +284,165 @@ fn the_editor_renders_independent_boxes_and_a_clear_toolbar() {
     );
     println!("overlay_edit_mode.png: {} ({bytes} bytes)", path.display());
 }
+
+/// The custom image is an element of the editor in its own right: it is drawn at the saved box
+/// from `settings.json` / the panels file, and it has a dashed frame plus four corner handles.
+#[test]
+fn the_custom_image_moves_and_resizes_from_its_saved_box() {
+    let viewport = egui::vec2(1280.0, 800.0);
+    let mut spec = spec_with_panel_positions();
+    // A picture the editor already dragged to a non-default spot and resized: these are the
+    // points the live HUD draws it at, not a corner slot.
+    spec["image"] = serde_json::json!({
+        "path": "/tmp/creblox-logo.png",
+        "corner": 0,
+        "size": 25,
+        "opacity": 0.95,
+        "offset_x": 412,
+        "offset_y": 236,
+        "w": 320,
+        "h": 128
+    });
+
+    let dir = shots::artifact_dir();
+    let mut harness = shots::Harness::new();
+    let (shot, probe) = harness.render(
+        "overlay_edit_image_resize",
+        viewport,
+        1.5,
+        move |ui, probe| hud::draw_edit(ui, probe, &spec, 0, "image"),
+    );
+
+    let find = |id: &str| {
+        probe
+            .widgets
+            .iter()
+            .find(|w| w.id == id)
+            .unwrap_or_else(|| panic!("{id} was drawn"))
+            .rect
+    };
+
+    // Exactly the saved box, not a corner or a percentage.
+    let image = find("hud.image");
+    assert!(
+        (image.left() - 412.0).abs() <= 0.5
+            && (image.top() - 236.0).abs() <= 0.5
+            && (image.width() - 320.0).abs() <= 0.5
+            && (image.height() - 128.0).abs() <= 0.5,
+        "the picture is not at its saved box: {image:?}"
+    );
+    assert!(
+        egui::Rect::from_min_size(egui::Pos2::ZERO, viewport).contains_rect(image),
+        "the picture hangs outside the game view: {image:?}"
+    );
+
+    // Four 24 px targets, each centred on a corner, each holding an 8 px square.
+    let corners = [
+        image.left_top(),
+        image.right_top(),
+        image.left_bottom(),
+        image.right_bottom(),
+    ];
+    for (i, corner) in corners.iter().enumerate() {
+        let target = find(&format!("hud.image.handle.{i}"));
+        assert!(
+            (target.center() - *corner).length() <= 0.5,
+            "handle {i} is not on its corner: {target:?} vs {corner:?}"
+        );
+        assert!(
+            target.width() >= 24.0 && target.height() >= 24.0,
+            "handle {i} is too small to grab: {target:?}"
+        );
+        let grip = find(&format!("hud.image.grip.{i}"));
+        assert!(
+            (grip.width() - 8.0).abs() <= 0.5 && (grip.center() - *corner).length() <= 0.5,
+            "the drawn square for handle {i} is {grip:?}"
+        );
+    }
+
+    // The toolbar anchors to the picture and never lands on it.
+    let bar = find("hud.edit.bar");
+    let overlap = bar.intersect(image);
+    assert!(
+        overlap.width() <= 0.5 || overlap.height() <= 0.5,
+        "the toolbar covers the picture by {:.1}x{:.1}",
+        overlap.width(),
+        overlap.height()
+    );
+    for (i, _) in corners.iter().enumerate() {
+        let handle = find(&format!("hud.image.handle.{i}"));
+        assert!(
+            !bar.intersects(handle),
+            "the toolbar sits on handle {i}: {bar:?} vs {handle:?}"
+        );
+    }
+    let readout = find("hud.edit.readout");
+    assert!(
+        bar.contains_rect(readout),
+        "the readout is inside the bar: {readout:?} vs {bar:?}"
+    );
+    // The image readout carries its size as well as its position, so it is wider than the
+    // panel readout's "id  x, y".
+    assert!(
+        readout.width() > 120.0,
+        "the readout looks too narrow to include W x H: {readout:?}"
+    );
+
+    let problems = probe.problems(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport));
+    assert!(
+        problems.is_empty(),
+        "the editor with an image has layout problems:\n{}",
+        problems.join("\n")
+    );
+
+    let path = shot.save(&dir);
+    assert_eq!(path.file_name().unwrap(), "overlay_edit_image_resize.png");
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    assert!(bytes > 4_096, "the PNG is only {bytes} bytes: {path:?}");
+    assert!(
+        shot.distinct_colors() >= 60,
+        "the frame looks blank ({} colours)",
+        shot.distinct_colors()
+    );
+    println!("overlay_edit_image_resize.png: {} ({bytes} bytes)", path.display());
+}
+
+/// A picture that has never been dragged still follows its corner, height and offsets, so the
+/// settings sliders keep working until the editor freezes a box.
+#[test]
+fn an_untouched_image_keeps_following_its_corner_slot() {
+    let viewport = egui::vec2(1280.0, 800.0);
+    let mut spec = spec_with_panel_positions();
+    spec["image"] = serde_json::json!({
+        "path": "/tmp/creblox-logo.png",
+        "corner": 1,
+        "size": 25,
+        "opacity": 0.95,
+        "offset_x": 0,
+        "offset_y": 0,
+        "w": 0,
+        "h": 0
+    });
+    let mut harness = shots::Harness::new();
+    let (_, probe) = harness.render(
+        "overlay_edit_image_default",
+        viewport,
+        1.5,
+        move |ui, probe| hud::draw(ui, probe, &spec, 0),
+    );
+    let image = probe
+        .widgets
+        .iter()
+        .find(|w| w.id == "hud.image")
+        .expect("the picture is drawn")
+        .rect;
+    // Top-right, 25% of the 800 pt view height -> 200 pt tall, 160x64 picture -> 500 wide.
+    assert!(
+        (image.width() - 500.0).abs() <= 1.0 && (image.height() - 200.0).abs() <= 1.0,
+        "the default size is not 25% of the height at the picture's aspect: {image:?}"
+    );
+    assert!(
+        (image.right() - (viewport.x - 16.0)).abs() <= 1.0 && (image.top() - 16.0).abs() <= 1.0,
+        "the default picture is not in its top-right slot: {image:?}"
+    );
+}
