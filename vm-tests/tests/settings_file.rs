@@ -6,7 +6,9 @@
 //! next launch.
 
 use creblox_vm_tests::settings::Settings;
-use creblox_vm_tests::settings_json::{load_settings_from, save_settings_to};
+use creblox_vm_tests::settings_json::{
+    SETTINGS_VERSION, load_settings_from, save_settings_to, settings_version,
+};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -220,6 +222,9 @@ fn a_pre_split_file_opens_its_picture_where_it_was_left() {
     )
     .expect("settings.json written");
 
+    // No `schema` key at all: that is version 1, and it is read as such.
+    assert_eq!(settings_version(&file), 1);
+
     let loaded = load_settings_from(&dir);
     assert_eq!(
         (
@@ -309,6 +314,103 @@ fn out_of_range_values_are_normalised_and_then_stay_put() {
     assert_eq!(file["overlay_panels"][0]["x"], serde_json::json!(-8000));
     assert_eq!(file["overlay_panels"][0]["y"], serde_json::json!(8000));
     assert_eq!(file["overlay_image_y"], serde_json::json!(8000));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_file_carries_its_schema_version() {
+    let dir = temp_dir("schema-version");
+    save_settings_to(&dir, &picture_at_412_236());
+
+    let text = fs::read_to_string(dir.join("settings.json")).expect("settings.json written");
+    let file: Value = serde_json::from_str(&text).expect("settings.json parses");
+    assert_eq!(
+        file["schema"],
+        serde_json::json!(SETTINGS_VERSION),
+        "every file this build writes names its layout"
+    );
+    assert_eq!(settings_version(&file), SETTINGS_VERSION);
+    assert_eq!(load_settings_from(&dir).overlay_image_w, 320);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_version_2_file_takes_the_position_only_from_its_own_fields() {
+    let dir = temp_dir("schema-2");
+    // Version 2 has the position in `x`/`y`, so a box without them is at 0 rather than in the
+    // offset sliders - the offsets are sliders again, not a hiding place.
+    let file = serde_json::json!({
+        "schema": 2,
+        "overlay_image_w": 320,
+        "overlay_image_h": 128,
+        "overlay_image_offset_x": 412,
+        "overlay_image_offset_y": 236,
+    });
+    fs::write(
+        dir.join("settings.json"),
+        serde_json::to_string(&file).expect("fixture"),
+    )
+    .expect("settings.json written");
+
+    assert_eq!(settings_version(&file), 2);
+    let loaded = load_settings_from(&dir);
+    assert_eq!(
+        (
+            loaded.overlay_image_x,
+            loaded.overlay_image_y,
+            loaded.overlay_image_w,
+            loaded.overlay_image_h
+        ),
+        (0, 0, 320, 128),
+        "a version 2 file's offsets are not a position"
+    );
+
+    // Saving it back keeps the version and the box, so the file settles.
+    save_settings_to(&dir, &loaded);
+    assert_eq!(load_settings_from(&dir), loaded);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_newer_schema_still_opens() {
+    let dir = temp_dir("schema-newer");
+    // A file from a later build: read what this build understands instead of falling back to
+    // defaults, and rewrite it as this build's version.
+    let file = serde_json::json!({
+        "schema": 9,
+        "dark": true,
+        "overlay_image_x": 412,
+        "overlay_image_y": 236,
+        "overlay_image_w": 320,
+        "overlay_image_h": 128,
+        "some_future_key": {"nested": true},
+    });
+    fs::write(
+        dir.join("settings.json"),
+        serde_json::to_string(&file).expect("fixture"),
+    )
+    .expect("settings.json written");
+
+    assert_eq!(settings_version(&file), 9);
+    let loaded = load_settings_from(&dir);
+    assert!(loaded.dark);
+    assert_eq!(
+        (
+            loaded.overlay_image_x,
+            loaded.overlay_image_y,
+            loaded.overlay_image_w,
+            loaded.overlay_image_h
+        ),
+        (412, 236, 320, 128)
+    );
+
+    save_settings_to(&dir, &loaded);
+    let text = fs::read_to_string(dir.join("settings.json")).expect("settings.json written");
+    let written: Value = serde_json::from_str(&text).expect("settings.json parses");
+    assert_eq!(written["schema"], serde_json::json!(SETTINGS_VERSION));
 
     let _ = fs::remove_dir_all(&dir);
 }

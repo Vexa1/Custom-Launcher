@@ -520,7 +520,7 @@ fn a_051_settings_file_migrates_its_saved_box_out_of_the_offsets() {
         "overlay_image_w": 320,
         "overlay_image_h": 128,
     });
-    let box_ = SavedImageBox::from_settings(&v);
+    let box_ = SavedImageBox::from_settings_at(&v, 1);
     assert_eq!(
         box_,
         SavedImageBox {
@@ -554,7 +554,7 @@ fn a_saved_box_round_trips_through_settings_json_without_touching_the_sliders() 
     let text = serde_json::to_string_pretty(&file).expect("settings.json is text");
     let back: serde_json::Value = serde_json::from_str(&text).expect("settings.json parses");
     assert_eq!(
-        SavedImageBox::from_settings(&back),
+        SavedImageBox::from_settings_at(&back, 1),
         saved,
         "the box survives being written and read"
     );
@@ -576,7 +576,7 @@ fn an_image_without_a_saved_box_keeps_its_corner_and_offsets() {
         "overlay_image_w": 0,
         "overlay_image_h": 0,
     });
-    let box_ = SavedImageBox::from_settings(&v);
+    let box_ = SavedImageBox::from_settings_at(&v, 1);
     assert_eq!(
         box_,
         SavedImageBox {
@@ -596,13 +596,13 @@ fn an_image_without_a_saved_box_keeps_its_corner_and_offsets() {
         "overlay_image_w": 3,
         "overlay_image_h": 3,
     });
-    let tiny_box = SavedImageBox::from_settings(&tiny);
+    let tiny_box = SavedImageBox::from_settings_at(&tiny, 1);
     assert_eq!((tiny_box.w, tiny_box.h), (0, 0));
     assert!(!tiny_box.is_saved());
 
     // A missing key is no box at all.
     assert_eq!(
-        SavedImageBox::from_settings(&serde_json::json!({})),
+        SavedImageBox::from_settings_at(&serde_json::json!({}), 1),
         SavedImageBox::default()
     );
 }

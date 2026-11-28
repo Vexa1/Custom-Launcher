@@ -586,25 +586,25 @@ pub struct SavedImageBox {
 }
 
 impl SavedImageBox {
-    /// Reads the four fields out of a settings object.
-    pub fn from_settings(v: &Value) -> Self {
+    /// Reads the four fields out of a settings object of a given file version.
+    ///
+    /// Version 1 stored a dragged position in the offset sliders, so a box without `x`/`y` is
+    /// read from them once. From version 2 the position is only ever in `x`/`y`, and a missing
+    /// one means `0` - the offsets are sliders again, in every case.
+    pub fn from_settings_at(v: &Value, version: u64) -> Self {
         Self::read(
             v,
             ("overlay_image_x", "overlay_image_y"),
             ("overlay_image_offset_x", "overlay_image_offset_y"),
             ("overlay_image_w", "overlay_image_h"),
+            version < 2,
         )
     }
 
     /// Reads the same box out of `overlay-panels-<id>.json`'s `image` object, which uses the
     /// short keys.
     pub fn from_panels_image(v: &Value) -> Self {
-        Self::read(
-            v,
-            ("x", "y"),
-            ("offset_x", "offset_y"),
-            ("w", "h"),
-        )
+        Self::read(v, ("x", "y"), ("offset_x", "offset_y"), ("w", "h"), true)
     }
 
     fn read(
@@ -612,6 +612,7 @@ impl SavedImageBox {
         pos: (&str, &str),
         legacy: (&str, &str),
         dims: (&str, &str),
+        legacy_offsets: bool,
     ) -> Self {
         let dim = |key: &str| {
             v[key]
@@ -622,13 +623,15 @@ impl SavedImageBox {
         };
         let (w, h) = (dim(dims.0), dim(dims.1));
         let has_box = w > 0 && h > 0;
-        // The box's own position, or - for a file written by 0.5.51, which had no position
-        // fields - the offsets it stored the dragged position in. Without a box the offsets
-        // are the corner sliders' values and are not the picture's position.
+        // The box's own position, or - for a version 1 file, which had no position fields -
+        // the offsets it stored the dragged position in. Without a box the offsets are the
+        // corner sliders' values and are not the picture's position.
         let axis = |pos: &str, legacy: &str| -> i16 {
-            let stored = v[pos]
-                .as_i64()
-                .or_else(|| has_box.then(|| v[legacy].as_i64()).flatten());
+            let stored = v[pos].as_i64().or_else(|| {
+                (legacy_offsets && has_box)
+                    .then(|| v[legacy].as_i64())
+                    .flatten()
+            });
             stored.unwrap_or(0).clamp(0, 8000) as i16
         };
         Self {

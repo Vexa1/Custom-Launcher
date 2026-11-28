@@ -9,6 +9,20 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
+/// The `settings.json` layout this build writes.
+///
+/// 1 was every file written before the `schema` field existed; it kept a dragged picture's
+/// position in the offset sliders. 2 is this layout: the position has its own fields and the
+/// offsets are sliders again. A future migration reads this number instead of guessing from a
+/// missing key.
+pub const SETTINGS_VERSION: u64 = 2;
+
+/// The version of a settings object. A file without the field - or with a nonsense one - is
+/// version 1, which is what every file written before the field existed really is.
+pub fn settings_version(v: &Value) -> u64 {
+    v["schema"].as_u64().filter(|n| *n > 0).unwrap_or(1)
+}
+
 fn read_opt_rgb(v: &Value, key: &str) -> Option<[u8; 3]> {
     let arr = v[key].as_array()?;
     if arr.len() != 3 {
@@ -46,8 +60,9 @@ pub fn load_settings_from(dir: &Path) -> Settings {
         return Settings::default();
     };
     let def = Settings::default();
-    // The custom image's saved box, read (and migrated) in one place.
-    let saved_image = SavedImageBox::from_settings(&v);
+    // The custom image's saved box. A version 1 file keeps a dragged position in the offsets;
+    // from version 2 the position is only in `x`/`y`, so the offsets stay sliders.
+    let saved_image = SavedImageBox::from_settings_at(&v, settings_version(&v));
     let bg_mode = match v["bg_mode"].as_str() {
         Some("color") => BgMode::SolidColor,
         Some("wallpaper") => BgMode::Wallpaper,
@@ -357,6 +372,7 @@ pub fn save_settings_to(dir: &Path, s: &Settings) {
         TextColorMode::Dark => "dark",
     };
     let mut v = serde_json::json!({
+        "schema": SETTINGS_VERSION,
         "dark": s.dark,
         "bg_mode": mode_str,
         "bg_color": [s.bg_color[0], s.bg_color[1], s.bg_color[2]],
