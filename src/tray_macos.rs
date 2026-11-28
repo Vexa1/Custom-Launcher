@@ -1010,6 +1010,16 @@ pub fn quit_now() -> ! {
     std::process::exit(0)
 }
 
+/// Wakes egui without restoring or focusing the window.
+///
+/// For a background callback (toolkit-level event, memory pressure) that changed state a
+/// frame has to pick up. Unlike [`wake_launcher`] it leaves a tucked-away window alone.
+pub fn request_repaint_now() {
+    if let Some(ctx) = REPAINT_CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
 /// Brings the launcher back from the tray callback, without waiting for a frame.
 ///
 /// Drops the tucked-in flag first (the Dock watcher and the reopen handler read it), then

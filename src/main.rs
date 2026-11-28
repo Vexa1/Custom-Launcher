@@ -31,6 +31,9 @@ mod party_server;
 mod platform;
 mod playtime;
 mod profile_cache;
+mod memory_pressure;
+#[cfg(target_os = "macos")]
+mod memory_pressure_macos;
 mod ram_budget;
 mod refresh_policy;
 mod release_links;

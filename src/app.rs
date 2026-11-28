@@ -166,6 +166,8 @@ pub struct Creblox {
     /// The next `Msg::Sorts` may re-rank the chart rows. Set by an explicit refresh or a first
     /// load; a background sync only takes fresh numbers, so nothing jumps under the pointer.
     pub sorts_rerank_on_merge: bool,
+    /// When and at which level macOS pressure last caused a flush, for the debounce.
+    pub last_pressure_action: Option<(Instant, crate::memory_pressure::Level)>,
     pub just_launched: Vec<(u64, Instant)>,
     pub pending_favs: HashMap<u64, (bool, Instant)>,
     pub was_focused: bool,
@@ -525,6 +527,7 @@ impl Creblox {
             charts_freshness: crate::live_refresh::Freshness::default(),
             game_freshness: crate::live_refresh::Freshness::default(),
             sorts_rerank_on_merge: false,
+            last_pressure_action: None,
             just_launched: Vec::new(),
             pending_favs: HashMap::new(),
             was_focused: true,
@@ -686,6 +689,9 @@ impl Creblox {
         // the overlay cleanup directly instead of waiting for a frame.
         #[cfg(target_os = "macos")]
         crate::tray::set_quit_cleanup(|| crate::game_overlay::quit_overlays());
+        // macOS tells us when the system is short of memory; the source only posts a level.
+        #[cfg(target_os = "macos")]
+        crate::memory_pressure_macos::start();
         #[cfg(target_os = "macos")]
         crate::tray::start_instance_listener(app.tx.clone(), app.ctx.clone());
         // A Dock click while no window is on screen is an app activation, and eframe stops
@@ -1030,6 +1036,40 @@ impl Creblox {
                 apply_small_patch_without_restart(&release, &downloaded, &total, &ctx),
             )
         });
+    }
+
+    /// Acts on the level macOS last reported, through the same flush a tray tuck uses.
+    ///
+    /// The dispatch source only records the level: textures may not change inside that
+    /// callback, so the work happens here, on a frame, and at most once per level per debounce
+    /// window (`memory_pressure::action`). A hidden launcher asks for nothing - the tray tuck
+    /// already dropped everything it could.
+    pub fn react_to_memory_pressure(&mut self) {
+        #[cfg(target_os = "macos")]
+        let level = crate::memory_pressure_macos::take_level();
+        #[cfg(not(target_os = "macos"))]
+        let level = crate::memory_pressure::Level::None;
+        if level == crate::memory_pressure::Level::None {
+            return;
+        }
+        let now = Instant::now();
+        let action = crate::memory_pressure::action(
+            level,
+            self.last_pressure_action,
+            crate::window_lifecycle::hidden_to_tray(),
+            now,
+        );
+        if action == crate::memory_pressure::Action::None {
+            return;
+        }
+        self.last_pressure_action = Some((now, level));
+        self.flush_image_caches();
+        if action == crate::memory_pressure::Action::DeepFlush {
+            // Hand the freed pages back and re-check the budget on the spot.
+            let _ = crate::telemetry::trim_process_memory();
+            self.enforce_image_ram_budget();
+            self.status = "Freed memory after macOS reported pressure.".to_string();
+        }
     }
 
     pub fn sync_auth_session(&mut self, force: bool) {
@@ -2349,6 +2389,7 @@ impl Creblox {
     }
 
     pub fn poll(&mut self) -> bool {
+        self.react_to_memory_pressure();
         self.flush_avatar_equip();
         let mut had_messages = false;
         while let Ok(msg) = self.rx.try_recv() {
