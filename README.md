@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.65
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.66
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -269,9 +269,9 @@ the whole app at once.
 
 | Token | Where | Value |
 |---|---|---|
-| Spacing rhythm | `theme.rs:923` | `SPACE_1..SPACE_6` = 4 / 8 / 12 / 16 / 24 px |
-| Radii | `theme.rs:930`, `theme.rs:933` | controls `6 px`, cards `8 px`, modals `10 px` - `apply_theme` derives the widget and window radii from one `corner_radius` token, so a custom roundness setting still wins |
-| Type scale | `theme.rs:935` | page header `20 px` semibold, section `14 px` semibold, body `13 px`, metadata `11 px`; `font_tabular` (`theme.rs:999`) is monospaced for every number |
+| Spacing rhythm | `theme.rs` | `SPACE_1..SPACE_8` = 4 / 8 / 12 / 16 / 24 / 32 px |
+| Radii | `theme.rs` | controls `8 px`, cards and modals `12 px`, pills fully rounded (`RADIUS_PILL`) - `apply_theme` derives the widget and window radii from one `corner_radius` token, so a custom roundness setting still wins |
+| Type scale | `theme.rs` | title `28 px` semibold, page header `20 px` semibold, section `14 px` semibold, body `13 px`, helper `12 px`, metadata `11 px`; `font_tabular` is monospaced for every number |
 | Roles | `theme.rs:945`, `theme.rs:961` | `Tokens { hairline, hairline_strong, text, muted, accent }`, resolved per frame from the live palette (custom backgrounds and glass still apply) |
 | Components | `theme.rs:1003`–`theme.rs:1050` | `page_header`, `section_header`, `paint_status_dot`, `value_pill` |
 
@@ -279,10 +279,11 @@ the whole app at once.
 
 | Surface | Dark (Precision Obsidian) | Light (Crisp Studio Alabaster) |
 |---|---|---|
-| Canvas | `#0B0D11` | `#F6F7F9` |
-| Chrome | `#0E1015` | `#EFEFF2` |
-| Card / surface | `#13161E` | `#FFFFFF` |
-| Hover / active control | `#191D27` | `#EAECEF` |
+| Canvas | `#0B0C10` | `#F6F7F9` |
+| Chrome | `#0E1015` | `#ECEEF2` |
+| Card / surface | `#12141A` | `#FFFFFF` |
+| Raised / hover | `#171A22` | `#EAECEF` |
+| Selected / active control | `#1E222C` | `#E2E5EA` |
 | Hairline (resting) | `rgba(255,255,255,0.06)` | `rgba(0,0,0,0.07)` |
 | Hairline (hover/focus) | `rgba(255,255,255,0.13)` | `rgba(0,0,0,0.15)` |
 
@@ -298,7 +299,7 @@ the focused-input ring. No glows, no gradients, no bracket decorations, no emoji
 | Stats row (`widgets.rs:141`) | proportional digits, `•` bullets | monospaced digits, 11 px muted labels via `font_meta` |
 | Friends strip (`widgets.rs:576`) | 96 px avatars in 108 px cells | 48 px avatars in 72 px cells, 5 px semantic dot with a canvas ring, 1 px ring that never thickens |
 | Section headers (`widgets.rs:212`) | 19 px bold, ad-hoc spacing | 14 px semibold through `section_header`, 24 px above / 8 px below |
-| Buttons and pills | mixed radii (14, 16, 20) | one control radius (`6 px`) and one outlined `value_pill` |
+| Buttons and pills | mixed radii (14, 16, 20) | one `8 px` control radius, fully rounded `value_pill`, `toggle_switch` and `segmented` controls - both painter-drawn, keyboard focusable and motion-aware |
 
 The `+ Add URL` action, Home headers and the friends strip are converted; the remaining
 pages inherit the new palette, typography, radii and control metrics automatically because

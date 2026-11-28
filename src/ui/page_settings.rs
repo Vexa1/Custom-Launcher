@@ -146,7 +146,7 @@ impl Creblox {
     pub fn page_settings(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
         let p = pal(ui);
         ui.add_space(12.0);
-        ui.label(RichText::new("Settings").size(26.0).strong());
+        crate::theme::page_header(ui, "Settings");
         ui.add_space(10.0);
 
         let mut section = (self.settings_section as usize).min(SETTINGS_SECTIONS.len() - 1);
@@ -666,7 +666,7 @@ impl Creblox {
         if self.settings_section as usize != section {
             self.settings_section = section as u8;
         }
-        ui.add_space(20.0);
+        ui.add_space(crate::theme::SPACE_8);
     }
 
     fn settings_discord_card(&mut self, ui: &mut egui::Ui) {
@@ -703,12 +703,12 @@ impl Creblox {
             });
             ui.add_space(8.0);
 
-            if ui
-                .checkbox(
-                    &mut self.settings.discord_rpc_enabled,
-                    "Show active Roblox game and launcher status on Discord",
-                )
-                .changed()
+            if toggle_switch(
+                ui,
+                &mut self.settings.discord_rpc_enabled,
+                "Show active Roblox game and launcher status on Discord",
+            )
+            .changed()
             {
                 changed = true;
             }
@@ -975,32 +975,33 @@ impl Creblox {
             );
             ui.add_space(6.0);
             let master = self.settings.animations_enabled;
-            changed |= ui
-                .checkbox(&mut self.settings.animations_enabled, "All animations")
-                .on_hover_text(
-                    "Master switch: off means no fades, no slides and no moving UI at all.",
-                )
-                .changed();
+            changed |= toggle_switch(
+                ui,
+                &mut self.settings.animations_enabled,
+                "All animations",
+            )
+            .on_hover_text("Master switch: off means no fades, no slides and no moving UI at all.")
+            .changed();
             ui.add_enabled_ui(master, |ui| {
                 ui.indent("anim_details", |ui| {
-                    changed |= ui
-                        .checkbox(
-                            &mut self.settings.hover_animations,
-                            "Hover fades, rings and the sliding nav bar",
-                        )
-                        .changed();
-                    changed |= ui
-                        .checkbox(
-                            &mut self.settings.animated_backgrounds,
-                            "Animated backgrounds (login backdrop, appearance previews)",
-                        )
-                        .changed();
-                    changed |= ui
-                        .checkbox(
-                            &mut self.settings.video_previews,
-                            "Game preview videos on hover (uses extra RAM, CPU and data)",
-                        )
-                        .changed();
+                    changed |= toggle_switch(
+                        ui,
+                        &mut self.settings.hover_animations,
+                        "Hover fades, rings and the sliding nav bar",
+                    )
+                    .changed();
+                    changed |= toggle_switch(
+                        ui,
+                        &mut self.settings.animated_backgrounds,
+                        "Animated backgrounds (login backdrop, appearance previews)",
+                    )
+                    .changed();
+                    changed |= toggle_switch(
+                        ui,
+                        &mut self.settings.video_previews,
+                        "Game preview videos on hover (uses extra RAM, CPU and data)",
+                    )
+                    .changed();
                 });
             });
             ui.add_space(4.0);
@@ -1100,28 +1101,26 @@ impl Creblox {
 
             let corner_labels = ["Top left", "Top right", "Bottom left", "Bottom right"];
 
-            changed |= ui
-                .checkbox(
-                    &mut self.settings.party_overlay,
-                    "Party overlay (member tiles with in-server / loading / disconnected outlines)",
-                )
-                .changed();
+            changed |= toggle_switch(
+                ui,
+                &mut self.settings.party_overlay,
+                "Party overlay (member tiles with in-server / loading / disconnected outlines)",
+            )
+            .changed();
             ui.add_enabled_ui(self.settings.party_overlay, |ui| {
                 ui.indent("party_overlay_options", |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Position:");
-                        let cur = self.settings.party_overlay_corner.min(3) as usize;
-                        egui::ComboBox::from_id_salt("party_overlay_corner")
-                            .selected_text(corner_labels[cur])
-                            .show_ui(ui, |ui| {
-                                for (i, label) in corner_labels.iter().enumerate() {
-                                    if ui.selectable_label(cur == i, *label).clicked() {
-                                        self.settings.party_overlay_corner = i as u8;
-                                        changed = true;
-                                    }
-                                }
-                            });
-                    });
+                    ui.label("Position");
+                    ui.add_space(2.0);
+                    let mut corner = self.settings.party_overlay_corner.min(3) as usize;
+                    if segmented(
+                        ui,
+                        "party_overlay_corner",
+                        &corner_labels,
+                        &mut corner,
+                    ) {
+                        self.settings.party_overlay_corner = corner as u8;
+                        changed = true;
+                    }
                 });
             });
             small_text(

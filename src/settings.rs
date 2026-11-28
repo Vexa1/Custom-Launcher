@@ -166,7 +166,7 @@ impl Default for Settings {
             glass_edition: false,
             glass_opacity: 0.56,
             glass_highlight: 0.72,
-            corner_roundness: 14,
+            corner_roundness: 12,
             discord_rpc_enabled: true,
             discord_rpc_show_idle: true,
             discord_rpc_app_id: String::new(),

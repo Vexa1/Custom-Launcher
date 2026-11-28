@@ -214,7 +214,7 @@ pub fn small_text(ui: &mut egui::Ui, text: impl AsRef<str>) {
     ui.add(
         egui::Label::new(
             RichText::new(text.as_ref())
-                .font(crate::theme::font_meta())
+                .font(crate::theme::font_small())
                 .color(crate::theme::tokens(ui).muted),
         )
         .truncate(),
@@ -909,6 +909,154 @@ fn hex_points(center: egui::Pos2, radius: f32) -> Vec<egui::Pos2> {
         ));
     }
     pts
+}
+
+/// A switch: 40x22 track with an 18 px knob and its label on the left.
+///
+/// The knob interpolates over 160 ms while motion is enabled and snaps when it is not. egui
+/// stops requesting repaints as soon as the animation settles, so an idle switch costs
+/// nothing; the whole control is one allocation and two shapes.
+pub fn toggle_switch(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let p = pal(ui);
+    let accent = accent_color(ui);
+    let row_w = ui.available_width();
+    let galley = ui.painter().layout(
+        label.to_owned(),
+        egui::FontId::proportional(crate::theme::TEXT_BODY),
+        p.text,
+        (row_w - 52.0).max(120.0),
+    );
+    let height = galley.size().y.max(24.0);
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(row_w, height), Sense::click());
+    if response.clicked()
+        || (response.has_focus()
+            && ui.input(|i| {
+                i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)
+            }))
+    {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let t = if crate::theme::motion_enabled(ui.ctx()) {
+            ui.ctx()
+                .animate_bool_with_time(response.id.with("knob"), *on, 0.16)
+        } else if *on {
+            1.0
+        } else {
+            0.0
+        };
+        let track = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 40.0, rect.center().y - 11.0),
+            egui::vec2(40.0, 22.0),
+        );
+        let rest = if response.hovered() {
+            lerp_color(p.widget_inactive, p.widget_hovered, 0.6)
+        } else {
+            p.widget_inactive
+        };
+        ui.painter().rect_filled(
+            track,
+            CornerRadius::same(crate::theme::RADIUS_PILL),
+            lerp_color(rest, accent, t),
+        );
+        let knob_x = egui::lerp((track.left() + 11.0)..=(track.right() - 11.0), t);
+        ui.painter()
+            .circle_filled(egui::pos2(knob_x, track.center().y), 8.0, Color32::WHITE);
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                CornerRadius::same(crate::theme::RADIUS_CONTROL),
+                egui::Stroke::new(1.5, accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ui.painter().galley(
+            egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5),
+            galley,
+            p.text,
+        );
+    }
+    response
+}
+
+/// An equal-width segmented control over `options`. Returns true when the selection changed.
+///
+/// One track, one accent fill on the active segment and a focus ring for Tab navigation; no
+/// animation, so switching a mode costs a single frame.
+pub fn segmented(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    options: &[&str],
+    selected: &mut usize,
+) -> bool {
+    if options.is_empty() {
+        return false;
+    }
+    let p = pal(ui);
+    let accent = accent_color(ui);
+    let mut width = ui.available_width();
+    if !width.is_finite() || width < 160.0 {
+        width = 320.0;
+    }
+    let height = 28.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let pill = CornerRadius::same(crate::theme::RADIUS_PILL);
+    ui.painter().rect_filled(rect, pill, p.surface_bg);
+    ui.painter().rect_stroke(
+        rect,
+        pill,
+        egui::Stroke::new(1.0, p.border),
+        egui::StrokeKind::Inside,
+    );
+    let seg_w = width / options.len() as f32;
+    let mut changed = false;
+    for (i, option) in options.iter().enumerate() {
+        let seg = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + seg_w * i as f32, rect.top()),
+            egui::vec2(seg_w, height),
+        )
+        .shrink(2.0);
+        let response = ui.interact(seg, ui.make_persistent_id((id_salt, i)), Sense::click());
+        let active = *selected == i;
+        let fill = if active {
+            accent
+        } else if response.hovered() {
+            p.hover_bg
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(seg, pill, fill);
+        let color = if active {
+            crate::theme::ON_ACCENT
+        } else {
+            p.text
+        };
+        let galley = ui.painter().layout_no_wrap(
+            (*option).to_owned(),
+            egui::FontId::proportional(crate::theme::TEXT_BODY),
+            color,
+        );
+        ui.painter()
+            .galley(seg.center() - galley.size() * 0.5, galley, color);
+        if response.clicked() && !active {
+            *selected = i;
+            changed = true;
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                seg,
+                pill,
+                egui::Stroke::new(1.5, accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    changed
 }
 
 /// The real Robux mark: a solid gold hexagon, a white inset gap, a gold inner plate and a

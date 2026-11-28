@@ -294,8 +294,7 @@ impl Creblox {
                         let pulse = (t * 2.8).sin() * 0.5 + 0.5;
                         ui.label(
                             RichText::new(if logged_in { "Add account" } else { "Sign in" })
-                                .size(26.0)
-                                .strong(),
+                                .font(crate::theme::font_title()),
                         );
                         ui.add_space(6.0);
                         let subtitle = if logged_in {

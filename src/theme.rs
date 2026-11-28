@@ -77,14 +77,15 @@ fn harmonize_auto_border(bg_rgb: [u8; 3], dark: bool) -> Color32 {
 impl Palette {
     pub fn of(dark: bool) -> Self {
         if dark {
-            // Precision Obsidian: canvas #0B0D11, surface #13161E, hover #191D27,
-            // hairline rgba(255,255,255,0.06).
-            let border = Color32::from_rgba_unmultiplied(255, 255, 255, 15);
-            let card_bg = Color32::from_rgb(0x13, 0x16, 0x1E);
+            // Precision Obsidian: canvas #0B0C10, then three elevations -
+            // #12141A (card), #171A22 (raised/hover), #1E222C (selected) - and a
+            // 7% hairline.
+            let border = Color32::from_rgba_unmultiplied(255, 255, 255, 18);
+            let card_bg = Color32::from_rgb(0x12, 0x14, 0x1A);
             Self {
-                bg: Color32::from_rgb(0x0B, 0x0D, 0x11),
+                bg: Color32::from_rgb(0x0B, 0x0C, 0x10),
                 card_bg,
-                surface_bg: Color32::from_rgb(0x19, 0x1D, 0x27),
+                surface_bg: Color32::from_rgb(0x17, 0x1A, 0x22),
                 border,
                 profile_border: border,
                 profile_card_bg: card_bg,
@@ -92,27 +93,28 @@ impl Palette {
                 friends_card_bg: card_bg,
                 games_border: border,
                 text_border: Color32::from_rgba_unmultiplied(255, 255, 255, 33),
-                text: Color32::from_rgb(0xF1, 0xF3, 0xF6),
-                muted: Color32::from_rgb(0x8E, 0x93, 0x9E),
-                placeholder: Color32::from_rgb(0x10, 0x13, 0x1A),
-                selected_bg: Color32::from_rgb(0x1E, 0x22, 0x30),
-                hover_bg: Color32::from_rgb(0x19, 0x1D, 0x27),
+                // Brighter than the old #8E939E so helper text reads at a glance.
+                text: Color32::from_rgb(0xF2, 0xF4, 0xF8),
+                muted: Color32::from_rgb(0xA0, 0xA6, 0xB2),
+                placeholder: Color32::from_rgb(0x0E, 0x10, 0x15),
+                selected_bg: Color32::from_rgb(0x1E, 0x22, 0x2C),
+                hover_bg: Color32::from_rgb(0x17, 0x1A, 0x22),
                 extreme_bg: Color32::from_rgb(0x0E, 0x10, 0x15),
-                widget_inactive: Color32::from_rgb(0x19, 0x1D, 0x27),
-                widget_hovered: Color32::from_rgb(0x23, 0x28, 0x38),
+                widget_inactive: Color32::from_rgb(0x17, 0x1A, 0x22),
+                widget_hovered: Color32::from_rgb(0x1E, 0x22, 0x2C),
                 glass_edition: false,
                 glass_highlight: 0.0,
-                corner_radius: 8,
+                corner_radius: 12,
             }
         } else {
-            // Crisp Studio Alabaster: canvas #F6F7F9, surface #FFFFFF, hover #EAECEF,
-            // hairline rgba(0,0,0,0.07).
+            // Crisp Studio Alabaster: canvas #F6F7F9, card #FFFFFF, raised #F1F2F5,
+            // hover #EAECEF, 7% hairline.
             let border = Color32::from_rgba_unmultiplied(0, 0, 0, 18);
             let card_bg = Color32::WHITE;
             Self {
                 bg: Color32::from_rgb(0xF6, 0xF7, 0xF9),
                 card_bg,
-                surface_bg: Color32::from_rgb(0xEA, 0xEC, 0xEF),
+                surface_bg: Color32::from_rgb(0xF1, 0xF2, 0xF5),
                 border,
                 profile_border: border,
                 profile_card_bg: card_bg,
@@ -121,17 +123,17 @@ impl Palette {
                 games_border: border,
                 text_border: Color32::from_rgba_unmultiplied(0, 0, 0, 38),
                 text: Color32::from_rgb(0x17, 0x19, 0x1D),
-                // 5.3:1 on the light surface, so secondary text reads there too.
-                muted: Color32::from_rgb(0x5A, 0x61, 0x6D),
+                // 6.9:1 on the card, so secondary text reads there too.
+                muted: Color32::from_rgb(0x56, 0x5E, 0x6B),
                 placeholder: Color32::from_rgb(0xEE, 0xF0, 0xF3),
-                selected_bg: Color32::from_rgb(0xE3, 0xE6, 0xEA),
+                selected_bg: Color32::from_rgb(0xE2, 0xE5, 0xEA),
                 hover_bg: Color32::from_rgb(0xEA, 0xEC, 0xEF),
-                extreme_bg: Color32::from_rgb(0xEF, 0xF0, 0xF2),
-                widget_inactive: Color32::from_rgb(0xEF, 0xF0, 0xF2),
-                widget_hovered: Color32::from_rgb(0xE3, 0xE6, 0xEA),
+                extreme_bg: Color32::from_rgb(0xEC, 0xEF, 0xF3),
+                widget_inactive: Color32::from_rgb(0xF1, 0xF2, 0xF5),
+                widget_hovered: Color32::from_rgb(0xEA, 0xEC, 0xEF),
                 glass_edition: false,
                 glass_highlight: 0.0,
-                corner_radius: 8,
+                corner_radius: 12,
             }
         }
     }
@@ -426,7 +428,7 @@ pub fn pal(ui: &egui::Ui) -> Palette {
     palette
 }
 
-pub const GREEN: Color32 = Color32::from_rgb(0, 176, 111);
+pub const GREEN: Color32 = Color32::from_rgb(0x00, 0xB0, 0x6B);
 /// Ink for text on a filled accent (the green Join buttons). White on `GREEN` is 2.5:1,
 /// which is not readable; this is 7.3:1 on the same fill.
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x1A, 0x12);
@@ -942,9 +944,11 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
         };
     }
 
+    // Controls sit one step below cards: 12 px cards give 8 px buttons, and the scale never
+    // exceeds the modal radius however round the user makes the corners.
     let r8 = CornerRadius::same(
         p.corner_radius
-            .saturating_sub(2)
+            .saturating_sub(4)
             .clamp(RADIUS_CONTROL, RADIUS_MODAL),
     );
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border);
@@ -1026,21 +1030,29 @@ pub fn motion_enabled(ctx: &egui::Context) -> bool {
 // accent and three semantic status colours. Pages ask for a *role* (card, control, modal),
 // never a number, so a single change here moves every view together.
 
-/// Spacing rhythm. Everything is a multiple of 4 px; 16 and 24 separate sections.
+/// Spacing rhythm. Everything is a multiple of 4 px; 16, 24 and 32 separate sections.
 pub const SPACE_1: f32 = 4.0;
 pub const SPACE_2: f32 = 8.0;
 pub const SPACE_3: f32 = 12.0;
 pub const SPACE_4: f32 = 16.0;
 pub const SPACE_6: f32 = 24.0;
+pub const SPACE_8: f32 = 32.0;
 
-/// Buttons, inputs and pills.
-pub const RADIUS_CONTROL: u8 = 6;
-/// Cards, thumbnails and panels.
-/// Modals and floating surfaces.
-pub const RADIUS_MODAL: u8 = 10;
+/// Buttons, inputs and dropdowns.
+pub const RADIUS_CONTROL: u8 = 8;
+/// Cards, panels and dialogs.
+pub const RADIUS_CARD: u8 = 12;
+/// Floating surfaces (windows, modals).
+pub const RADIUS_MODAL: u8 = 12;
+/// Fully rounded controls: pills, chips, toggle tracks and segmented controls. egui takes a
+/// `u8`, so 255 is the pill radius - visually identical to the 999 px in the design spec.
+pub const RADIUS_PILL: u8 = 255;
 
+pub const TEXT_TITLE: f32 = 28.0;
 pub const TEXT_PAGE: f32 = 20.0;
 pub const TEXT_SECTION: f32 = 14.0;
+pub const TEXT_BODY: f32 = 13.0;
+pub const TEXT_SMALL: f32 = 12.0;
 pub const TEXT_META: f32 = 11.0;
 
 /// Resolved roles for the current theme. A view of [`Palette`] in design-system terms.
@@ -1089,12 +1101,25 @@ pub fn font_page() -> egui::FontId {
     )
 }
 
+/// Page or dialog title: 28 px semibold.
+pub fn font_title() -> egui::FontId {
+    egui::FontId::new(
+        TEXT_TITLE,
+        egui::FontFamily::Name("Bold".into()),
+    )
+}
+
 /// Section title: 14 px semibold.
 pub fn font_section() -> egui::FontId {
     egui::FontId::new(
         TEXT_SECTION,
         egui::FontFamily::Name("Bold".into()),
     )
+}
+
+/// Helper text: 12 px, one step above metadata so descriptions stay effortless to read.
+pub fn font_small() -> egui::FontId {
+    egui::FontId::proportional(TEXT_SMALL)
 }
 
 /// Metadata and micro-labels: 11 px.
@@ -1147,7 +1172,7 @@ pub fn value_pill(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response
                 1.0,
                 if active { t.hairline_strong } else { t.hairline },
             ))
-            .corner_radius(RADIUS_CONTROL)
+            .corner_radius(RADIUS_PILL)
             .min_size(egui::vec2(0.0, 22.0)),
     )
 }
@@ -1156,7 +1181,7 @@ pub fn card_frame_colored(margin: i8, fill: Color32, border: Color32) -> egui::F
     egui::Frame::new()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, border))
-        .corner_radius(12)
+        .corner_radius(RADIUS_CARD)
         .inner_margin(margin)
 }
 
