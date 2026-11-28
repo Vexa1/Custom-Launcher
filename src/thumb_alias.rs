@@ -23,6 +23,23 @@ pub fn record(aliases: &mut Aliases, fresh: &str, old: &str) {
     }
 }
 
+/// Records the replacements between two gallery media lists, index by index, and returns how
+/// many were recorded.
+///
+/// A revalidated Game Details page usually answers with the same pictures; when one URL does
+/// change, the hero that is showing that index keeps painting the version it already has until
+/// the new image is decoded, instead of falling back to a placeholder.
+pub fn record_media(aliases: &mut Aliases, fresh: &[String], old: &[String]) -> usize {
+    let mut recorded = 0;
+    for (fresh, previous) in fresh.iter().zip(old.iter()) {
+        if !fresh.is_empty() && fresh != previous {
+            record(aliases, fresh, previous);
+            recorded += 1;
+        }
+    }
+    recorded
+}
+
 /// The texture to paint for `url`: its own if it has been uploaded, otherwise the newest one
 /// along its replacement chain. `None` only when nothing in the chain was ever uploaded.
 pub fn find<'a, T>(

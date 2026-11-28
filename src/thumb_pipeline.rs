@@ -44,6 +44,10 @@ pub const WIDE_TARGET: [u32; 2] = [256, 144];
 /// The size an icon is decoded to; icon chips are drawn at 16-40 px.
 pub const ICON_TARGET: [u32; 2] = [64, 64];
 
+/// The pixel budget of a Game Details gallery picture. The hero is at most ~580 px wide, so
+/// this covers a 2x display; the picture keeps its own aspect inside these bounds.
+pub const GALLERY_TARGET: [u32; 2] = [960, 540];
+
 /// A two-lane LIFO queue of thumbnail ids.
 ///
 /// `visible` is what the user is looking at; `lookahead` is the band just outside the

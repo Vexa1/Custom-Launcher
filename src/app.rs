@@ -1974,9 +1974,7 @@ impl Creblox {
         // 3. Publish the textures the cards may paint, and the URLs they must not hand back
         // to egui's loader (which would download the same image again).
         if std::mem::take(&mut self.thumb_tex_dirty) {
-            let published =
-                crate::thumb_alias::published(&self.thumb_tex, &self.thumb_aliases);
-            widgets::publish_thumb_textures(&self.ctx, std::sync::Arc::new(published));
+            self.republish_thumbs_now();
         }
         if std::mem::take(&mut self.thumb_owned_dirty) {
             widgets::publish_thumb_owned(&self.ctx, std::sync::Arc::new(self.thumb_owned.clone()));
@@ -2011,6 +2009,44 @@ impl Creblox {
             std::sync::Arc::new(self.thumb_owned.clone()),
         );
         self.spawn(move || Msg::ThumbPixels(crate::api::download_thumbnails(jobs)));
+    }
+
+    /// Hands the open game's gallery pictures to the same texture pool the cards use.
+    ///
+    /// Without this the hero would be loaded by egui's own image loader, which has no idea
+    /// what the previous image was - so a revalidation that swapped a URL would paint a
+    /// placeholder. Owning the textures is what lets [`crate::thumb_alias`] keep the old
+    /// handle on screen until the replacement has been decoded and uploaded.
+    fn request_gallery_thumbs(&mut self, media: &[String]) {
+        let mut urls: Vec<String> = Vec::new();
+        for url in media {
+            if !url.is_empty() && self.thumb_owned.insert(url.clone()) {
+                urls.push(url.clone());
+            }
+        }
+        if urls.is_empty() {
+            return;
+        }
+        for url in &urls {
+            self.thumb_downloading.insert(url.clone());
+        }
+        self.thumb_owned_dirty = true;
+        // Published before the frame draws: the hero must not fall back to egui's loader,
+        // which would download the same picture a second time.
+        crate::ui::widgets::publish_thumb_owned(
+            &self.ctx,
+            std::sync::Arc::new(self.thumb_owned.clone()),
+        );
+        self.spawn(move || Msg::ThumbPixels(crate::api::download_gallery_images(urls)));
+    }
+
+    /// Republishes the texture map straight away instead of waiting for the frame's upload
+    /// pump, so a URL that just gained a replacement alias paints its old image on this very
+    /// frame rather than showing a placeholder for one.
+    fn republish_thumbs_now(&mut self) {
+        let published = crate::thumb_alias::published(&self.thumb_tex, &self.thumb_aliases);
+        crate::ui::widgets::publish_thumb_textures(&self.ctx, std::sync::Arc::new(published));
+        self.thumb_tex_dirty = false;
     }
 
     /// Drops every decoded and uploaded thumbnail. Nothing here is on disk, so this is the
@@ -2244,10 +2280,29 @@ impl Creblox {
                             self.game_extra_cache.remove(&oldest);
                         }
                     }
-                    if let Page::Game(cur) = &self.page {
-                        if cur.universe_id == uid {
-                            self.game_extra = Some(*ex);
-                        }
+                    // A revalidation usually answers with the same gallery; when a URL does
+                    // change, the hero keeps painting the picture it already shows until the
+                    // replacement is decoded and uploaded.
+                    let replaced =
+                        if let Some(shown) = self.game_extra.as_ref().filter(|e| e.universe_id == uid)
+                        {
+                            crate::thumb_alias::record_media(
+                                &mut self.thumb_aliases,
+                                &ex.media,
+                                &shown.media,
+                            )
+                        } else {
+                            0
+                        };
+                    if replaced > 0 {
+                        // Published now, so this frame paints the old hero, not a placeholder.
+                        self.republish_thumbs_now();
+                    }
+                    if matches!(&self.page, Page::Game(cur) if cur.universe_id == uid) {
+                        // The gallery goes through the same texture pool as the cards, which
+                        // is what makes the swap above possible at all.
+                        self.request_gallery_thumbs(&ex.media);
+                        self.game_extra = Some(*ex);
                     }
                 }
                 Msg::GameVideoIdResolved(uid, vid_opt) => {
@@ -2511,6 +2566,7 @@ impl Creblox {
                     if !logged_in {
                         continue;
                     }
+                    let mut replaced = false;
                     for (uid, url) in wide {
                         if let Some(old) = self.wide.get(&uid).cloned() {
                             if old != url {
@@ -2518,7 +2574,7 @@ impl Creblox {
                                 // The card keeps the old texture until the new URL's own is
                                 // uploaded, then swaps in one frame.
                                 crate::thumb_alias::record(&mut self.thumb_aliases, &url, &old);
-                                self.thumb_tex_dirty = true;
+                                replaced = true;
                             }
                         }
                         self.wide.insert(uid, url);
@@ -2528,10 +2584,15 @@ impl Creblox {
                             if old != url {
                                 self.ctx.forget_image(&old);
                                 crate::thumb_alias::record(&mut self.thumb_aliases, &url, &old);
-                                self.thumb_tex_dirty = true;
+                                replaced = true;
                             }
                         }
                         self.icon.insert(uid, url);
+                    }
+                    if replaced {
+                        // Before the frame draws, so the card paints its old image rather
+                        // than a placeholder for one frame.
+                        self.republish_thumbs_now();
                     }
                     self.enqueue_thumb_downloads();
                     self.thumb_in_flight = false;
@@ -4174,6 +4235,9 @@ impl Creblox {
             .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(120));
         if let Some((ex, _)) = &cached {
             self.game_video_ids.insert(uid, ex.preview_video_id.clone());
+            // Painting the cached gallery from our own textures means a later revalidation
+            // can swap its pictures without going through egui's placeholder.
+            self.request_gallery_thumbs(&ex.media);
             self.game_extra = Some(ex.clone());
         }
         self.page = Page::Game(g);

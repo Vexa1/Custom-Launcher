@@ -384,3 +384,41 @@ fn a_silent_charts_refresh_updates_numbers_without_reordering_the_grid() {
     assert_eq!(pool[2].playing, 110, "the numbers did follow the refresh");
     assert_eq!(pool[2].players_text, "110 playing");
 }
+
+/// A revalidated Game Details gallery keeps the hero picture it is already showing.
+#[test]
+fn a_revalidated_gallery_keeps_the_hero_it_is_showing() {
+    let old = vec![
+        "https://cdn.example/hero-a-v1.png".to_string(),
+        "https://cdn.example/hero-b.png".to_string(),
+        "https://cdn.example/hero-c-v1.png".to_string(),
+    ];
+    let fresh = vec![
+        "https://cdn.example/hero-a-v2.png".to_string(),
+        "https://cdn.example/hero-b.png".to_string(),
+        "https://cdn.example/hero-c-v2.png".to_string(),
+    ];
+    // The hero textures the launcher already uploaded for the gallery on screen.
+    let mut textures: HashMap<String, u64> = HashMap::from([
+        (old[0].clone(), 301),
+        (old[1].clone(), 302),
+        (old[2].clone(), 303),
+    ]);
+    let mut aliases = Aliases::new();
+
+    assert_eq!(thumb_alias::record_media(&mut aliases, &fresh, &old), 2);
+    let published = thumb_alias::published(&textures, &aliases);
+
+    // The picture being shown keeps painting what was there: no placeholder frame.
+    assert_eq!(published.get(&fresh[0]), Some(&301));
+    assert_eq!(published.get(&fresh[2]), Some(&303));
+    // An unchanged URL is its own texture, not a replacement.
+    assert!(!aliases.contains_key(&fresh[1]));
+    assert_eq!(thumb_alias::find(&textures, &aliases, &fresh[1]), Some(&302));
+
+    // The replacement arrives: one-frame swap, and the old picture is still addressable.
+    textures.insert(fresh[0].clone(), 401);
+    let published = thumb_alias::published(&textures, &aliases);
+    assert_eq!(published.get(&fresh[0]), Some(&401));
+    assert_eq!(published.get(&old[0]), Some(&301));
+}

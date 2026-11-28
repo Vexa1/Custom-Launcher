@@ -1826,6 +1826,23 @@ pub fn fetch_thumbs(ids: Vec<u64>) -> Msg {
 /// to the card's exact pixel size here, so the UI thread only ever uploads ready RGBA - it
 /// never decodes, and nothing is written to disk.
 pub fn download_thumbnails(items: Vec<(String, [u32; 2])>) -> Vec<(String, egui::ColorImage)> {
+    decode_images(items, true)
+}
+
+/// Downloads Game Details gallery pictures, scaled to the hero's pixel budget.
+///
+/// Unlike a card thumbnail these are not cropped to a fixed aspect: a gallery picture keeps
+/// its own shape, exactly as egui's image loader used to paint it, so the hero does not start
+/// framing images differently.
+pub fn download_gallery_images(urls: Vec<String>) -> Vec<(String, egui::ColorImage)> {
+    let target = crate::thumb_pipeline::GALLERY_TARGET;
+    decode_images(urls.into_iter().map(|url| (url, target)).collect(), false)
+}
+
+fn decode_images(
+    items: Vec<(String, [u32; 2])>,
+    crop: bool,
+) -> Vec<(String, egui::ColorImage)> {
     use std::io::Read;
 
     let download = |url: &str, target: [u32; 2]| -> Option<egui::ColorImage> {
@@ -1839,15 +1856,22 @@ pub fn download_thumbnails(items: Vec<(String, [u32; 2])>) -> Vec<(String, egui:
             .read_to_end(&mut bytes)
             .ok()?;
         let image = image::load_from_memory(&bytes).ok()?;
-        // Crop to the card's aspect and downscale once, on the worker: the texture the UI
-        // uploads is exactly the size it is drawn at, never the download size.
-        let rgba = image
-            .resize_to_fill(
+        // Downscale once, on the worker: the texture the UI uploads is never bigger than the
+        // size it is drawn at. A card thumbnail fills its tile; a gallery picture is fitted.
+        let image = if crop {
+            image.resize_to_fill(
                 target[0].max(1),
                 target[1].max(1),
                 image::imageops::FilterType::Triangle,
             )
-            .to_rgba8();
+        } else {
+            image.resize(
+                target[0].max(1),
+                target[1].max(1),
+                image::imageops::FilterType::Triangle,
+            )
+        };
+        let rgba = image.to_rgba8();
         Some(egui::ColorImage::from_rgba_unmultiplied(
             [rgba.width() as usize, rgba.height() as usize],
             rgba.as_flat_samples().as_slice(),

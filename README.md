@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.35
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.36
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -615,7 +615,10 @@ src/
                      records the replacement (`new -> old`), and `published` aliases the new URL
                      to the old URL's already-uploaded `TextureHandle` until the new image is
                      decoded and uploaded, at which point the same lookup returns it on one
-                     frame. A card is never set back to "no image" in between.
+                     frame. A card is never set back to "no image" in between. Game Details
+                     gallery pictures go through the same texture pool (`record_media`, with
+                     aspect-preserving `download_gallery_images`), so a revalidated hero keeps
+                     the picture it is showing instead of flashing a placeholder.
   friend_names.rs    What a friend's bubble says. `friends.roblox.com` now often answers
                      `/friends` with ids only, so the loader batch-resolves every id through
                      `POST users.roblox.com/v1/users` (100 per request), remembers
