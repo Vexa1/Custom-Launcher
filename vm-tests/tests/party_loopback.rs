@@ -863,7 +863,7 @@ fn peer_state_changes_become_grey_green_and_red_tiles() {
 
     let mut host = Client::new("host");
     let mut guest = Client::new("guest");
-    let mut third = Client::new("third");
+    let third = Client::new("third");
 
     host.handle.create(user(100_001, "Ada"), 8, None);
     let ready = host.snapshot(25, "the invite code", |s| !s.invite.is_empty());
@@ -948,6 +948,69 @@ fn peer_state_changes_become_grey_green_and_red_tiles() {
         now + GRACE + Duration::from_secs(3),
     );
     assert!(later.iter().all(|t| t.id != 100_003));
+
+    guest.handle.leave();
+    host.handle.leave();
+}
+
+/// A guest whose process dies sends no `Leave` frame - its socket simply ends. The host must
+/// drop that member on the tick it notices, not on the next keepalive, or every other guest
+/// keeps drawing someone who is already gone (and their HUD never turns the tile red).
+#[test]
+fn a_crashed_guest_is_dropped_from_the_roster_immediately() {
+    use creblox_vm_tests::party_hud::{TileStatus, Tracker};
+
+    let mut host = Client::new("host");
+    let mut guest = Client::new("guest");
+    let victim = Client::new("victim");
+
+    host.handle.create(user(100_001, "Ada"), 8, None);
+    let ready = host.snapshot(25, "the invite code", |s| !s.invite.is_empty());
+    let invite = party::parse_invite(&ready.invite).expect("the host's invite does not parse");
+
+    guest.handle.join(invite, user(100_002, "Grace"), None);
+    guest.snapshot(20, "the guest's roster", |s| {
+        s.connected && s.members.len() == 2
+    });
+    victim.handle.join(invite, user(100_003, "Theo"), None);
+    let three = guest.snapshot(20, "the three-member roster", |s| s.members.len() == 3);
+
+    let place = 920_587_237u64;
+    let job = "job-crash";
+    let mut tracker = Tracker::new();
+    let before = Instant::now();
+    let tiles = tracker.update(Some(&three), place, job, before);
+    assert!(tiles.iter().any(|t| t.id == 100_003));
+
+    // The crash: dropping the handle shuts the worker down without sending `Leave`, so the
+    // host sees a socket that ended mid-party - exactly what a killed process looks like.
+    let killed_at = Instant::now();
+    drop(victim);
+    let without = guest.snapshot(
+        10,
+        "the roster without the crashed guest",
+        |s| s.members.len() == 2,
+    );
+    let took = killed_at.elapsed();
+    println!("host dropped the crashed guest after {took:?}");
+    assert!(
+        without.members.iter().all(|m| m.user.id != 100_003),
+        "the crashed guest is still on the roster"
+    );
+    // Far below the 5 s keepalive: a closed socket is noticed by the read on the next 25 ms
+    // tick, not by waiting for a ping to fail.
+    assert!(
+        took < Duration::from_secs(2),
+        "the host took {took:?} to drop a crashed peer"
+    );
+
+    // And the guest's strip turns that member red on that same snapshot.
+    let tiles = tracker.update(Some(&without), place, job, killed_at);
+    let theo = tiles
+        .iter()
+        .find(|t| t.id == 100_003)
+        .expect("the dropped member's tile is still shown");
+    assert_eq!(theo.status, TileStatus::Disconnected);
 
     guest.handle.leave();
     host.handle.leave();

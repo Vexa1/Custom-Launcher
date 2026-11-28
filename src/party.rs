@@ -42,7 +42,12 @@ use crate::types::Msg;
 pub const MAX_PARTY_SIZE: usize = 8;
 
 /// Keepalive to every peer. Also how a vanished host is noticed while connected.
-const HEARTBEAT: Duration = Duration::from_secs(15);
+///
+/// A socket that closes is dropped on the very tick it notices, but a peer that disappears
+/// without closing its socket (wifi drop, sleep, killed network) is only found by a keepalive
+/// write that fails - so this also bounds how long a peer can sit stale. Five seconds is a
+/// handful of tiny frames a minute to the few people in a party.
+const HEARTBEAT: Duration = Duration::from_secs(5);
 /// Worker wake-up while a party is open. Small enough that a click feels instant, large
 /// enough that an idle party is free.
 const TICK: Duration = Duration::from_millis(25);
@@ -1191,8 +1196,14 @@ fn host_tick(host: &mut Host, local: Option<&Local>, out: &Out) {
 
     if host.last_heartbeat.elapsed() >= HEARTBEAT {
         host.last_heartbeat = Instant::now();
+        let before = host.peers.len();
         host.peers
             .retain_mut(|peer| !peer.dead && write(&mut peer.ws, &WireOut::Ping));
+        // A keepalive that failed just removed a peer: everyone else's roster (and their party
+        // HUD, where that member turns red) has to hear about it on this tick.
+        if host.peers.len() != before {
+            host.announce = true;
+        }
     }
 }
 
@@ -1309,6 +1320,7 @@ fn drain_handshakes(host: &mut Host, out: &Out) {
 
 fn read_peers(host: &mut Host, out: &Out) {
     let mut inbox: Vec<(usize, PeerFrame)> = Vec::new();
+    let mut announce = false;
     for (index, peer) in host.peers.iter_mut().enumerate() {
         loop {
             match peer.ws.read() {
@@ -1319,12 +1331,17 @@ fn read_peers(host: &mut Host, out: &Out) {
                 }
                 Ok(Message::Close(_)) => {
                     peer.dead = true;
+                    announce = true;
                     break;
                 }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) if is_idle(&e) => break,
                 Err(_) => {
+                    // A crash: the socket ended without a `Leave` frame. The roster below must
+                    // be rebroadcast now, or every other guest keeps drawing the member who
+                    // is already gone (and their HUD never turns the tile red).
                     peer.dead = true;
+                    announce = true;
                     break;
                 }
             }
@@ -1455,6 +1472,9 @@ fn read_peers(host: &mut Host, out: &Out) {
     }
 
     host.peers.retain(|peer| !peer.dead);
+    if announce {
+        host.announce = true;
+    }
 }
 
 fn kick(host: &mut Host, user_id: u64, out: &Out) {
