@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.64
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.65
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -249,7 +249,7 @@ dock: reopen requested while the app had no visible window
 | Hidden vs. invisible | `[NSApp hide:]` keeps windows *ordered in*, so `isVisible` stays true and "no visible window" alone can no longer detect the hidden state | The watcher also checks `[NSApp isHidden]` (`app_is_hidden`), so both the Dock click and the post-game restore fire in either state |
 | Server panel | `Server: …` / `ROBLOX STATS` sat on `Server info unavailable` and `Ping --` for the whole session: the parser never matched a line | `ip_from_network_lines` matched only `UDMUX Address` / `Connection accepted from` / `Connected to`. It now matches **`serverId:`**, the line a normal join writes, plus `raknet`; it scans the whole 512 KB chunk instead of the last 600 lines (a long session pushes the connect line far back); it skips loopback/private/link-local candidates so a local UDMUX relay can never be GeoIP'd into `Unknown location`; and `placeId:` / `PlaceId:` is parsed when the `! Joining game … place N` banner is missing |
 
-## Catalina FFI invariants (read before adding any AppKit/libdispatch call)
+### Catalina FFI invariants (read before adding any AppKit/libdispatch call)
 
 These are build-breaking rules, not style preferences. `cargo check` cannot catch the first
 one, which is why 0.4.25 shipped and 0.4.26 fixed it.
@@ -261,7 +261,7 @@ one, which is why 0.4.25 shipped and 0.4.26 fixed it.
 | Every framework symbol must come from a framework actually linked | CoreGraphics, CoreFoundation and `objc` are declared with `#[link(name = ...)]`; anything from AppKit is reached through `objc_msgSend` with a runtime selector, so no 11.0+ symbol can leak in |
 | Verify with `cargo build --release --target x86_64-apple-darwin`, not `cargo check` | Only the release build runs `cc`/`ld`; a check-only workflow cannot see a missing symbol. Enforced: `scripts/package-release.sh` calls `scripts/verify-release-link.sh`, which runs that exact build and exits non-zero, so no archive is ever written from a check-only tree |
 
-## The CREBLOX design system (0.4.26)
+### The CREBLOX design system (0.4.26)
 
 One token module drives every view. Pages ask for a role - card, control, modal, section,
 metadata - and never hard-code a radius, a size or a border colour, so a change here moves
@@ -275,7 +275,7 @@ the whole app at once.
 | Roles | `theme.rs:945`, `theme.rs:961` | `Tokens { hairline, hairline_strong, text, muted, accent }`, resolved per frame from the live palette (custom backgrounds and glass still apply) |
 | Components | `theme.rs:1003`–`theme.rs:1050` | `page_header`, `section_header`, `paint_status_dot`, `value_pill` |
 
-### Palettes
+#### Palettes
 
 | Surface | Dark (Precision Obsidian) | Light (Crisp Studio Alabaster) |
 |---|---|---|
@@ -290,7 +290,7 @@ Semantic colour is reserved for 5 px status dots only (`EMERALD` in game, `AMBER
 `CORAL` warning) - never for borders, text or chrome. One accent drives primary actions and
 the focused-input ring. No glows, no gradients, no bracket decorations, no emoji icons.
 
-### What changed in the shared components
+#### What changed in the shared components
 
 | Component | Before | Now |
 |---|---|---|
@@ -804,6 +804,22 @@ only drains `MenuEvent` / `TrayIconEvent` and pushes to the channel; it never to
 `try_focus_existing_instance`, then asks the running copy over a Unix socket
 (`notify_running_instance_show` → `start_instance_listener`, `tray_macos.rs:774`) to show its
 window, instead of starting a duplicate that would fight over the status item.
+
+### Installing from the release page
+
+Both assets on a release are **source archives**, not signed installers. Pick one:
+
+| Archive | Use it when | What you do |
+|---|---|---|
+| **`CREBLOX-<version>-full.zip`** | You have never installed CREBLOX, or you want a clean source tree (new machine, or you deleted the old folder). | Unzip it, double-click **`Build CREBLOX.command`**, and it builds the app and installs `CREBLOX.app`. |
+| **`CREBLOX-<version>-update.zip`** | You already have a CREBLOX source folder and want the new version. It carries only the changed files. | Unzip it, double-click **`Update CREBLOX.command`**, and it copies the files into the folder it remembers, rebuilds, and replaces the installed app. `settings.json`, saved accounts, playtime and FastFlags are kept. |
+
+The update archive is listed first in the notes because the in-app updater downloads the first zip link it finds. Each archive's byte size and SHA-256 are printed next to its link; check a download with
+`shasum -a 256 CREBLOX-<version>-update.zip` before running it.
+
+Requirements are the same for both: **macOS 10.15.7 or newer**, the Xcode Command Line Tools
+(`xcode-select --install`) and Rust 1.85+ (`curl https://sh.rustup.rs -sSf | sh`). Nothing else
+is installed, and the build needs no network beyond the crate downloads.
 
 ### Updating an existing install (manual)
 

@@ -1059,11 +1059,15 @@ impl Creblox {
                         ui.label("Visible for:");
                         let mut secs = self.settings.overlay_duration_secs as i32;
                         let resp = ui.add(
-                            egui::Slider::new(&mut secs, 0..=60)
-                                .suffix(" s")
-                                .custom_formatter(|v, _| {
-                                    if v < 0.5 { "until game closes".to_string() } else { format!("{v:.0} s") }
-                                }),
+                            // The formatter already carries the unit; a suffix here would
+                            // paint "10 s s".
+                            egui::Slider::new(&mut secs, 0..=60).custom_formatter(|v, _| {
+                                if v < 0.5 {
+                                    "until game closes".to_string()
+                                } else {
+                                    format!("{v:.0} s")
+                                }
+                            }),
                         );
                         if resp.changed() {
                             self.settings.overlay_duration_secs = secs.clamp(0, 255) as u8;
