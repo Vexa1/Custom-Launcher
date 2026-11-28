@@ -621,6 +621,46 @@ pub fn drag_image(
     }
 }
 
+/// One pointer drag on the custom image, resolved once at press.
+///
+/// The overlay window and the pointer simulation both keep this, so "which part did I grab"
+/// and "how far did the pointer move this frame" cannot drift apart. The grab is held even
+/// when the pointer leaves the grip, and each motion reports only its own delta - applying the
+/// total drag on every frame would make the box accelerate away from the cursor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageDrag {
+    part: Option<ImagePart>,
+    last: Option<(f32, f32)>,
+}
+
+impl ImageDrag {
+    /// Grabs the image at `pos` inside `rect`; false means the press missed it.
+    pub fn press(&mut self, rect: (f32, f32, f32, f32), pos: (f32, f32)) -> bool {
+        self.part = image_part(rect, pos);
+        self.last = self.part.map(|_| pos);
+        self.part.is_some()
+    }
+
+    /// The pointer moved to `pos`: the delta since the previous frame, once. `None` when no
+    /// drag is held, so a motion without a press never moves anything.
+    pub fn motion(&mut self, pos: (f32, f32)) -> Option<(f32, f32)> {
+        self.part?;
+        let last = self.last.replace(pos)?;
+        Some((pos.0 - last.0, pos.1 - last.1))
+    }
+
+    /// What the held drag grabbed, if anything.
+    pub fn part(&self) -> Option<ImagePart> {
+        self.part
+    }
+
+    /// Ends the drag; the next press decides a new part.
+    pub fn release(&mut self) {
+        self.part = None;
+        self.last = None;
+    }
+}
+
 /// The custom image's saved box as it appears in `settings.json`.
 ///
 /// Both sides of the file go through this type: the loader reads it (including the 0.5.51 file

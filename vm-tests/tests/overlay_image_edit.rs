@@ -1,30 +1,33 @@
 //! The overlay position editor's custom picture, driven by real pointer events.
 //!
 //! `src/overlay_window.rs` needs a window, AppKit/Win32 and the egui texture loader, so it
-//! cannot be linked here. The parts that choose *what* a press grabbed (`image_part`) and
-//! *how* a drag changes the box (`drag_image`) live in the real `src/overlay_spec.rs`; this
-//! test feeds `Event::PointerButton` / `Event::PointerMoved` through an `egui::Context` that
-//! runs the same press -> drag -> release sequence, then checks the box and the JSON the
-//! editor leaves for the launcher.
+//! cannot be linked here. The parts that choose *what* a press grabbed and *how far* each frame
+//! moved live in the real `src/overlay_spec.rs` (`ImageDrag`, `image_part`, `drag_image`); this
+//! test feeds `Event::PointerButton` / `Event::PointerMoved` through an `egui::Context` that runs
+//! the same press -> drag -> release sequence, then checks the box and the JSON the editor leaves
+//! for the launcher.
 
 use creblox_vm_tests::egui::{
     self, Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2,
 };
 use creblox_vm_tests::overlay_spec::{
-    ImageBox, ImagePart, SavedImageBox, drag_image, image_part,
+    ImageBox, ImageDrag, ImagePart, SavedImageBox, drag_image, image_part,
 };
 
 const VIEW: (f32, f32) = (1280.0, 720.0);
 
-/// What the overlay window keeps between frames: the live box and the part the drag grabbed.
+/// What the overlay window keeps between frames: the live box and the held picture drag.
 struct Editor {
     box_: ImageBox,
-    drag: Option<ImagePart>,
+    drag: ImageDrag,
 }
 
 impl Editor {
     fn new(box_: ImageBox) -> Self {
-        Self { box_: box_, drag: None }
+        Self {
+            box_,
+            drag: ImageDrag::default(),
+        }
     }
 
     /// One frame of the editor's image hitbox, with the same rule the shipping window uses.
@@ -45,28 +48,22 @@ impl Editor {
                 ui.scope_id().with("overlay-image"),
                 egui::Sense::click_and_drag(),
             );
-            let part_at = |p: Pos2| {
-                image_part(
-                    (rect.left(), rect.top(), rect.width(), rect.height()),
-                    (p.x, p.y),
-                )
-            };
+            let bounds = (rect.left(), rect.top(), rect.width(), rect.height());
+            let pointer = ui.input(|i| i.pointer.interact_pos());
             if response.drag_started() {
-                // The press position decides, exactly like the window: a corner hit at press
-                // keeps the drag even after the pointer leaves the grip.
-                this.drag = ui
-                    .input(|i| i.pointer.press_origin())
-                    .and_then(part_at)
-                    .or_else(|| ui.input(|i| i.pointer.interact_pos()).and_then(part_at));
-            }
-            if response.dragged() {
-                if let Some(part) = this.drag {
-                    let delta = response.drag_delta();
-                    this.box_ = drag_image(this.box_, part, delta.x, delta.y, VIEW, false);
+                if let Some(origin) = ui.input(|i| i.pointer.press_origin()).or(pointer) {
+                    this.drag.press(bounds, (origin.x, origin.y));
                 }
             }
-            if !response.dragged() {
-                this.drag = None;
+            if response.dragged() {
+                if let Some((dx, dy)) = pointer.and_then(|p| this.drag.motion((p.x, p.y))) {
+                    if let Some(part) = this.drag.part() {
+                        this.box_ = drag_image(this.box_, part, dx, dy, VIEW, false);
+                    }
+                }
+            }
+            if response.drag_stopped() {
+                this.drag.release();
             }
         });
         // The harness draws nothing, so the glyph atlas deltas are never uploaded; drop them
@@ -98,7 +95,7 @@ fn start() -> ImageBox {
 }
 
 #[test]
-fn dragging_the_body_moves_the_picture_by_the_pointer_delta() {
+fn dragging_the_body_moves_the_picture_by_each_pointer_delta_once() {
     let mut ctx = egui::Context::default();
     ctx.set_pixels_per_point(1.0);
     let rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(300.0, 200.0));
@@ -106,10 +103,20 @@ fn dragging_the_body_moves_the_picture_by_the_pointer_delta() {
 
     editor.frame(&mut ctx, rect, vec![moved(220.0, 210.0)]);
     editor.frame(&mut ctx, rect, vec![button(220.0, 210.0, true)]);
+    // Two moves of +20/+15: each frame applies its own delta, never the running total.
+    editor.frame(&mut ctx, rect, vec![moved(240.0, 225.0)]);
+    assert_eq!(
+        editor.box_,
+        ImageBox {
+            x: 120,
+            y: 115,
+            w: 300,
+            h: 200
+        }
+    );
     editor.frame(&mut ctx, rect, vec![moved(260.0, 240.0)]);
     editor.frame(&mut ctx, rect, vec![button(260.0, 240.0, false)]);
 
-    // The body press resolves to Body, so only the position changes.
     assert_eq!(
         editor.box_,
         ImageBox {
@@ -143,6 +150,24 @@ fn dragging_the_bottom_right_handle_resizes_without_moving_the_origin() {
             h: 220
         }
     );
+}
+
+#[test]
+fn the_drag_keeps_its_grab_and_reports_only_new_motion() {
+    let bounds = (100.0, 100.0, 300.0, 200.0);
+    let mut drag = ImageDrag::default();
+    // No press, no motion.
+    assert_eq!(drag.motion((200.0, 200.0)), None);
+    assert!(!drag.press(bounds, (10.0, 10.0)), "a miss must not grab");
+    assert_eq!(drag.part(), None);
+    assert!(drag.press(bounds, (400.0, 300.0)));
+    assert_eq!(drag.part(), Some(ImagePart::Corner(3)));
+    assert_eq!(drag.motion((410.0, 305.0)), Some((10.0, 5.0)));
+    // Leaving the grip does not drop the corner or replay the total.
+    assert_eq!(drag.motion((430.0, 315.0)), Some((20.0, 10.0)));
+    drag.release();
+    assert_eq!(drag.part(), None);
+    assert_eq!(drag.motion((500.0, 400.0)), None);
 }
 
 #[test]

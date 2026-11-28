@@ -1,3 +1,4 @@
+pub mod controls;
 pub mod menu;
 pub mod notifications;
 pub mod page_add_friend;

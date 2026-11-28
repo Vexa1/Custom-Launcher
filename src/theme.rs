@@ -412,6 +412,16 @@ thread_local! {
 }
 
 #[inline]
+/// Drops the per-thread palette cache, so `pal()` re-derives from `ui.visuals().dark_mode`.
+///
+/// Production calls this from `apply_theme`; the headless previews call it after switching the
+/// egui theme, otherwise a light render would keep painting the dark palette cached by the
+/// previous render on the same thread.
+pub fn reset_palette_cache() {
+    PALETTE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
 pub fn pal(ui: &egui::Ui) -> Palette {
     let generation = PALETTE_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
     if let Some(cached) = PALETTE_CACHE.with(|c| match c.get() {
@@ -890,7 +900,7 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     let p = Palette::from_settings(settings);
     let text_color = p.text;
     ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(THEME_PALETTE_KEY), p));
-    PALETTE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    reset_palette_cache();
     let mut v = if dark {
         egui::Visuals::dark()
     } else {

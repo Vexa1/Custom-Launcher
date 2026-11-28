@@ -320,6 +320,27 @@ impl Harness {
         ppp: f32,
         page: impl Fn(&mut egui::Ui, &mut Probe),
     ) -> (Shot, Probe) {
+        // The palette the *real* widgets read comes from `ui.visuals().dark_mode`, so a light
+        // render has to set the egui theme too - otherwise the fixture paints a white page while
+        // the shipping controls still draw their dark-theme colours on top of it.
+        let light = crate::screens::light();
+        self.ctx.all_styles_mut(|style| {
+            style.visuals = if light {
+                egui::Visuals::light()
+            } else {
+                egui::Visuals::dark()
+            };
+            style.visuals.panel_fill = crate::screens::BG();
+            style.visuals.window_fill = crate::screens::CARD();
+            style.visuals.override_text_color = Some(crate::screens::TEXT());
+            // `accent_color` reads the selection stroke, which `apply_theme` normally sets.
+            style.visuals.selection.stroke.color = if light {
+                crate::theme::BLUE
+            } else {
+                crate::theme::GREEN
+            };
+        });
+        crate::theme::reset_palette_cache();
         let mut input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
             ..Default::default()

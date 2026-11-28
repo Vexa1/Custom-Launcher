@@ -920,9 +920,8 @@ struct OverlayWindowApp {
     /// `0..=3` a corner, `4` the whole picture, `None` nothing.
     image_rect: Option<Rect>,
     image_grip: Option<u8>,
-    /// The part the current drag grabbed, decided once at press so a corner keeps the drag
-    /// even after the pointer leaves its grip.
-    image_drag: Option<overlay_spec::ImagePart>,
+    /// The current picture drag, resolved once at press and shared with the pointer test.
+    image_drag: overlay_spec::ImageDrag,
     /// The image's box and the game area it was fitted into, in points from that area's
     /// top-left - the coordinates the editor and settings.json use.
     image_box: Option<crate::overlay_spec::ImageBox>,
@@ -980,7 +979,7 @@ impl OverlayWindowApp {
             live_rects: Vec::new(),
             image_rect: None,
             image_grip: None,
-            image_drag: None,
+            image_drag: overlay_spec::ImageDrag::default(),
             image_box: None,
             image_view: (0.0, 0.0),
             hovering: None,
@@ -1998,13 +1997,16 @@ impl OverlayWindowApp {
                     (p.x, p.y),
                 )
             };
-            let hovered_part = ui.input(|i| i.pointer.interact_pos()).and_then(part_at);
+            let pointer = ui.input(|i| i.pointer.interact_pos());
+            let hovered_part = pointer.and_then(part_at);
             if response.drag_started() {
-                // Resolve against the press origin, not the pointer after the first move.
-                self.image_drag = ui
-                    .input(|i| i.pointer.press_origin())
-                    .and_then(part_at)
-                    .or(hovered_part);
+                // The grab is resolved once, from the press position, and held until release.
+                if let Some(origin) = ui.input(|i| i.pointer.press_origin()).or(pointer) {
+                    self.image_drag.press(
+                        (hit.left(), hit.top(), hit.width(), hit.height()),
+                        (origin.x, origin.y),
+                    );
+                }
             }
             if response.hovered() || response.dragged() {
                 image_active = true;
@@ -2024,22 +2026,22 @@ impl OverlayWindowApp {
                     });
                 }
             }
-            if response.dragged()
-                && let Some(part) = self.image_drag
-            {
-                let hold_shift = ui.input(|i| i.modifiers.shift);
-                let delta = response.drag_delta();
-                let next =
-                    overlay_spec::drag_image(box_, part, delta.x, delta.y, view, hold_shift);
-                if let Some(img) = self.image.as_mut() {
-                    apply_image_box(img, next);
+            if response.dragged() {
+                if let Some((dx, dy)) = pointer.and_then(|p| self.image_drag.motion((p.x, p.y))) {
+                    if let Some(part) = self.image_drag.part() {
+                        let hold_shift = ui.input(|i| i.modifiers.shift);
+                        let next = overlay_spec::drag_image(box_, part, dx, dy, view, hold_shift);
+                        if let Some(img) = self.image.as_mut() {
+                            apply_image_box(img, next);
+                        }
+                        self.dragging = Some("image".to_string());
+                        self.spec_gen = self.spec_gen.wrapping_add(1);
+                        ui.ctx().request_repaint();
+                    }
                 }
-                self.dragging = Some("image".to_string());
-                self.spec_gen = self.spec_gen.wrapping_add(1);
-                ui.ctx().request_repaint();
             }
-            if !response.dragged() {
-                self.image_drag = None;
+            if response.drag_stopped() {
+                self.image_drag.release();
             }
         }
         if image_active {
@@ -2381,7 +2383,7 @@ impl OverlayWindowApp {
             }
         }
         self.image_grip = None;
-        self.image_drag = None;
+        self.image_drag.release();
         self.spec_gen = self.spec_gen.wrapping_add(1);
         self.write_result(confirmed);
         self.edit = false;

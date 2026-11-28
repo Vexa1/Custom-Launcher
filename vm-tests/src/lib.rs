@@ -59,6 +59,9 @@ pub mod inventory;
 #[path = "../../src/net_probe.rs"]
 pub mod net_probe;
 
+#[path = "../../src/ui/controls.rs"]
+pub mod controls;
+
 #[path = "../../src/overlay_spec.rs"]
 pub mod overlay_spec;
 

@@ -109,6 +109,7 @@ pub fn all() -> Vec<(&'static str, fn(&mut egui::Ui, &mut Probe))> {
         ("game", game_details),
         ("party", party),
         ("settings", settings),
+        ("settings-animations", settings_animations),
         ("updater", updater),
         ("overlay", overlay),
         ("inventory", inventory),
@@ -1219,6 +1220,89 @@ pub fn settings(ui: &mut egui::Ui, probe: &mut Probe) {
                     );
                 });
             });
+        });
+    });
+}
+
+/// The Settings page's Animations & Performance card with the master switch off.
+///
+/// Drawn with the shipping `controls` module rather than a fixture copy, and with motion off,
+/// so the screenshot is the real disabled switch, disabled sub-toggles and disabled segmented
+/// picker. The main Settings fixture is shorter than the page; this one shows the section the
+/// master switch governs.
+pub fn settings_animations(ui: &mut egui::Ui, probe: &mut Probe) {
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(egui::Id::NULL.with("creblox_motion_on"), false);
+    });
+    shell(ui, probe, "settings", |ui, probe| {
+        heading(ui, probe, "settings.title", "Settings", 22.0);
+        ui.add_space(10.0);
+        card_min(ui, probe, "settings.anim", 940.0, 0.0, |ui, probe| {
+            heading(
+                ui,
+                probe,
+                "settings.anim.title",
+                "Animations & Performance",
+                15.0,
+            );
+            ui.add_space(6.0);
+            let mut master = false;
+            probe.widget(
+                "settings.anim.master",
+                crate::controls::toggle_switch(ui, &mut master, "All animations").rect,
+                true,
+            );
+            ui.add_enabled_ui(master, |ui| {
+                ui.indent("anim_details", |ui| {
+                    for (id, label) in [
+                        (
+                            "settings.anim.hover",
+                            "Hover fades, rings and the sliding nav bar",
+                        ),
+                        (
+                            "settings.anim.backgrounds",
+                            "Animated backgrounds (login backdrop, appearance previews)",
+                        ),
+                        (
+                            "settings.anim.videos",
+                            "Game preview videos on hover (uses extra RAM, CPU and data)",
+                        ),
+                    ] {
+                        let mut on = true;
+                        probe.widget(
+                            id,
+                            crate::controls::toggle_switch(ui, &mut on, label).rect,
+                            true,
+                        );
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            meta(ui, probe, "settings.anim.position", "Party overlay position");
+            ui.add_space(2.0);
+            let mut corner = 0usize;
+            let before = ui.cursor();
+            let width = ui.available_width();
+            ui.add_enabled_ui(false, |ui| {
+                crate::controls::segmented(
+                    ui,
+                    "party_overlay_corner",
+                    &["Top left", "Top right", "Bottom left", "Bottom right"],
+                    &mut corner,
+                );
+            });
+            probe.widget(
+                "settings.anim.position.picker",
+                Rect::from_min_size(before.min, Vec2::new(width, 28.0)),
+                true,
+            );
+            ui.add_space(8.0);
+            meta(
+                ui,
+                probe,
+                "settings.anim.hint",
+                "Dimmed while All animations is off: these cannot be changed.",
+            );
         });
     });
 }

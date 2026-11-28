@@ -1,6 +1,6 @@
 # CREBLOX — custom Roblox launcher in pure Rust
 
-**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.67
+**Repository:** `Vexa1/Custom-Launcher` · **Version:** 0.5.68
 **Target platform:** macOS **10.15.7 (Catalina)** and newer, x86_64 Intel first-class (Apple Silicon via a universal build).
 **Windows** builds are supported from the same source tree.
 
@@ -561,6 +561,9 @@ src/
     widgets.rs          Shared widgets: game card, wide/icon grid + rows,
                         horizontal-wheel bridge, avatar bubble, thumbnails with
                         video badge, stat row, section headers, refresh control
+    controls.rs         `toggle_switch` and `segmented` (theme-only, so the
+                        Linux previews and tests render the shipping controls);
+                        disabled colours, arrow-key selection
     menu.rs             Left nav rail item (icon, hover/selected animation,
                         unread badge, silent marker)
     page_home.rs        Home feed
