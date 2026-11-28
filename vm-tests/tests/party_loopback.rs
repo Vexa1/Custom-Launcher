@@ -1000,7 +1000,7 @@ fn a_crashed_guest_is_dropped_from_the_roster_immediately() {
     // Far below the 5 s keepalive: a closed socket is noticed by the read on the next 25 ms
     // tick, not by waiting for a ping to fail.
     assert!(
-        took < Duration::from_secs(2),
+        took < Duration::from_millis(500),
         "the host took {took:?} to drop a crashed peer"
     );
 
@@ -1013,5 +1013,94 @@ fn a_crashed_guest_is_dropped_from_the_roster_immediately() {
     assert_eq!(theo.status, TileStatus::Disconnected);
 
     guest.handle.leave();
+    host.handle.leave();
+}
+
+/// A peer whose socket stays open but which stops answering - a laptop asleep, a wifi drop, a
+/// NAT mapping quietly dropped. The socket still accepts the host's keepalive writes, so the
+/// only evidence is silence, and the host has to prune on that.
+///
+/// The peer is a real CREBLOX handshake over a real socket that simply stops sending anything,
+/// which is what the party code sees when a member's machine vanishes without a `Leave`.
+#[test]
+fn a_peer_that_goes_silent_without_closing_is_pruned_and_turns_red() {
+    use std::net::TcpStream;
+
+    use creblox_vm_tests::party_hud::{TileStatus, Tracker};
+    use serde_json::json;
+    use tungstenite::Message;
+    use tungstenite::client::IntoClientRequest;
+    use tungstenite::http::header::{HeaderName, HeaderValue};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    let mut host = Client::new("host");
+    host.handle.create(user(100_001, "Ada"), 8, None);
+    let ready = host.snapshot(25, "the invite code", |s| !s.invite.is_empty());
+    let invite = party::parse_invite(&ready.invite).expect("the host's invite does not parse");
+
+    // The silent peer: the same handshake `party::open` performs, then nothing at all. The
+    // socket stays open for the whole test - dropping it would be the crash case instead.
+    let endpoint = invite.endpoint();
+    let mut request = format!("ws://{endpoint}")
+        .into_client_request()
+        .expect("build the upgrade request");
+    request.headers_mut().insert(
+        HeaderName::from_static("x-creblox-party"),
+        HeaderValue::from_static("1"),
+    );
+    request.headers_mut().insert(
+        HeaderName::from_static("x-creblox-token"),
+        HeaderValue::from_str(&hex(&invite.token)).expect("token header"),
+    );
+    let stream = TcpStream::connect(endpoint).expect("dial the host");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("read timeout");
+    let (mut ws, _response) = tungstenite::client(request, stream).expect("the host accepted us");
+    let join = json!({
+        "t": "join",
+        "user": { "id": 100_004, "name": "Silent", "display_name": "Silent", "headshot_url": "" }
+    });
+    ws.send(Message::Text(join.to_string().into()))
+        .expect("send the join frame");
+
+    let two = host.snapshot(20, "the silent peer joining", |s| s.members.len() == 2);
+    let mut tracker = Tracker::new();
+    let before = Instant::now();
+    let tiles = tracker.update(Some(&two), 0, "", before);
+    assert!(tiles.iter().any(|t| t.id == 100_004));
+
+    // From here the peer sends nothing: no ping, no status, and it never closes the socket.
+    let silent_at = Instant::now();
+    let alone = host.snapshot(
+        20,
+        "the roster without the silent peer",
+        |s| s.members.len() == 1,
+    );
+    let took = silent_at.elapsed();
+    println!("host pruned the silent peer after {took:?}");
+    assert!(
+        alone.members.iter().all(|m| m.user.id != 100_004),
+        "the silent peer is still on the roster"
+    );
+    // The 5 s silence window plus the tick that applies it, not a multiple of the window:
+    // the check runs every tick, so a peer cannot survive two windows.
+    assert!(
+        took < Duration::from_secs(7),
+        "the host took {took:?} to prune a silent peer"
+    );
+
+    let tiles = tracker.update(Some(&alone), 0, "", silent_at);
+    let gone = tiles
+        .iter()
+        .find(|t| t.id == 100_004)
+        .expect("the pruned member's tile is still shown");
+    assert_eq!(gone.status, TileStatus::Disconnected);
+
+    // Dropping the socket now is just cleanup; the host already let this peer go.
+    drop(ws);
     host.handle.leave();
 }

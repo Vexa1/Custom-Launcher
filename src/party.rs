@@ -53,6 +53,18 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 const TICK: Duration = Duration::from_millis(25);
 /// One socket read per peer per tick.
 const READ_TIMEOUT: Duration = Duration::from_millis(1);
+
+/// How long a peer may say nothing before the host treats it as gone.
+///
+/// A closed socket is caught by the read itself, but a peer that disappears without closing its
+/// socket (wifi drop, sleep, killed NAT mapping) leaves a socket that still accepts writes, so
+/// a keepalive can only prove the peer is alive if the peer keeps answering. Guests ping every
+/// [`GUEST_PING`], which is comfortably inside this window.
+const SILENT_PEER: Duration = Duration::from_secs(5);
+
+/// How often a guest pings its host. Doubles as the alive-signal the host's silence check
+/// needs, and as the fastest a dead host is noticed when a write fails.
+const GUEST_PING: Duration = Duration::from_secs(2);
 /// Dialling a host has to fail fast: a CGNAT host must fall back to presence, not hang.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 /// A peer that connects and then says nothing is dropped after this.
@@ -811,6 +823,9 @@ struct Local {
 struct Peer {
     user: PartyUser,
     ws: WebSocket<TcpStream>,
+    /// When this peer last sent anything. The host's only proof a peer is still there when the
+    /// socket itself never closes.
+    last_seen: Instant,
     status: PartyStatus,
     place_id: u64,
     job_id: String,
@@ -1187,6 +1202,14 @@ fn host_tick(host: &mut Host, local: Option<&Local>, out: &Out) {
     read_peers(host, out);
     resolve_mapping(host, out);
 
+    // A peer that stopped answering cannot be found by a write - its socket still accepts the
+    // keepalive - so silence is checked every tick. One `Instant` comparison per peer.
+    let before = host.peers.len();
+    host.peers.retain(|peer| peer.last_seen.elapsed() < SILENT_PEER);
+    if host.peers.len() != before {
+        host.announce = true;
+    }
+
     if host.announce || host.force_snapshot {
         host.announce = false;
         host.force_snapshot = false;
@@ -1307,6 +1330,7 @@ fn drain_handshakes(host: &mut Host, out: &Out) {
                     place_id: 0,
                     job_id: String::new(),
                     dead: false,
+                    last_seen: Instant::now(),
                 });
                 host.announce = true;
                 out.emit(PartyEvent::Notice("Someone joined the party".to_string()));
@@ -1325,6 +1349,7 @@ fn read_peers(host: &mut Host, out: &Out) {
         loop {
             match peer.ws.read() {
                 Ok(Message::Text(text)) => {
+                    peer.last_seen = Instant::now();
                     if let Ok(frame) = serde_json::from_str::<PeerFrame>(&text) {
                         inbox.push((index, frame));
                     }
@@ -1625,7 +1650,7 @@ fn guest_tick(guest: &mut Guest, local: Option<&Local>, out: &Out) {
     read_guest(guest, local, out);
     poll_presence(guest, local, out);
 
-    if guest.last_ping.elapsed() >= HEARTBEAT {
+    if guest.last_ping.elapsed() >= GUEST_PING {
         guest.last_ping = Instant::now();
         let lost = match guest.ws.as_mut() {
             Some(ws) => !write(ws, &WireOut::Ping),
